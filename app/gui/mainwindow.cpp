@@ -3982,6 +3982,37 @@ void MainWindow::toggleScope()
     scope();
 }
 
+// Graphics output, on/off. `on` comes from the action rather than being
+// inverted here, so the action's checked state stays the single source of
+// truth. See the note where graphicsOutAct is created.
+void MainWindow::showGraphicsOutput(bool on)
+{
+    piSettings->show_graphics = on;
+    showStatusAndAnnounce(on ? tr("Showing graphics output...")
+                             : tr("Hiding graphics output..."),
+                          2000);
+    emit settingsChanged();
+
+    // Phase 0 has no output window yet: the rendering side is still being
+    // verified on its own. Say so rather than failing silently, so the control
+    // can be checked end to end before the window exists.
+    std::cout << "[GUI] - Graphics output " << (on ? "shown" : "hidden")
+              << " (no output window yet)" << std::endl;
+}
+
+// Called when the output window's own visibility changes - notably when the
+// user closes it directly. ScopeWindow is a QDockWidget and gets this for free
+// from Qt; an independent top-level window does not, so the action has to be
+// re-synced here or its tick would disagree with reality.
+void MainWindow::graphicsVisibilityChanged()
+{
+    if (!graphicsOutAct)
+        return;
+
+    QSignalBlocker blocker(graphicsOutAct);
+    graphicsOutAct->setChecked(piSettings->show_graphics);
+}
+
 void MainWindow::scope()
 {
     scopeAct->setIcon(theme->getScopeIcon(piSettings->show_scopes));
@@ -5293,6 +5324,11 @@ const QList<ShortcutDef>& MainWindow::shortcutDefs()
     // an ambiguous shortcut that fired neither.
     { "TextZoomOut", QT_TR_NOOP("Decrease Text Size"), "Meta+-", "Ctrl+_", "Meta+-", "View", &MainWindow::textDecAct },
     { "Scope", QT_TR_NOOP("Toggle visibility of audio oscilloscope"), "Meta+O", "Meta+O", "Meta+O", "Visuals", &MainWindow::scopeAct },
+    // Meta+G / Meta+Shift+G are taken by Find Next / Find Previous, so the
+    // graphics shortcuts deliberately sit elsewhere. A shortcut is not optional
+    // here: fullscreen hides the menu bar, leaving no other way back out.
+    { "GraphicsOutput", QT_TR_NOOP("Show or hide the graphics output window"), "Ctrl+Shift+G", "Ctrl+Shift+G", "Ctrl+Shift+G", "Graphics", &MainWindow::graphicsOutAct },
+    { "GraphicsFullscreen", QT_TR_NOOP("Toggle fullscreen for the graphics output"), "Ctrl+Shift+F", "Ctrl+Shift+F", "Ctrl+Shift+F", "Graphics", &MainWindow::graphicsFullscreenAct },
     { "CycleThemes", QT_TR_NOOP("Cycle through the available colour themes"), "ShiftMeta+M", "ShiftMeta+M", "ShiftMeta+M", "Visuals", &MainWindow::cycleThemesAct },
     { "Info", QT_TR_NOOP("Toggle information about Sonic Pi"), "Meta+n", "Meta+1", "Meta+1", "View", &MainWindow::infoAct },
 #if defined(Q_OS_MAC)
@@ -6076,7 +6112,32 @@ void MainWindow::createToolBar()
     readCompletionDetailsAct = new QAction(tr("Read Completion Details"), this);
     connect(readCompletionDetailsAct, SIGNAL(triggered()), this, SLOT(readCompletionDetailsInCurrentWorkspace()));
 
+    // Graphics output. The rendering lives in app/gui/graphics/ and has no
+    // dependency on the GUI; this action is one of the ways to ask it to show
+    // its output.
+    //
+    // Modelled on scopeAct but with one deliberate difference: the slot takes
+    // the new state from the signal rather than flipping the setting itself.
+    // scopeAct's slot inverts piSettings->show_scopes, which leaves the action's
+    // checked state and the setting as two separate sources of truth that can
+    // drift apart.
+    graphicsOutAct = new QAction(tr("Show Graphics Output"), this);
+    graphicsOutAct->setCheckable(true);
+    graphicsOutAct->setChecked(piSettings->show_graphics);
+    connect(graphicsOutAct, &QAction::toggled, this, [this](bool on) { showGraphicsOutput(on); });
+
+    graphicsFullscreenAct = new QAction(tr("Graphics Fullscreen"), this);
+    graphicsFullscreenAct->setCheckable(true);
+    graphicsFullscreenAct->setChecked(false);
+    connect(graphicsFullscreenAct, &QAction::toggled, this, [this](bool on) {
+        // Wired up with the display window in Phase 1. Until then this records
+        // the request and says so, rather than silently doing nothing.
+        std::cout << "[GUI] - Graphics fullscreen requested: " << (on ? "on" : "off")
+                  << " (no output window yet)" << std::endl;
+    });
+
     toolBar->addAction(scopeAct);
+    toolBar->addAction(graphicsOutAct);
     toolBar->addAction(infoAct);
     toolBar->addAction(helpAct);
     toolBar->addAction(prefsAct);
@@ -6277,13 +6338,21 @@ void MainWindow::createToolBar()
         scopeKindVisibilityMenu->addAction(act);
     }
 
+    // Graphics output is its own top-level menu rather than another entry under
+    // Visuals. Visuals covers how this app's own interface looks - colour theme,
+    // icon set - and the audio oscilloscope, which is a monitoring tool. The
+    // graphics feature is performance output to a screen, which is a different
+    // concern, and it needs room to grow (display selection, external output).
+    graphicsMenu = menuBar()->addMenu(tr("Graphics"));
+    graphicsMenu->addAction(graphicsOutAct);
+    graphicsMenu->addAction(graphicsFullscreenAct);
+
     // The IO menu is grouped into labelled sections (addSection) so the
     // device controls, network controls and capture controls read as
     // distinct blocks. The MIDI/gamepad device submenus are populated
     // dynamically (see updateMIDI*Ports / updateGamepadDevices) with one
     // checkable entry per device, mirroring the IO preferences pane.
     ioMenu = menuBar()->addMenu(tr("IO"));
-
     // Keyboard input mode — a self-contained picker, kept at the top.
     shortcutMenu = ioMenu->addMenu(tr("Shortcut Mode"));
     shortcutMenu->addAction(macShortcutModeAct);
@@ -7348,6 +7417,9 @@ void MainWindow::readSettings()
     piSettings->auto_indent_on_run = gui_settings->value("prefs/auto-indent-on-run", true).toBool();
     piSettings->gui_transparency = gui_settings->value("prefs/gui_transparency", 0).toInt();
     piSettings->show_scopes = gui_settings->value("prefs/scope/show-scopes", true).toBool();
+    // Graphics output is off by default: it opens a window on a screen, so it
+    // should never appear unasked-for on first run.
+    piSettings->show_graphics = gui_settings->value("prefs/graphics/show-output", false).toBool();
     piSettings->show_scope_labels = gui_settings->value("prefs/scope/show-labels", false).toBool();
     piSettings->show_cues = gui_settings->value("prefs/show_cues", true).toBool();
     piSettings->show_metro = gui_settings->value("prefs/show_metro", true).toBool();
@@ -7456,6 +7528,7 @@ void MainWindow::writeSettings()
     gui_settings->setValue("prefs/gui_transparency", piSettings->gui_transparency);
     gui_settings->setValue("prefs/scope/show-labels", piSettings->show_scope_labels);
     gui_settings->setValue("prefs/scope/show-scopes", piSettings->show_scopes);
+    gui_settings->setValue("prefs/graphics/show-output", piSettings->show_graphics);
     gui_settings->setValue("prefs/show-titles", piSettings->show_titles);
     gui_settings->setValue("prefs/hide-menubar-in-fullscreen", piSettings->hide_menubar_in_fullscreen);
     gui_settings->setValue("prefs/show_cues", piSettings->show_cues);

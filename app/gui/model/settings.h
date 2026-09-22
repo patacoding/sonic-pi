@@ -95,6 +95,11 @@ public:
     bool show_scope_labels;
     bool show_titles;
     bool hide_menubar_in_fullscreen;
+
+    // Graphics output (the performance-output feature in app/gui/graphics/)
+    // Off unless asked for: it opens a window on a screen.
+    bool show_graphics = false;
+
     std::vector<QString> scope_names;
     void setScopeState(QString name, bool s) { active_scopes[name] = s; }
     bool isScopeActive(QString name) { return active_scopes[name]; }

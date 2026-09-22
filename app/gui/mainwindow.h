@@ -381,6 +381,11 @@ private slots:
     void about();
     void scope();
     void toggleScope();
+    // Graphics output feature. The rendering itself lives in app/gui/graphics/
+    // and is deliberately independent of the GUI; these are only the controls
+    // that surface it.
+    void showGraphicsOutput(bool on);
+    void graphicsVisibilityChanged();
     void showScopeLabelsMenuChanged();
     void toggleIcons();
     void help();
@@ -683,7 +688,7 @@ private:
     void addUniversalCopyShortcuts(QTextEdit* te);
     void updateTranslatedUIText();
 
-    QMenu *shortcutMenu, *liveMenu, *codeMenu, *examplesMenu, *audioMenu, *displayMenu, *viewMenu, *focusMenu, *tabMenu, *ioMenu, *ioMidiInMenu, *ioMidiOutMenu, *ioMidiOutChannelMenu, *ioGamepadMenu, *localIpAddressesMenu, *themeMenu, *scopeKindVisibilityMenu, *languageMenu, *accessibilityMenu, *recentSetsMenu;
+    QMenu *shortcutMenu, *liveMenu, *codeMenu, *examplesMenu, *audioMenu, *displayMenu, *graphicsMenu, *viewMenu, *focusMenu, *tabMenu, *ioMenu, *ioMidiInMenu, *ioMidiOutMenu, *ioMidiOutChannelMenu, *ioGamepadMenu, *localIpAddressesMenu, *themeMenu, *scopeKindVisibilityMenu, *languageMenu, *accessibilityMenu, *recentSetsMenu;
     QAction* examplesPlayOnOpenAct;
     QHash<int, QString> m_jobWorkspaces; // live jobs -> source workspace (error routing)
     QStringList tutorialJsonPaths; // sorted generated chapter JSON, row-aligned with the Tutorial help list
@@ -862,6 +867,11 @@ private:
     QAction *spoutPublishAct;
     QAction *spoutShowCursorAct;
 #endif
+
+    // Graphics output controls. The feature itself lives in app/gui/graphics/,
+    // independent of the GUI; these are its menu and toolbar entry points.
+    QAction *graphicsOutAct;
+    QAction *graphicsFullscreenAct;
 #if defined(Q_OS_MAC) || defined(Q_OS_WIN)
     QAction *recordShowCursorAct;
     QAction *recordFlashIconAct;
