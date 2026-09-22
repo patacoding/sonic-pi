@@ -100,6 +100,8 @@ set(GRAPHICS_SOURCES
     ${QTAPP_ROOT}/graphics/rendering/GraphicsRenderer.h
     ${QTAPP_ROOT}/graphics/rendering/GraphicsRenderThread.cpp
     ${QTAPP_ROOT}/graphics/rendering/GraphicsRenderThread.h
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsSettings.cpp
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsSettings.h
     ${QTAPP_ROOT}/graphics/ui/GraphicsWindow.cpp
     ${QTAPP_ROOT}/graphics/ui/GraphicsWindow.h
     )

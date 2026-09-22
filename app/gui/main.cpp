@@ -29,6 +29,7 @@
 
 #include "graphics/rendering/GraphicsLog.h"
 #include "graphics/rendering/GraphicsRenderThread.h"
+#include "graphics/rendering/GraphicsSettings.h"
 
 #include "mainwindow.h"
 
@@ -167,6 +168,9 @@ int main(int argc, char* argv[])
     // thread, and GraphicsRuntime will own it rather than main().
     {
         auto* gfxThread = new SonicPi::GraphicsRenderThread(&app);
+        // The frame rate ceiling, from Graphics' own settings file. 0 means no
+        // explicit preference, so the renderer uses its default cap.
+        gfxThread->setTargetFps(SonicPi::GraphicsSettings::frameCapHz());
         QObject::connect(gfxThread, &SonicPi::GraphicsRenderThread::contextReady,
                          &app, [](bool ok) {
                              if (!ok)

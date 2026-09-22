@@ -84,6 +84,7 @@
 // The output window itself, and its log. The graphics module is deliberately
 // self-contained; mainwindow only creates the window and forwards menu actions.
 #include "graphics/rendering/GraphicsLog.h"
+#include "graphics/rendering/GraphicsSettings.h"
 #include "graphics/rendering/GraphicsRenderer.h"
 #include "graphics/ui/GraphicsWindow.h"
 #include "widgets/sonicpitooltip.h"
@@ -7582,7 +7583,10 @@ void MainWindow::readSettings()
     piSettings->show_scopes = gui_settings->value("prefs/scope/show-scopes", true).toBool();
     // Graphics output is off by default: it opens a window on a screen, so it
     // should never appear unasked-for on first run.
-    piSettings->show_graphics = gui_settings->value("prefs/graphics/show-output", false).toBool();
+    // Graphics keeps its settings in its own file, not in this one. See
+    // GraphicsSettings for why; the short version is that an optional feature
+    // should not leave keys in the product's config.
+    piSettings->show_graphics = SonicPi::GraphicsSettings::showOutput();
     piSettings->show_scope_labels = gui_settings->value("prefs/scope/show-labels", false).toBool();
     piSettings->show_cues = gui_settings->value("prefs/show_cues", true).toBool();
     piSettings->show_metro = gui_settings->value("prefs/show_metro", true).toBool();
@@ -7691,7 +7695,7 @@ void MainWindow::writeSettings()
     gui_settings->setValue("prefs/gui_transparency", piSettings->gui_transparency);
     gui_settings->setValue("prefs/scope/show-labels", piSettings->show_scope_labels);
     gui_settings->setValue("prefs/scope/show-scopes", piSettings->show_scopes);
-    gui_settings->setValue("prefs/graphics/show-output", piSettings->show_graphics);
+    SonicPi::GraphicsSettings::setShowOutput(piSettings->show_graphics);
     gui_settings->setValue("prefs/show-titles", piSettings->show_titles);
     gui_settings->setValue("prefs/hide-menubar-in-fullscreen", piSettings->hide_menubar_in_fullscreen);
     gui_settings->setValue("prefs/show_cues", piSettings->show_cues);

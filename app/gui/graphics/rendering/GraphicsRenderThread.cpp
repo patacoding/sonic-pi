@@ -14,6 +14,7 @@
 #include "GraphicsRenderThread.h"
 #include "GraphicsLog.h"
 
+#include <QElapsedTimer>
 #include <QOffscreenSurface>
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
@@ -49,6 +50,21 @@ GraphicsRenderThread::GraphicsRenderThread(QObject* parent)
     : QThread(parent)
 {
     setObjectName(QStringLiteral("GraphicsRenderThread"));
+
+    // Run below normal priority, deliberately.
+    //
+    // Graphics is an optional feature of this application, not part of it: the
+    // audio engine is the thing that must not stutter, and this thread is a pure
+    // competitor for CPU with no realtime requirement of its own. A shader frame
+    // can always be shown a frame late; an audio buffer underrun cannot. Lowering
+    // the priority is what makes the operating system resolve that conflict the
+    // right way, without either side needing to cooperate.
+    //
+    // Set here rather than at the start() call site so it cannot be forgotten
+    // there. Note this does NOT start the thread: starting happens in main.cpp
+    // after contextReady() is connected, and starting it here would re-introduce
+    // the race that once broke Sonic Pi's boot.
+    setPriority(QThread::LowestPriority);
 }
 
 GraphicsRenderThread::~GraphicsRenderThread()
@@ -58,13 +74,58 @@ GraphicsRenderThread::~GraphicsRenderThread()
 
 void GraphicsRenderThread::shutdown()
 {
+    // Order matters: set the flag first so a loop that is about to check it sees
+    // the request, then wake the pacer so it does not sit out the rest of a frame
+    // interval, then interrupt as a third signal for anything else waiting.
+    m_loopRunning.store(false, std::memory_order_relaxed);
+    m_paceWait.wakeAll();
+
     if (!isRunning())
         return;
+
     requestInterruption();
     if (!wait(5000))
     {
         GraphicsLog::warn(QStringLiteral("render thread did not stop within 5s"));
     }
+}
+
+GraphicsFrameStats GraphicsRenderThread::frameStats() const
+{
+    GraphicsFrameStats s;
+    s.frames       = m_frames.load(std::memory_order_relaxed);
+    s.fps          = m_fps.load(std::memory_order_relaxed);
+    s.lastFrameMs  = m_lastFrameMs.load(std::memory_order_relaxed);
+    s.worstFrameMs = m_worstFrameMs.load(std::memory_order_relaxed);
+    s.loopRunning  = m_loopRunning.load(std::memory_order_relaxed);
+    s.hung         = m_hung.load(std::memory_order_relaxed);
+    return s;
+}
+
+bool GraphicsRenderThread::requestShaderReload()
+{
+    if (!m_loopRunning.load(std::memory_order_relaxed))
+    {
+        GraphicsLog::warn(QStringLiteral("reload requested but the render loop is not running"));
+        return false;
+    }
+    m_reloadRequested.store(true, std::memory_order_relaxed);
+    return true;
+}
+
+void GraphicsRenderThread::applyShaderReload()
+{
+    QMutexLocker lock(&m_rendererMutex);
+    if (!m_gfxRenderer)
+        return;
+
+    // The loop's context is current by construction here, which is exactly what
+    // reloadShaders() requires and what a caller on another thread cannot
+    // provide.
+    if (m_gfxRenderer->reloadShaders())
+        GraphicsLog::info(QStringLiteral("render loop: shader reloaded"));
+    else
+        GraphicsLog::warn(QStringLiteral("render loop: shader reload failed; keeping the previous one"));
 }
 
 void GraphicsRenderThread::installDebugLogger()
@@ -185,6 +246,7 @@ void GraphicsRenderThread::run()
     // once there is one, and a mismatched framebuffer is exactly what step 1.5
     // is about.
     {
+        QMutexLocker lock(&m_rendererMutex);
         m_gfxRenderer = std::make_unique<GraphicsRenderer>();
         if (m_gfxRenderer->initialize(QSize(640, 360)))
         {
@@ -194,17 +256,208 @@ void GraphicsRenderThread::run()
         {
             GraphicsLog::error(QStringLiteral("framebuffer setup failed; skipping readback"));
         }
-        // Release while the context is still current rather than leaving it to
-        // member teardown. QOpenGLFramebufferObject needs a current context.
-        m_gfxRenderer.reset();
     }
+    // The renderer is deliberately NOT reset here any more. It used to be, because
+    // the thread returned immediately after verifying - which meant there was no
+    // render loop at all and nothing that displayed the result. It now stays
+    // alive for the loop below and is torn down before the context is released.
     // ---------------------------------------------------------------------
 
-    m_context->doneCurrent();
-
-    // Tell any listener the outcome. Emitted from this thread; a queued
+    // Tell any listener the context is usable. Emitted from this thread; a queued
     // connection is what a GUI-side receiver needs.
     emit contextReady(m_contextOk);
+
+    // ---- Phase 0.4: the frame loop ----------------------------------------
+    //
+    // Paced to kFrameIntervalNs by sleeping until the next frame's deadline, then
+    // spinning out the last fraction of a millisecond.
+    //
+    // Both halves of that are load-bearing, and both were found by measurement
+    // rather than assumed:
+    //
+    //   Sleeping is not precise enough on its own. Windows' default timer
+    //   granularity is about 15.6ms, and QThread::usleep rounds a request up to
+    //   the next timer tick. Asking for 16ms therefore returned in 15.6ms or
+    //   31.2ms depending on where the request landed. Measured over 600 frames
+    //   the loop ran at ~57fps and then fell to exactly 32fps once whatever had
+    //   raised the system timer resolution stopped doing so - 600 frames took 12
+    //   seconds instead of 10. The frame itself costs ~0.1ms, so all of that was
+    //   sleep error.
+    //
+    //   So the sleep only has to get close; the last kSpinWindowMs is spun on
+    //   QThread::yieldCurrentThread(), which is precise. Spinning the whole
+    //   interval would burn a core for no benefit, and sleeping the whole
+    //   interval cannot hit the target at all.
+    //
+    // There is no vsync to lean on here: an offscreen surface has no presentation
+    // engine, so the swap interval requested in requestedFormat() does nothing.
+    // That is not a limitation for Phase 0 - nothing is being displayed - but it
+    // is worth knowing before reading these numbers as if a display were
+    // involved.
+    //
+    // A non-monotonic QElapsedTimer reading is treated as a clock change rather
+    // than a negative sleep: QElapsedTimer is monotonic, so this is defensive,
+    // but a negative wait would throw.
+    constexpr qint64 kSpinWindowMs = 2;
+
+    m_loopRunning.store(true, std::memory_order_relaxed);
+
+    QElapsedTimer frameTimer;
+    QElapsedTimer reportTimer;
+    frameTimer.start();
+    reportTimer.start();
+
+    // A self-check hook. The loop is otherwise unbounded, which makes it awkward
+    // to test automatically; with a limit set it stops itself after N frames and
+    // the caller can assert on the stats. Unset in normal use.
+    const int frameLimit = qEnvironmentVariableIntValue("SONIC_PI_GRAPHICS_FRAME_LIMIT");
+
+    // How long a frame may take before it is treated as a hang rather than a slow
+    // frame. Windows' display driver watchdog resets the GPU (TDR) after roughly
+    // two seconds of a stalled command stream, and a reset takes every GL context
+    // in the process with it. Stopping first turns "the driver died and took the
+    // application's graphics with it" into a reportable error.
+    constexpr double kFrameHangSeconds = 2.0;
+
+    // The frame interval to pace to, from the user's configured cap.
+    //
+    // A cap rather than a fixed rate: the loop aims at this and no faster. The
+    // cap exists so that the renderer cannot monopolise the machine, because this
+    // is an optional feature running alongside an audio engine that must not
+    // stutter - see the priority note in the constructor.
+    const int capHz = m_targetFps > 0 ? m_targetFps : kDefaultFrameCapHz;
+    const qint64 intervalNs = 1000000000LL / capHz;
+
+    // The spin window scales with the interval rather than being a fixed 2ms.
+    //
+    // Sleep alone cannot hit a sub-millisecond deadline: Windows' timer
+    // granularity is about 1ms, and a request is rounded up to the next tick. So
+    // the last part of the wait is spun. That part has to stay a small fraction of
+    // the interval - a fixed 2ms against a 6.9ms interval (144Hz) throws away most
+    // of the frame, and the spin would dominate.
+    const qint64 spinWindowNs = qMin(qint64(2000000), intervalNs / 8);
+
+    GraphicsLog::info(QStringLiteral("render loop: started, cap %1Hz, interval %2ns, spin %3us, "
+                                     "priority=lowest")
+                          .arg(capHz)
+                          .arg(intervalNs)
+                          .arg(spinWindowNs / 1000));
+
+    quint64 windowFrames = 0;
+    double  windowWorstMs = 0.0;
+    quint64 totalFrames = 0;
+    qint64  nextDeadlineNs = frameTimer.nsecsElapsed();
+
+    while (m_loopRunning.load(std::memory_order_relaxed) && !isInterruptionRequested())
+    {
+        const qint64 frameStartNs = frameTimer.nsecsElapsed();
+
+        if (m_reloadRequested.exchange(false, std::memory_order_relaxed))
+            applyShaderReload();
+
+        {
+            QMutexLocker lock(&m_rendererMutex);
+            if (m_gfxRenderer)
+                m_gfxRenderer->render();
+        }
+
+        const double frameMs = double(frameTimer.nsecsElapsed() - frameStartNs) / 1.0e6;
+        m_lastFrameMs.store(frameMs, std::memory_order_relaxed);
+        if (frameMs > windowWorstMs)
+            windowWorstMs = frameMs;
+        ++windowFrames;
+        ++totalFrames;
+        m_frames.store(totalFrames, std::memory_order_relaxed);
+
+        // Report once a second. Per frame would be the 7790-readbacks mistake all
+        // over again, only in log form - and every entry also crosses to the GUI
+        // thread through the log sink.
+        if (reportTimer.elapsed() >= 1000)
+        {
+            const double secs = double(reportTimer.elapsed()) / 1000.0;
+            const double fps = double(windowFrames) / secs;
+            m_fps.store(fps, std::memory_order_relaxed);
+            m_worstFrameMs.store(windowWorstMs, std::memory_order_relaxed);
+
+            GraphicsLog::info(QStringLiteral("render loop: %1 frames in %2s = %3 fps, last %4ms, worst %5ms")
+                                  .arg(windowFrames)
+                                  .arg(secs, 0, 'f', 2)
+                                  .arg(fps, 0, 'f', 1)
+                                  .arg(frameMs, 0, 'f', 2)
+                                  .arg(windowWorstMs, 0, 'f', 2));
+            emit frameStatsUpdated();
+
+            windowFrames = 0;
+            windowWorstMs = 0.0;
+            reportTimer.restart();
+        }
+
+        if (frameLimit > 0 && totalFrames >= quint64(frameLimit))
+        {
+            GraphicsLog::info(QStringLiteral("render loop: frame limit %1 reached, stopping")
+                                  .arg(frameLimit));
+            break;
+        }
+
+        // Guard against a frame that never finishes.
+        //
+        // A shader with a runaway loop does not merely run slowly: on Windows the
+        // display driver watchdog resets the GPU after roughly two seconds of a
+        // stalled command stream, and that reset destroys every GL context in the
+        // process. Stopping before that turns an unrecoverable driver reset into a
+        // reported error that leaves the rest of the application alone. The check
+        // happens after the frame returns, so it catches "the frame eventually
+        // took too long" - which is the observable half of the problem.
+        if (frameMs > kFrameHangSeconds * 1000.0)
+        {
+            GraphicsLog::error(QStringLiteral("render loop: a frame took %1ms, at or beyond the %2s "
+                                              "display-driver watchdog limit; stopping the loop to avoid "
+                                              "a GPU reset that would take the whole process's GL contexts")
+                                   .arg(frameMs, 0, 'f', 1)
+                                   .arg(kFrameHangSeconds, 0, 'f', 1));
+            m_hung.store(true, std::memory_order_relaxed);
+            break;
+        }
+
+        const qint64 nowNs = frameTimer.nsecsElapsed();
+
+        // Deadline for the next frame, advanced from the previous deadline rather
+        // than from "now" so a frame that overruns does not push every later frame
+        // back by the overrun.
+        nextDeadlineNs += intervalNs;
+        if (nextDeadlineNs < nowNs)
+        {
+            // Behind by more than a whole frame: drop the missed deadlines rather
+            // than trying to catch up, which would otherwise spiral.
+            nextDeadlineNs = nowNs;
+        }
+
+        const qint64 spinStartNs = nextDeadlineNs - spinWindowNs;
+        const qint64 sleepNs = spinStartNs - nowNs;
+        if (sleepNs > 0)
+        {
+            QMutexLocker lock(&m_paceMutex);
+            // Woken early by shutdown(); the loop condition is re-checked anyway.
+            m_paceWait.wait(&m_paceMutex, static_cast<unsigned long>(sleepNs / 1000000 + 1));
+        }
+
+        while (m_loopRunning.load(std::memory_order_relaxed)
+               && frameTimer.nsecsElapsed() < nextDeadlineNs)
+        {
+            QThread::yieldCurrentThread();
+        }
+    }
+
+    m_loopRunning.store(false, std::memory_order_relaxed);
+    GraphicsLog::info(QStringLiteral("render loop: stopped after %1 frames").arg(totalFrames));
+
+    // Tear the renderer down while the context is still current.
+    {
+        QMutexLocker lock(&m_rendererMutex);
+        m_gfxRenderer.reset();
+    }
+
+    m_context->doneCurrent();
 }
 
 } // namespace SonicPi
