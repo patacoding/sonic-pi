@@ -278,7 +278,79 @@ bool GraphicsRenderer::loadShaders()
 
     GraphicsLog::info(QStringLiteral("shader: loaded\n  vertex   : %1\n  fragment : %2")
                           .arg(m_vertexPath, m_fragmentPath));
+
+    cacheUniformLocations();
     return true;
+}
+
+void GraphicsRenderer::cacheUniformLocations()
+{
+    m_uniforms = Uniforms();
+    m_reportedNoUniforms = false;
+
+    if (!m_program || !m_program->isLinked())
+        return;
+
+    // The program must be bound for uniform queries. Callers reach here either
+    // straight from a successful link (the program is bound as part of linking)
+    // or from loadShaders(), so binding explicitly is the safe form.
+    m_program->bind();
+    m_uniforms.time       = m_program->uniformLocation("iTime");
+    m_uniforms.timeDelta  = m_program->uniformLocation("iTimeDelta");
+    m_uniforms.frame      = m_program->uniformLocation("iFrame");
+    m_uniforms.resolution = m_program->uniformLocation("iResolution");
+    m_program->release();
+
+    const bool any = m_uniforms.time >= 0 || m_uniforms.timeDelta >= 0
+                     || m_uniforms.frame >= 0 || m_uniforms.resolution >= 0;
+    if (any)
+    {
+        GraphicsLog::info(QStringLiteral("shader uniforms: iTime=%1 iTimeDelta=%2 iFrame=%3 iResolution=%4 "
+                                         "(-1 means the shader does not declare it)")
+                              .arg(m_uniforms.time)
+                              .arg(m_uniforms.timeDelta)
+                              .arg(m_uniforms.frame)
+                              .arg(m_uniforms.resolution));
+    }
+}
+
+void GraphicsRenderer::applyUniforms(const GraphicsFrame& frame)
+{
+    if (!m_program || !m_program->isLinked())
+        return;
+
+    // A shader that declares none of these is perfectly valid - the ramp the
+    // default shader draws is static - so this is reported once, as information,
+    // and not repeated every frame. It is worth saying out loud because "my
+    // uniform has no effect" is otherwise indistinguishable from "my shader
+    // declared it but nothing is setting it".
+    if (m_uniforms.time < 0 && m_uniforms.timeDelta < 0 && m_uniforms.frame < 0
+        && m_uniforms.resolution < 0)
+    {
+        if (!m_reportedNoUniforms)
+        {
+            m_reportedNoUniforms = true;
+            GraphicsLog::info(QStringLiteral("shader declares none of iTime/iTimeDelta/iFrame/iResolution; "
+                                             "the frame values are not being used"));
+        }
+        return;
+    }
+
+    // Uniform1f takes a float, and the shader's uniform is a float, so the
+    // conversion from the double the clock produces happens here. That is the
+    // right place for it: the loss of precision is unavoidable at the shader
+    // boundary, but the value being narrowed was computed from a monotonic clock
+    // difference rather than accumulated, so it does not compound.
+    if (m_uniforms.time >= 0)
+        m_program->setUniformValue(m_uniforms.time, float(frame.timeSeconds));
+    if (m_uniforms.timeDelta >= 0)
+        m_program->setUniformValue(m_uniforms.timeDelta, float(frame.deltaSeconds));
+    if (m_uniforms.frame >= 0)
+        m_program->setUniformValue(m_uniforms.frame, int(frame.frameIndex));
+    if (m_uniforms.resolution >= 0)
+        m_program->setUniformValue(m_uniforms.resolution,
+                                   QVector2D(float(frame.resolution.width()),
+                                             float(frame.resolution.height())));
 }
 
 bool GraphicsRenderer::reloadShaders()
@@ -322,7 +394,7 @@ int GraphicsRenderer::reloadAll()
     return ok;
 }
 
-bool GraphicsRenderer::render()
+bool GraphicsRenderer::render(const GraphicsFrame& frame)
 {
     if (!m_fbo || !m_fbo->isValid())
     {
@@ -339,12 +411,12 @@ bool GraphicsRenderer::render()
     }
 
     m_fbo->bind();
-    const bool ok = renderToBoundFramebuffer(m_size);
+    const bool ok = renderToBoundFramebuffer(m_size, frame);
     m_fbo->release();
     return ok;
 }
 
-bool GraphicsRenderer::renderToBoundFramebuffer(const QSize& viewportSize)
+bool GraphicsRenderer::renderToBoundFramebuffer(const QSize& viewportSize, const GraphicsFrame& frame)
 {
     if (!viewportSize.isValid() || viewportSize.isEmpty())
     {
@@ -382,6 +454,11 @@ bool GraphicsRenderer::renderToBoundFramebuffer(const QSize& viewportSize)
     if (m_program && m_program->isLinked())
     {
         m_program->bind();
+
+        // Uniforms go in after binding the program and before the draw call, which
+        // is the only order that works: they are part of the program's state, not
+        // the framebuffer's.
+        applyUniforms(frame);
 
         // Attribute locations are hardcoded in passthrough.vert via
         // layout(location = ...), so the same numbers are used here. Bound and
@@ -494,7 +571,11 @@ bool GraphicsRenderer::verifyShaderOutput()
         ~Restore() { *slot = std::move(*saved); }
     } restore{ &m_program, &saved };
 
-    if (!render())
+    // A fixed frame, deliberately: the verification pattern must not vary with
+    // wall-clock time, or its expected pixel values would not be constants and the
+    // check could not be written down. A shader that animates is free to ignore
+    // these values, and a test pattern that animated would be untestable.
+    if (!render(GraphicsFrame()))
         return false;
 
     QSize readSize;

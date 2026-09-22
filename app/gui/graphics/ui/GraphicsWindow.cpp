@@ -127,8 +127,36 @@ void GraphicsWindow::paintGL()
     // CPU stalls on the GPU; an earlier revision did it every frame and held the
     // rate at ~50Hz instead of 60 with a 3.2 MB log.
     const qreal dpr = devicePixelRatio();
-    m_renderer.renderToBoundFramebuffer(
-        QSize(qMax(1, int(width() * dpr)), qMax(1, int(height() * dpr))));
+    const QSize pixelSize(qMax(1, int(width() * dpr)), qMax(1, int(height() * dpr)));
+
+    // The window's own shader clock.
+    //
+    // Anchored to the first painted frame and read as a difference, never
+    // accumulated - see GraphicsFrame::timeSeconds for why that matters.
+    //
+    // The window keeps its own clock rather than sharing the render thread's
+    // because the two draw different things from different contexts: this one
+    // draws to the window's surface, the thread draws to an offscreen target.
+    // When step 1.2 makes the window display the thread's texture instead of
+    // drawing for itself, this clock goes away with the renderer that uses it.
+    if (!m_clockStarted)
+    {
+        m_clock.start();
+        m_sinceLastPaint.start();
+        m_clockStarted = true;
+    }
+
+    GraphicsFrame frame;
+    frame.timeSeconds = double(m_clock.elapsed()) / 1000.0;
+    frame.deltaSeconds = m_havePainted ? double(m_sinceLastPaint.elapsed()) / 1000.0 : 0.0;
+    frame.frameIndex = m_frameIndex;
+    frame.resolution = pixelSize;
+
+    m_renderer.renderToBoundFramebuffer(pixelSize, frame);
+
+    m_sinceLastPaint.restart();
+    m_havePainted = true;
+    ++m_frameIndex;
 }
 
 bool GraphicsWindow::reloadShaders()

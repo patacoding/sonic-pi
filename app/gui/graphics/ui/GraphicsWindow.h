@@ -13,6 +13,7 @@
 
 #pragma once
 
+#include <QElapsedTimer>
 #include <QOpenGLWindow>
 #include <QSize>
 
@@ -101,6 +102,16 @@ private:
     GraphicsRenderer m_renderer;
     bool m_shaderReady = false;
     bool m_fullscreen = false;
+
+    // The window's own shader clock. m_clock is started on the first painted
+    // frame and never restarted, so it is the animation timeline;
+    // m_sinceLastPaint is restarted every frame, so it measures one frame's
+    // interval.
+    QElapsedTimer m_clock;
+    QElapsedTimer m_sinceLastPaint;
+    bool m_clockStarted = false;
+    bool m_havePainted = false;
+    unsigned long long m_frameIndex = 0;
     // The screen fullscreen was entered on, so leaving can put the window back on
     // the screen it came from rather than the primary one. No geometry is saved:
     // leaving fullscreen always assigns a small centred rect instead.

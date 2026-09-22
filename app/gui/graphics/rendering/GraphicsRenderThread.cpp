@@ -348,6 +348,17 @@ void GraphicsRenderThread::run()
     quint64 totalFrames = 0;
     qint64  nextDeadlineNs = frameTimer.nsecsElapsed();
 
+    // The shader's clock is anchored to a fixed instant and read as a difference
+    // from it on every frame, rather than accumulated frame by frame.
+    //
+    // This is the difference between an animation that is still correct after an
+    // hour and one that is not. Accumulating a float delta loses precision as the
+    // total grows, so a long-running shader starts to stutter even though every
+    // individual delta was right - the classic ShaderToy time-drift bug. Anchoring
+    // costs nothing and cannot drift.
+    const qint64 clockStartNs = frameTimer.nsecsElapsed();
+    qint64 lastFrameStartNs = clockStartNs;
+
     while (m_loopRunning.load(std::memory_order_relaxed) && !isInterruptionRequested())
     {
         const qint64 frameStartNs = frameTimer.nsecsElapsed();
@@ -355,10 +366,27 @@ void GraphicsRenderThread::run()
         if (m_reloadRequested.exchange(false, std::memory_order_relaxed))
             applyShaderReload();
 
+        GraphicsFrame frame;
+        frame.timeSeconds = double(frameStartNs - clockStartNs) / 1.0e9;
+        // Zero on the first frame: there is no previous frame to measure against,
+        // and inventing one would be a value a shader could act on.
+        frame.deltaSeconds = (totalFrames == 0)
+                                 ? 0.0
+                                 : double(frameStartNs - lastFrameStartNs) / 1.0e9;
+        frame.frameIndex = totalFrames;
+        frame.resolution = QSize(640, 360);
+        lastFrameStartNs = frameStartNs;
+
         {
             QMutexLocker lock(&m_rendererMutex);
             if (m_gfxRenderer)
-                m_gfxRenderer->render();
+            {
+                // Report the size the shader will actually be given, not a second
+                // hard-coded copy of it, so iResolution cannot disagree with the
+                // target being drawn into.
+                frame.resolution = m_gfxRenderer->size();
+                m_gfxRenderer->render(frame);
+            }
         }
 
         const double frameMs = double(frameTimer.nsecsElapsed() - frameStartNs) / 1.0e6;
@@ -379,12 +407,15 @@ void GraphicsRenderThread::run()
             m_fps.store(fps, std::memory_order_relaxed);
             m_worstFrameMs.store(windowWorstMs, std::memory_order_relaxed);
 
-            GraphicsLog::info(QStringLiteral("render loop: %1 frames in %2s = %3 fps, last %4ms, worst %5ms")
+            GraphicsLog::info(QStringLiteral("render loop: %1 frames in %2s = %3 fps, last %4ms, worst %5ms, "
+                                             "iTime %6s, iFrame %7")
                                   .arg(windowFrames)
                                   .arg(secs, 0, 'f', 2)
                                   .arg(fps, 0, 'f', 1)
                                   .arg(frameMs, 0, 'f', 2)
-                                  .arg(windowWorstMs, 0, 'f', 2));
+                                  .arg(windowWorstMs, 0, 'f', 2)
+                                  .arg(frame.timeSeconds, 0, 'f', 3)
+                                  .arg(frame.frameIndex));
             emit frameStatsUpdated();
 
             windowFrames = 0;

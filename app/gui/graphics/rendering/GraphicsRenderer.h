@@ -27,6 +27,8 @@
 
 #include <memory>
 
+#include "GraphicsFrame.h"
+
 namespace SonicPi
 {
 
@@ -68,14 +70,17 @@ public:
     bool initializeWithoutFramebuffer();
 
     // Draws one frame into the framebuffer with the current shader.
-    bool render();
+    //
+    // `frame` carries the uniform values; see GraphicsFrame for why they are
+    // passed in rather than read from a clock here.
+    bool render(const GraphicsFrame& frame);
 
     // Draws one frame with the current shader into whichever framebuffer is
     // already bound, leaving the binding alone.
     //
     // Sets the viewport to `viewportSize` and clears to the documented background
     // colour first. Used by the output window to draw to its own surface.
-    bool renderToBoundFramebuffer(const QSize& viewportSize);
+    bool renderToBoundFramebuffer(const QSize& viewportSize, const GraphicsFrame& frame);
 
     // Release the GL objects now, while the caller can still make the owning
     // context current. Calling this is optional - the destructor does the same -
@@ -154,7 +159,38 @@ private:
     // tree. Returns an empty string if neither contains the file.
     QString resolveShaderPath(const QString& fileName) const;
 
+    // Look up the uniform locations this renderer feeds, and remember which ones
+    // the current program actually declares.
+    //
+    // Called once per successful link rather than per frame: glGetUniformLocation
+    // is a string lookup into the program and is not something to do 60+ times a
+    // second. Safe to call again after a reload - the locations belong to the
+    // program that was current when they were queried, so they must be re-read
+    // whenever the program is replaced.
+    void cacheUniformLocations();
+
+    // Push the frame's values into the current program. Must be called with the
+    // program bound.
+    void applyUniforms(const GraphicsFrame& frame);
+
     bool channelClose(unsigned char actual, float expected) const;
+
+    // Uniform locations for the current program, or -1 when it does not declare
+    // that uniform. A shader is free to use only some of them - a static shader
+    // has no use for iTime - so -1 is normal, not an error, and setting a uniform
+    // at location -1 is a defined no-op in OpenGL.
+    struct Uniforms
+    {
+        int time = -1;
+        int timeDelta = -1;
+        int frame = -1;
+        int resolution = -1;
+    };
+    Uniforms m_uniforms;
+
+    // Whether "this program declares no uniforms at all" has already been
+    // reported, so the note appears once per program rather than once per frame.
+    bool m_reportedNoUniforms = false;
 
     std::unique_ptr<QOpenGLFramebufferObject> m_fbo;
     std::unique_ptr<QOpenGLShaderProgram>     m_program;
