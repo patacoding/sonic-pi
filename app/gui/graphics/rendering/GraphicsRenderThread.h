@@ -15,6 +15,7 @@
 
 #include "GraphicsRenderer.h"
 #include "GraphicsSharedFrame.h"
+#include "GraphicsTarget.h"
 
 #include <QThread>
 #include <QString>
@@ -194,18 +195,35 @@ private:
     std::unique_ptr<QOpenGLContext>   m_context;
     std::unique_ptr<QOffscreenSurface> m_surface;
 
-    // Guards m_gfxRenderer against the reload request racing the loop.
+    // Guards the renderer and the targets against the reload request racing the
+    // loop.
     //
-    // The loop holds it for the whole of a frame's draw, which is also what makes
-    // the reload safe: a reload cannot land in the middle of a draw. Held for a
-    // 16ms frame it adds no measurable contention, because the only other user is
-    // a flag-setter that does not take it at all.
+    // The loop holds it for the whole of a frame's draw, which is what makes a
+    // reload safe: a reload cannot land in the middle of a draw. It does NOT
+    // protect the texture a consumer samples - see the double-buffer note below.
     mutable QMutex m_rendererMutex;
 
-    // Declared after the context so it is destroyed before it - the framebuffer
-    // needs a current context to tear down. run() also resets it explicitly
-    // before releasing the context, so this ordering is belt and braces.
+    // The shader program and geometry. One, not two: only the render TARGET is
+    // duplicated for double buffering, so there is one program, one set of uniform
+    // locations, and one compile per reload.
+    //
+    // Declared after the context so it is destroyed before it - GL objects need a
+    // current context to tear down. run() also resets explicitly before releasing the
+    // context, so this ordering is belt and braces.
     std::unique_ptr<GraphicsRenderer> m_gfxRenderer;
+
+    // The two render targets, alternating.
+    //
+    // Two textures rather than one because "show the last complete frame" requires
+    // there to BE a last complete frame: with a single texture the consumer samples
+    // the same memory the producer is writing, and there is nothing to fall back to.
+    // The producer writes whichever target is NOT currently published, so the one a
+    // consumer is reading is never written until the next publish.
+    static constexpr int kTargetCount = 2;
+    std::unique_ptr<GraphicsTarget> m_targets[kTargetCount];
+    // Index of the target currently published for consumers, or -1 before the first
+    // frame. Written only by this thread.
+    int m_readyIndex = -1;
 
     bool    m_verbose   = true;
     bool    m_contextOk = false;

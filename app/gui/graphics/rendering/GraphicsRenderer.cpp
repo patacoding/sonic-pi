@@ -13,6 +13,7 @@
 
 #include "GraphicsRenderer.h"
 #include "GraphicsLog.h"
+#include "GraphicsTarget.h"
 
 #include <QDir>
 #include <QFile>
@@ -66,60 +67,32 @@ GraphicsRenderer::~GraphicsRenderer()
 
 void GraphicsRenderer::destroy()
 {
-    // Destroyed before the context goes away: QOpenGLVertexArrayObject's
-    // destructor needs that context to be current, which is the same contract
-    // the framebuffer and program rely on.
+    // Destroyed before the context goes away: QOpenGLVertexArrayObject's destructor
+    // needs that context to be current, which is the same contract the program
+    // relies on. No framebuffer here any more - that belongs to GraphicsTarget.
     m_vbo.reset();
     m_vao.reset();
     m_program.reset();
-    m_fbo.reset();
-    m_size = QSize();
 }
 
-bool GraphicsRenderer::initialize(const QSize& size)
+bool GraphicsRenderer::initialize()
 {
     if (!QOpenGLContext::currentContext())
     {
         GraphicsLog::error(QStringLiteral("renderer: no current context at initialize"));
         return false;
     }
-    if (!size.isValid() || size.isEmpty())
-    {
-        GraphicsLog::error(QStringLiteral("renderer: refusing to create a framebuffer of size %1x%2")
-                               .arg(size.width())
-                               .arg(size.height()));
-        return false;
-    }
-
-    QOpenGLFramebufferObjectFormat fmt;
-    fmt.setAttachment(QOpenGLFramebufferObject::CombinedDepthStencil);
-    // The attachment is the texture the display window will later share, so it
-    // is a plain 2D colour texture rather than a multisampled one: multisampled
-    // attachments would need a resolve blit before anything else could read them.
-    fmt.setSamples(0);
-
-    m_fbo = std::make_unique<QOpenGLFramebufferObject>(size, fmt);
-    if (!m_fbo || !m_fbo->isValid())
-    {
-        GraphicsLog::error(QStringLiteral("renderer: framebuffer object is not valid"));
-        m_fbo.reset();
-        return false;
-    }
-
-    m_size = size;
 
     if (!createQuadGeometry())
         return false;
 
-    GraphicsLog::info(QStringLiteral("framebuffer ready: %1x%2, texture id %3")
-                          .arg(size.width())
-                          .arg(size.height())
-                          .arg(m_fbo->texture()));
-
-    // A shader that will not compile is reported but not fatal: render() falls
-    // back to a flat clear, so the output still shows something identifiable.
+    // A shader that will not compile is reported but not fatal: the draw falls back
+    // to a flat clear, so the output still shows something identifiable.
     if (!loadShaders())
+    {
         GraphicsLog::warn(QStringLiteral("renderer: no usable shader; falling back to a flat clear"));
+        return false;
+    }
 
     return true;
 }
@@ -170,29 +143,6 @@ bool GraphicsRenderer::createQuadGeometry()
     }
     m_vbo->setUsagePattern(QOpenGLBuffer::StaticDraw);
     m_vbo->allocate(kQuad, int(sizeof(kQuad)));
-
-    return true;
-}
-
-bool GraphicsRenderer::initializeWithoutFramebuffer()
-{
-    if (!QOpenGLContext::currentContext())
-    {
-        GraphicsLog::error(QStringLiteral("renderer: no current context at initialize"));
-        return false;
-    }
-
-    // No framebuffer, so nothing registers with the reload registry: a reload only
-    // needs to reach renderers whose context a GUI action cannot make current
-    // itself, and this one is driven from the GUI thread.
-    if (!createQuadGeometry())
-        return false;
-
-    if (!loadShaders())
-    {
-        GraphicsLog::warn(QStringLiteral("renderer: no usable shader; falling back to a flat clear"));
-        return false;
-    }
 
     return true;
 }
@@ -398,11 +348,11 @@ bool GraphicsRenderer::reloadShaders()
 // thread applies reloads itself - GraphicsRenderThread::requestShaderReload() - and
 // the GUI's menu action now only asks for one.
 
-bool GraphicsRenderer::render(const GraphicsFrame& frame)
+bool GraphicsRenderer::renderInto(GraphicsTarget& target, const GraphicsFrame& frame)
 {
-    if (!m_fbo || !m_fbo->isValid())
+    if (!target.isValid())
     {
-        GraphicsLog::error(QStringLiteral("renderer: render requested with no framebuffer"));
+        GraphicsLog::error(QStringLiteral("renderer: render requested with no valid target"));
         return false;
     }
 
@@ -414,39 +364,7 @@ bool GraphicsRenderer::render(const GraphicsFrame& frame)
         return false;
     }
 
-    m_fbo->bind();
-    // The framebuffer is the whole pass, and the whole pass is what gets drawn.
-    const bool ok = renderToBoundFramebuffer(m_size, QRect(QPoint(0, 0), m_size), frame);
-    m_fbo->release();
-    return ok;
-}
-
-bool GraphicsRenderer::renderToBoundFramebuffer(const QSize& passSize, const QRect& destinationRect,
-                                                const GraphicsFrame& frame)
-{
-    if (!passSize.isValid() || passSize.isEmpty())
-    {
-        GraphicsLog::error(QStringLiteral("renderer: refusing to draw into a %1x%2 pass")
-                               .arg(passSize.width())
-                               .arg(passSize.height()));
-        return false;
-    }
-
-    if (destinationRect.isEmpty())
-    {
-        // Nothing visible - the window is smaller than a pixel, or the crop
-        // rectangle came out empty. Not an error worth reporting every frame, and
-        // drawing nothing is the correct response.
-        return true;
-    }
-
-    QOpenGLContext* ctx = QOpenGLContext::currentContext();
-    QOpenGLFunctions* f = ctx ? ctx->functions() : nullptr;
-    if (!f)
-    {
-        GraphicsLog::error(QStringLiteral("renderer: draw requested with no current context"));
-        return false;
-    }
+    target.bind();
 
     // Set the viewport explicitly rather than assuming it.
     //
@@ -459,24 +377,10 @@ bool GraphicsRenderer::renderToBoundFramebuffer(const QSize& passSize, const QRe
     // bottom-left third and compressing every interpolated varying into the same
     // third of its range.
     //
-    // glViewport's arguments are in framebuffer pixels with the origin at the
-    // BOTTOM-left, matching GL's convention. The rectangle handed in is in
-    // top-left-origin surface coordinates, which is what Qt and every caller
-    // reason in, so the y is converted here - once, in the one place that talks to
-    // GL - rather than leaving each caller to remember it.
-    const int glY = passSize.height() - (destinationRect.y() + destinationRect.height());
-    f->glViewport(destinationRect.x(), glY, destinationRect.width(), destinationRect.height());
-
-    // Reported once per distinct viewport, so a crop that lands somewhere
-    // unexpected is visible in the log rather than only on screen. Throttled
-    // because this runs every frame and only the change is interesting.
-    GraphicsLog::throttled(GraphicsLog::Level::Info,
-                           QStringLiteral("draw: pass %1x%2, viewport %3,%4 %5x%6 (top-left y %7)")
-                               .arg(passSize.width()).arg(passSize.height())
-                               .arg(destinationRect.x()).arg(glY)
-                               .arg(destinationRect.width()).arg(destinationRect.height())
-                               .arg(destinationRect.y()),
-                           2000);
+    // A target is the whole pass, so the viewport is the whole target. The window's
+    // crop lives in the window's own display shader, not here.
+    const QSize size = target.size();
+    f->glViewport(0, 0, size.width(), size.height());
 
     // Clear first so anything the shader does not cover is a known colour rather
     // than whatever was in the buffer before.
@@ -491,7 +395,8 @@ bool GraphicsRenderer::renderToBoundFramebuffer(const QSize& passSize, const QRe
         // the framebuffer's.
         applyUniforms(frame);
         drawQuadWithProgram(m_program.get());
-        m_program->release();    }
+        m_program->release();
+    }
 
     const GLenum err = f->glGetError();
     if (err != GL_NO_ERROR)
@@ -540,11 +445,12 @@ bool GraphicsRenderer::drawQuadWithProgram(QOpenGLShaderProgram* program)
     return true;
 }
 
-bool GraphicsRenderer::readPixels(QSize* sizeOut, std::unique_ptr<unsigned char[]>* pixelsOut)
+bool GraphicsRenderer::readPixels(GraphicsTarget& target, QSize* sizeOut,
+                                  std::unique_ptr<unsigned char[]>* pixelsOut)
 {
-    if (!m_fbo || !m_fbo->isValid())
+    if (!target.isValid())
     {
-        GraphicsLog::error(QStringLiteral("renderer: readback requested with no framebuffer"));
+        GraphicsLog::error(QStringLiteral("renderer: readback requested with no valid target"));
         return false;
     }
 
@@ -556,15 +462,15 @@ bool GraphicsRenderer::readPixels(QSize* sizeOut, std::unique_ptr<unsigned char[
         return false;
     }
 
-    const int w = m_size.width();
-    const int h = m_size.height();
+    const int w = target.size().width();
+    const int h = target.size().height();
     const size_t bytes = size_t(w) * size_t(h) * 4;
     auto buffer = std::make_unique<unsigned char[]>(bytes);
 
     // Bind first: glReadPixels reads from the currently bound framebuffer.
-    m_fbo->bind();
+    target.bind();
     f->glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, buffer.get());
-    m_fbo->release();
+    target.release();
 
     const GLenum err = f->glGetError();
     if (err != GL_NO_ERROR)
@@ -575,7 +481,7 @@ bool GraphicsRenderer::readPixels(QSize* sizeOut, std::unique_ptr<unsigned char[
     }
 
     if (sizeOut)
-        *sizeOut = m_size;
+        *sizeOut = target.size();
     if (pixelsOut)
         *pixelsOut = std::move(buffer);
     return true;
@@ -586,11 +492,11 @@ bool GraphicsRenderer::channelClose(unsigned char actual, float expected) const
     return std::abs(int(actual) - toByte(expected)) <= kChannelTolerance;
 }
 
-bool GraphicsRenderer::verifyShaderOutput()
+bool GraphicsRenderer::verifyShaderOutput(GraphicsTarget& target)
 {
-    if (!m_fbo || !m_fbo->isValid())
+    if (!target.isValid())
     {
-        GraphicsLog::error(QStringLiteral("renderer: verify requested with no framebuffer"));
+        GraphicsLog::error(QStringLiteral("renderer: verify requested with no valid target"));
         return false;
     }
 
@@ -631,8 +537,10 @@ bool GraphicsRenderer::verifyShaderOutput()
     QOpenGLFunctions* f = ctx ? ctx->functions() : nullptr;
     if (!f)
         return false;
-    const int glY = m_size.height() - (0 + m_size.height());
-    f->glViewport(0, glY, m_size.width(), m_size.height());
+
+    target.bind();
+    const QSize targetSize = target.size();
+    f->glViewport(0, 0, targetSize.width(), targetSize.height());
     f->glClearColor(kClearR, kClearG, kClearB, kClearA);
     f->glClear(GL_COLOR_BUFFER_BIT);
 
@@ -640,14 +548,15 @@ bool GraphicsRenderer::verifyShaderOutput()
     anchors->release();
     if (!drew)
     {
+        target.release();
         GraphicsLog::error(QStringLiteral("renderer: verification draw failed"));
         return false;
     }
-
+    target.release();
 
     QSize readSize;
     std::unique_ptr<unsigned char[]> pixels;
-    if (!readPixels(&readSize, &pixels))
+    if (!readPixels(target, &readSize, &pixels))
         return false;
 
     const int w = readSize.width();

@@ -155,35 +155,54 @@ bool GraphicsRenderThread::applyRenderTargetSizeRequest()
         && h == m_actualHeight.load(std::memory_order_relaxed))
         return false; // already the right size
 
-    // Rebuild here, on this thread, because the framebuffer belongs to this
-    // thread's context. This is also what makes the resize race a non-issue: the
-    // old framebuffer is destroyed and the new one created between frames, with
-    // the renderer mutex held, so no frame can be in flight against a
-    // half-replaced target. The window only ever publishes a number.
+    // Rebuild here, on this thread, because the framebuffers belong to this
+    // thread's context. This is also what makes the resize race a non-issue: the old
+    // targets are destroyed and new ones created between frames, with the renderer
+    // mutex held, so no frame can be in flight against a half-replaced target.
     QMutexLocker lock(&m_rendererMutex);
 
-    // Withdraw the current frame first. The texture is about to be destroyed, and
-    // a consumer still holding its name would sample a deleted texture - which on
-    // some drivers renders nothing and on others faults.
+    // Withdraw the published frame first. The textures are about to be destroyed, and
+    // a consumer still holding one of their names would sample a deleted texture -
+    // which on some drivers renders nothing and on others faults.
     if (m_sharedFrame)
         m_sharedFrame->clear();
-
-    m_gfxRenderer.reset();
-    m_gfxRenderer = std::make_unique<GraphicsRenderer>();
+    m_readyIndex = -1;
 
     const QSize wanted(w, h);
-    if (!m_gfxRenderer->initialize(wanted))
+
+    // The renderer is created once and kept across rebuilds: it owns the program and
+    // the geometry, which do not depend on the target size. Recreating it here - as
+    // an earlier version did - would recompile the shader on every resize, and would
+    // be the first step back towards two of everything.
+    if (!m_gfxRenderer)
     {
-        GraphicsLog::error(QStringLiteral("render target: could not create a %1x%2 target; "
-                                          "frames will be skipped until the size changes again")
-                               .arg(w).arg(h));
-        m_gfxRenderer.reset();
-        return false;
+        m_gfxRenderer = std::make_unique<GraphicsRenderer>();
+        if (!m_gfxRenderer->initialize())
+        {
+            GraphicsLog::error(QStringLiteral("renderer: could not be initialised"));
+            m_gfxRenderer.reset();
+            return false;
+        }
+    }
+
+    for (int i = 0; i < kTargetCount; ++i)
+    {
+        m_targets[i] = std::make_unique<GraphicsTarget>();
+        if (!m_targets[i]->create(wanted))
+        {
+            GraphicsLog::error(QStringLiteral("render target: could not create %1 of %2 at %3x%4; "
+                                              "frames will be skipped until the size changes again")
+                                   .arg(i + 1).arg(kTargetCount).arg(w).arg(h));
+            for (int j = 0; j < kTargetCount; ++j)
+                m_targets[j].reset();
+            return false;
+        }
     }
 
     m_actualWidth.store(w, std::memory_order_relaxed);
     m_actualHeight.store(h, std::memory_order_relaxed);
-    GraphicsLog::info(QStringLiteral("render target: now %1x%2 (device pixels)").arg(w).arg(h));
+    GraphicsLog::info(QStringLiteral("render targets: %1 buffers at %2x%3 (double buffered)")
+                          .arg(kTargetCount).arg(w).arg(h));
     return true;
 }
 
@@ -381,13 +400,13 @@ void GraphicsRenderThread::run()
         GraphicsLog::error(QStringLiteral("render target: could not allocate the configured output size"));
     }
 
-    // Verify once, against the target that was just allocated, so the self-check
-    // exercises the same framebuffer the loop will draw into rather than some
-    // other size.
+    // Verify once, against one of the targets that was just allocated, so the
+    // self-check exercises the same kind of framebuffer the loop will draw into
+    // rather than some other size.
     {
         QMutexLocker lock(&m_rendererMutex);
-        if (m_gfxRenderer)
-            m_renderVerified = m_gfxRenderer->verifyShaderOutput();
+        if (m_gfxRenderer && m_targets[0])
+            m_renderVerified = m_gfxRenderer->verifyShaderOutput(*m_targets[0]);
         else
             GraphicsLog::warn(QStringLiteral("no render target; skipping the readback check"));
     }
@@ -513,22 +532,34 @@ void GraphicsRenderThread::run()
 
         {
             QMutexLocker lock(&m_rendererMutex);
-            if (m_gfxRenderer)
+            if (m_gfxRenderer && m_targets[0] && m_targets[1])
             {
-                // Report the size the shader will actually be given, not a second
-                // copy of it, so iResolution cannot disagree with the target being
-                // drawn into.
-                frame.resolution = m_gfxRenderer->size();
-                m_gfxRenderer->render(frame);
+                // Choose the target NOT currently published.
+                //
+                // This step is what makes double buffering double buffering, and
+                // omitting it would silently reduce the whole scheme to a single
+                // texture with all the tearing that implies. A consumer may be
+                // sampling m_readyIndex right now, so that one is left alone and the
+                // frame goes into the other; the published one only changes when this
+                // frame is complete.
+                const int back = (m_readyIndex == 0) ? 1 : 0;
+                GraphicsTarget& target = *m_targets[back];
 
-                // Publish for the output window to display. Only after render()
-                // returns, because the texture is not safe to sample while a frame
-                // is being drawn into it - and this is the only synchronisation
-                // between the two threads, so it has to be in the right place.
-                if (m_sharedFrame)
-                    m_sharedFrame->publish(m_gfxRenderer->framebufferTexture(),
-                                           m_gfxRenderer->size(),
-                                           frame.frameIndex);
+                // Report the size the shader will actually be given, not a second copy
+                // of it, so iResolution cannot disagree with the target being drawn
+                // into.
+                frame.resolution = target.size();
+                if (m_gfxRenderer->renderInto(target, frame))
+                {
+                    // Publish for consumers. Only after the draw, and the published
+                    // index is what tells a consumer whether there is anything new -
+                    // it compares against the index it last used and repeats its
+                    // previous frame if this has not moved.
+                    m_readyIndex = back;
+                    if (m_sharedFrame)
+                        m_sharedFrame->publish(target.texture(), target.size(),
+                                               frame.frameIndex);
+                }
             }
         }
 
@@ -625,9 +656,17 @@ void GraphicsRenderThread::run()
     m_loopRunning.store(false, std::memory_order_relaxed);
     GraphicsLog::info(QStringLiteral("render loop: stopped after %1 frames").arg(totalFrames));
 
-    // Tear the renderer down while the context is still current.
+    // Tear the GL objects down while the context is still current.
+    //
+    // Consumers are told first: the textures are about to be destroyed, and a
+    // consumer holding a stale name would sample a deleted texture.
     {
         QMutexLocker lock(&m_rendererMutex);
+        if (m_sharedFrame)
+            m_sharedFrame->clear();
+
+        for (int i = 0; i < kTargetCount; ++i)
+            m_targets[i].reset();
         m_gfxRenderer.reset();
     }
 
