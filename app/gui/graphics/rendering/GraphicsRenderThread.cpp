@@ -170,11 +170,29 @@ void GraphicsRenderThread::run()
 
     installDebugLogger();
 
-    // ---- Phase 0.2 onward hooks in here --------------------------------
-    // Step 0.1 stops at "the context exists and reports itself". The render
-    // loop, the FBO and the readback check land in the following steps so each
-    // can be verified on its own.
-    // --------------------------------------------------------------------
+    // ---- Phase 0.2: framebuffer + readback verification ------------------
+    // Offscreen rendering has nothing to look at, so "it did not crash" proves
+    // nothing. The framebuffer is cleared to a known colour and read back, and
+    // the pixels are compared against what was asked for.
+    //
+    // The size is a placeholder: the real target size follows the output window
+    // once there is one, and a mismatched framebuffer is exactly what step 1.5
+    // is about.
+    {
+        m_gfxRenderer = std::make_unique<GraphicsRenderer>();
+        if (m_gfxRenderer->initialize(QSize(640, 360)))
+        {
+            m_renderVerified = m_gfxRenderer->verifyClearColour();
+        }
+        else
+        {
+            GraphicsLog::error(QStringLiteral("framebuffer setup failed; skipping readback"));
+        }
+        // Release while the context is still current rather than leaving it to
+        // member teardown. QOpenGLFramebufferObject needs a current context.
+        m_gfxRenderer.reset();
+    }
+    // ---------------------------------------------------------------------
 
     m_context->doneCurrent();
 }

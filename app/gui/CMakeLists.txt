@@ -96,6 +96,8 @@ set(NEW_API_SOURCES
 set(GRAPHICS_SOURCES
     ${QTAPP_ROOT}/graphics/rendering/GraphicsLog.cpp
     ${QTAPP_ROOT}/graphics/rendering/GraphicsLog.h
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsRenderer.cpp
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsRenderer.h
     ${QTAPP_ROOT}/graphics/rendering/GraphicsRenderThread.cpp
     ${QTAPP_ROOT}/graphics/rendering/GraphicsRenderThread.h
     )
