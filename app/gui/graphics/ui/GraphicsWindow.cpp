@@ -213,13 +213,21 @@ void GraphicsWindow::leaveFullscreen()
 
     // Put it back as a small, centred, fully on-screen window - always.
     //
-    // Not a restore of the previous geometry. enterFullscreen() stretches the
-    // window to the screen before showFullScreen(), so showNormal()'s notion of
-    // "normal" is a screen-sized rect. That is what produced a window as big as
-    // the display with its title bar above the top edge, which reads as "the
-    // window has lost its title bar". Saving and restoring the geometry is one
-    // way around it; simply picking a windowed size is simpler and has no
-    // ambiguous state to get wrong.
+    // The original report was "the menu bar is gone and the window cannot be
+    // moved, so the Graphics menu is the only way to close it". The cause was
+    // neither: the window was coming back *off-screen* at negative coordinates
+    // (-13,-58), so its whole frame - and therefore its title bar and close
+    // button - sat outside the visible area. Nothing was missing; it was simply
+    // out of reach, and with no visible title bar there was nothing to drag.
+    //
+    // Why it landed there: enterFullscreen() stretches the window to the screen
+    // before showFullScreen(), so showNormal()'s notion of "normal" is that
+    // screen-sized rect - measured at 1280x784, the full available screen. No
+    // windowed geometry had ever been recorded, so there was nothing to restore.
+    //
+    // Fix: never restore. Always assign a small centred rect, clamped to the
+    // screen's availableGeometry. No saved state means no ambiguous "restore to
+    // what" to get wrong, and the frame is guaranteed to be reachable.
     QScreen* back = m_screenBeforeFullscreen ? m_screenBeforeFullscreen : screen();
     if (back)
         setScreen(back);
