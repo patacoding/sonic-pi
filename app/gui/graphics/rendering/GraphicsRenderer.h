@@ -108,7 +108,29 @@ public:
     // anywhere else either fails or produces a program this renderer cannot use. The
     // render thread calls this from its own loop; the GUI asks the render thread
     // instead of doing it itself.
+    //
+    // Blocks for as long as compilation takes - hundreds of milliseconds. A caller
+    // that cannot afford to stall a frame should use the two-step form below.
     bool reloadShaders();
+
+    // Compile the shader files and hand back the result WITHOUT installing it.
+    //
+    // The point is that compilation - the slow part - happens while no lock is held,
+    // so the render loop is not stalled by it. The caller installs the result with
+    // adoptProgram() at a moment of its choosing, which is a pointer swap and
+    // effectively instantaneous.
+    //
+    // Returns nullptr and logs the compiler output on failure, leaving the current
+    // program alone, so a broken edit changes nothing - the same guarantee
+    // reloadShaders() gives.
+    std::unique_ptr<QOpenGLShaderProgram> compileReplacement();
+
+    // Install a program produced by compileReplacement(). Requires a current context.
+    //
+    // The caller must hold whatever lock protects the render loop: this is the one
+    // operation the loop must not race, and keeping it to a pointer swap is what
+    // makes holding that lock acceptable.
+    void adoptProgram(std::unique_ptr<QOpenGLShaderProgram> program);
 
     // There is deliberately no static "reload every renderer" entry point.
     //

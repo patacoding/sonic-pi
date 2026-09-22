@@ -211,27 +211,50 @@ void GraphicsRenderThread::applyShaderReload()
 {
     GraphicsLog::info(QStringLiteral("reload: applying on the render thread"));
 
-    // Held for the whole recompile, which is the point: the shader program is
-    // replaced while the loop cannot be drawing with it. This is also the only
-    // place a lock is taken for a long operation, so it is where a stall would
-    // show up - which is why it is timed.
     QElapsedTimer t;
     t.start();
 
-    QMutexLocker lock(&m_rendererMutex);
-    if (!m_gfxRenderer)
+    // Compile WITHOUT holding the render lock.
+    //
+    // Compilation is the slow part - hundreds of milliseconds - and holding the lock
+    // across it stalled the render loop for that whole time. That is what made reload
+    // feel unresponsive: clicking during the stall did nothing visible, and whether a
+    // click appeared to work depended on where in the stall it landed.
+    //
+    // So the two halves are split. Compiling needs the context current and nothing
+    // else; only installing the result touches state the loop reads. The lock is then
+    // held for a pointer swap, which is as close to free as makes no difference.
+    //
+    // The context is current by construction here - this runs on the render thread -
+    // which is exactly what compiling requires and what a caller on another thread
+    // cannot provide.
+    std::unique_ptr<QOpenGLShaderProgram> replacement;
     {
-        GraphicsLog::warn(QStringLiteral("reload: no renderer to reload"));
+        // A short lock just to read m_gfxRenderer safely. Not held across the compile.
+        QMutexLocker lock(&m_rendererMutex);
+        if (!m_gfxRenderer)
+        {
+            GraphicsLog::warn(QStringLiteral("reload: no renderer to reload"));
+            return;
+        }
+        replacement = m_gfxRenderer->compileReplacement();
+    }
+
+    if (!replacement)
+    {
+        GraphicsLog::info(QStringLiteral("reload: FAILED after %1ms; the previous shader is still in use")
+                              .arg(t.elapsed()));
         return;
     }
 
-    // The loop's context is current by construction here, which is exactly what
-    // reloadShaders() requires and what a caller on another thread cannot provide.
-    const bool ok = m_gfxRenderer->reloadShaders();
+    // Install it. Held only for the swap, so the loop is not stalled by the compile.
+    {
+        QMutexLocker lock(&m_rendererMutex);
+        if (m_gfxRenderer)
+            m_gfxRenderer->adoptProgram(std::move(replacement));
+    }
 
-    GraphicsLog::info(QStringLiteral("reload: %1 after %2ms")
-                          .arg(ok ? QStringLiteral("applied") : QStringLiteral("FAILED"))
-                          .arg(t.elapsed()));
+    GraphicsLog::info(QStringLiteral("reload: applied after %1ms").arg(t.elapsed()));
 }
 
 void GraphicsRenderThread::installDebugLogger()

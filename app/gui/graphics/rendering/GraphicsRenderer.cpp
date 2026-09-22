@@ -205,7 +205,7 @@ std::unique_ptr<QOpenGLShaderProgram> GraphicsRenderer::buildProgram(const QStri
     return program;
 }
 
-bool GraphicsRenderer::loadShaders()
+std::unique_ptr<QOpenGLShaderProgram> GraphicsRenderer::compileReplacement()
 {
     const QString vertexFile = QStringLiteral("passthrough.vert");
     const QString fragmentFile = QStringLiteral("default.frag");
@@ -218,27 +218,46 @@ bool GraphicsRenderer::loadShaders()
         GraphicsLog::error(QStringLiteral("shader load FAILED; keeping the previous program. "
                                           "fragment file was: %1")
                                .arg(resolveShaderPath(fragmentFile)));
-        return false;
+        return nullptr;
     }
 
-    // Only replace the working program once the new one is proven good, so a
-    // failed edit leaves the previous picture on screen.
-    m_program = std::move(program);
-    m_vertexPath = resolveShaderPath(vertexFile);
-    m_fragmentPath = resolveShaderPath(fragmentFile);
+    const QString fragPath = resolveShaderPath(fragmentFile);
 
     // The file's size and modification time.
     //
     // So a reload that read a stale copy is distinguishable from one that read the
-    // current bytes: compare these against the file on disk. Two rounds of
-    // explaining "editing has no effect" would have been settled by this line.
-    const QFileInfo fragInfo(m_fragmentPath);
-    GraphicsLog::info(QStringLiteral("shader: loaded  fragment=%1  bytes=%2  mtime=%3")
-                          .arg(m_fragmentPath)
+    // current bytes: compare these against the file on disk. Two rounds of explaining
+    // "editing has no effect" would have been settled by these two numbers.
+    const QFileInfo fragInfo(fragPath);
+    GraphicsLog::info(QStringLiteral("shader: compiled  fragment=%1  bytes=%2  mtime=%3")
+                          .arg(fragPath)
                           .arg(fragInfo.size())
                           .arg(fragInfo.lastModified().toString(QStringLiteral("HH:mm:ss.zzz"))));
 
+    return program;
+}
+
+void GraphicsRenderer::adoptProgram(std::unique_ptr<QOpenGLShaderProgram> program)
+{
+    if (!program)
+        return;
+
+    // The swap and the uniform re-query happen together, because a program and the
+    // locations that belong to it must never be out of step - the failure that made
+    // the picture freeze while every log line said the reload had succeeded.
+    m_program = std::move(program);
+    m_vertexPath = resolveShaderPath(QStringLiteral("passthrough.vert"));
+    m_fragmentPath = resolveShaderPath(QStringLiteral("default.frag"));
     cacheUniformLocations();
+}
+
+bool GraphicsRenderer::loadShaders()
+{
+    auto program = compileReplacement();
+    if (!program)
+        return false;
+
+    adoptProgram(std::move(program));
     return true;
 }
 
