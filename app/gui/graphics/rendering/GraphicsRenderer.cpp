@@ -21,6 +21,7 @@
 #include <QOpenGLFramebufferObjectFormat>
 #include <QOpenGLBuffer>
 #include <QOpenGLShaderProgram>
+#include <QScopeGuard>
 #include <QSet>
 
 #include <cmath>
@@ -620,15 +621,25 @@ bool GraphicsRenderer::verifyShaderOutput()
     }
     std::unique_ptr<QOpenGLShaderProgram> saved = std::move(m_program);
     m_program = std::move(anchors);
+    // Swapping the program invalidates the uniform locations, which belong to the
+    // program that was current when they were queried. Without this the renderer
+    // is left holding the ANCHORS program's locations after the restore below, and
+    // since the test pattern declares no uniforms those are all -1 - so the real
+    // shader silently stops receiving iTime, iFrame and iResolution and its picture
+    // freezes. That is exactly what happened: the window showed a still image and
+    // editing default.frag appeared to do nothing, which looked like a display bug
+    // and was a stale-cache bug.
+    cacheUniformLocations();
 
     // Restore the default program however this returns, so a failed verification
     // does not leave the test pattern on screen.
-    struct Restore
-    {
-        std::unique_ptr<QOpenGLShaderProgram>* slot;
-        std::unique_ptr<QOpenGLShaderProgram>* saved;
-        ~Restore() { *slot = std::move(*saved); }
-    } restore{ &m_program, &saved };
+    //
+    // Re-queries the uniform locations as part of restoring, for the reason above:
+    // a program and its uniform locations have to change together.
+    auto restore = qScopeGuard([this, &saved]() {
+        m_program = std::move(saved);
+        cacheUniformLocations();
+    });
 
     // A fixed frame, deliberately: the verification pattern must not vary with
     // wall-clock time, or its expected pixel values would not be constants and the
