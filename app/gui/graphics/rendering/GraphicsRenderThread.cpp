@@ -594,29 +594,58 @@ void GraphicsRenderThread::run()
             {
                 GraphicsTargetFence& tf = m_sharedFrame->targetFence(back);
 
-                // Take the fence the consumer left, whatever it is. Null on the first
-                // use of this target, which is why the wait is conditional.
-                GLsync consumerFence = tf.consumerFence.exchange(nullptr,
-                                                                 std::memory_order_acq_rel);
-                if (consumerFence)
+                // Wait for every consumer that has ever read this target.
+                //
+                // The loop is the only thing multiple consumers change: the producer
+                // waits for all of them instead of one. It does not wait LONGER in any
+                // meaningful sense - it makes N immediate returns, because all N fences
+                // were placed a whole frame ago and have already signalled. See the note
+                // on GraphicsTargetFence for the arithmetic and the measurements.
+                for (int c = 0; c < GraphicsConsumer::Count; ++c)
                 {
-                    // Wait for the GPU to have finished reading this texture. A
-                    // generous bound rather than an infinite one: if the consumer's
-                    // context has died, blocking here would take the render loop with
-                    // it, and the loop is what keeps the audio engine's thread budget
-                    // intact. A timeout is reported rather than hidden.
+                    GLsync consumerFence = tf.consumerFence[c].exchange(nullptr,
+                                                                       std::memory_order_acq_rel);
+                    if (!consumerFence)
+                        continue;   // this consumer has never read this target
+
+                    // A generous bound rather than an infinite one: if a consumer's
+                    // context has died, blocking here would take the render loop with it,
+                    // and the loop is what keeps the audio engine's thread budget intact.
+                    //
+                    // Hitting the bound is NOT by itself a fault, and the two return
+                    // values must not be conflated because they mean opposite things:
+                    //
+                    //   GL_TIMEOUT_EXPIRED - that consumer is busy. The producer draws
+                    //     anyway, and continuity is worth more than the guarantee. This is
+                    //     expected during a window mode change: measured on Windows,
+                    //     entering fullscreen blocks the GUI thread for about 500ms, so the
+                    //     consumer genuinely does not release the target for that long.
+                    //     Recovered within one frame afterwards, with stale at 0.
+                    //
+                    //   GL_WAIT_FAILED - the fence is not usable from this context at all.
+                    //     That is a real bug (a fence from a context outside the share
+                    //     group, or one already deleted), and it returns at once rather
+                    //     than waiting, so it must not be reported as a timeout.
                     constexpr GLuint64 kWaitNs = 500 * 1000 * 1000;   // 500ms
                     const GLenum r = f->glClientWaitSync(consumerFence,
                                                          GL_SYNC_FLUSH_COMMANDS_BIT,
                                                          kWaitNs);
-                    if (r == GL_TIMEOUT_EXPIRED || r == GL_WAIT_FAILED)
+                    if (r == GL_TIMEOUT_EXPIRED)
                     {
                         ++m_waitTimeouts;
-                        GraphicsLog::warn(QStringLiteral("render loop: waited 500ms for the consumer "
-                                                         "to release target %1; drawing anyway").arg(back));
+                        GraphicsLog::warn(QStringLiteral("render loop: consumer %1 did not release target %2 "
+                                                         "within 500ms; drawing anyway (recovered)")
+                                              .arg(c).arg(back));
                     }
-                    // Safe to delete: the fence has signalled, or we have given up on
-                    // it and will never look at it again.
+                    else if (r == GL_WAIT_FAILED)
+                    {
+                        ++m_waitFailures;
+                        GraphicsLog::error(QStringLiteral("render loop: glClientWaitSync FAILED on target %1 "
+                                                          "consumer %2 (0x%3); the fence is not usable from this "
+                                                          "context").arg(back).arg(c).arg(r, 0, 16));
+                    }
+                    // Safe to delete: it has signalled, or we have given up on it and
+                    // will never look at it again.
                     f->glDeleteSync(consumerFence);
                 }
             }
@@ -687,8 +716,8 @@ void GraphicsRenderThread::run()
             m_worstFrameMs.store(windowWorstMs, std::memory_order_relaxed);
 
             GraphicsLog::info(QStringLiteral("render loop: %1 frames in %2s = %3 fps, last %4ms, worst %5ms, "
-                                             "consumer wait avg %6us worst %7us (%8 timeouts), "
-                                             "iTime %9s, iFrame %10")
+                                             "consumer wait avg %6us worst %7us, slow-reader %8, wait-failed %9, "
+                                             "iTime %10s, iFrame %11")
                                   .arg(windowFrames)
                                   .arg(secs, 0, 'f', 2)
                                   .arg(fps, 0, 'f', 1)
@@ -697,6 +726,7 @@ void GraphicsRenderThread::run()
                                   .arg(windowFrames ? windowWaitUs / qint64(windowFrames) : 0)
                                   .arg(windowWaitWorstUs)
                                   .arg(m_waitTimeouts)
+                                  .arg(m_waitFailures)
                                   .arg(frame.timeSeconds, 0, 'f', 3)
                                   .arg(frame.frameIndex));
             emit frameStatsUpdated();

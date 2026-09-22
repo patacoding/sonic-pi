@@ -280,12 +280,19 @@ bool GraphicsWindow::drawSharedFrame(const QRect& destination)
     if (extra)
         extra->glFlush();   // submit it, or the fence never signals
 
-    // Published to the producer. The consumer never touches this handle again - it does
-    // not wait on it and does not delete it. The producer waits, and deletes once it has
-    // signalled, which is the only moment at which deletion is safe.
+    // Published to the producer, into this consumer's own slot. The consumer never
+    // touches this handle again - it does not wait on it and does not delete it. The
+    // producer waits, and deletes once it has signalled, which is the only moment at
+    // which deletion is safe.
+    //
+    // The slot is chosen by this consumer's IDENTITY, not by any turn-taking. Several
+    // consumers reading the same texture is fine because reading is non-destructive;
+    // each one simply records its own completion in its own slot, and they never
+    // interact. See GraphicsTargetFence.
     if (finished)
-        m_sharedFrame->targetFence(shared.targetIndex).consumerFence.store(
-            finished, std::memory_order_release);
+        m_sharedFrame->targetFence(shared.targetIndex)
+            .consumerFence[GraphicsConsumer::OutputWindow]
+            .store(finished, std::memory_order_release);
 
     // Remembered so a later frame that is not ready yet can repeat this one instead
     // of flashing the background. See the timeout branch above.
@@ -413,6 +420,30 @@ void GraphicsWindow::paintGL()
                               : QStringLiteral("window: no frame published yet"));
         m_staleFrames = 0;
     }
+
+    // Ask for the next frame. This is what keeps the window repainting, and it is why
+    // nothing outside this window has to know the window's cadence.
+    //
+    // The previous arrangement was a 16ms QTimer in MainWindow, owned by the main
+    // window and running at a rate it had no reason to know about. That is three
+    // problems in one: a second clock (16ms is 62.5Hz, not any rate the user chose),
+    // a hardcoded number in a class that does not render, and a piece of the graphics
+    // feature living in MainWindow - the same "state that should exist once, existing
+    // somewhere it does not belong" shape as the other incidents in
+    // graphics-architecture-review.md.
+    //
+    // requestUpdate() rather than update(): it schedules the repaint for the next
+    // frame in the platform's own cycle and coalesces repeats, so this is paced by the
+    // display rather than by a timer's guess at it. A 60Hz screen gets 60 updates a
+    // second and a 144Hz screen gets 144, with no setting to keep in sync and no
+    // writer of that setting to get wrong.
+    //
+    // There is deliberately no frame-cap check here. The producer is what the user
+    // capped, in graphics.ini; this window is a view of whatever the producer made,
+    // and re-showing the same texture because the producer has not drawn a new one yet
+    // is the correct behaviour rather than a waste - it is exactly the "no new frame,
+    // show the old one" rule, and it costs one textured quad.
+    requestUpdate();
 }
 
 // Where the output image goes on the window's surface, in device pixels with a

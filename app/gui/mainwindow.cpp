@@ -4058,21 +4058,19 @@ void MainWindow::showGraphicsOutput(bool on)
                         }
                     });
 
-            // Continuous repaint. A QOpenGLWindow only redraws on expose
-            // otherwise, which would show one frame and then sit still.
+            // No repaint timer is created here, and there is nothing to create.
             //
-            // 16ms is the 60Hz cap the design settled on for V1. The window's
-            // swap interval is the real pacer; this just keeps frames coming.
-            graphicsRepaintTimer = new QTimer(this);
-            graphicsRepaintTimer->setInterval(16);
-            connect(graphicsRepaintTimer, &QTimer::timeout, this, [this]() {
-                if (graphicsWindow && graphicsWindow->isVisible())
-                    graphicsWindow->update();
-            });
+            // There used to be a 16ms QTimer in this class whose only job was to call
+            // update() on the output window. It was wrong three ways at once: 16ms is
+            // 62.5Hz, which is not a rate the user chose and not a rate any display
+            // runs at; it hardcoded a graphics detail in a class that does no
+            // rendering; and it put the output window's cadence under a second owner.
+            // The window now paces itself with requestUpdate() at the end of
+            // paintGL(), so the cadence is the display's and this class does not know
+            // or care what it is.
         }
 
         graphicsWindow->show();
-        graphicsRepaintTimer->start();
         SonicPi::GraphicsLog::info(QStringLiteral("menu: window shown, isVisible=%1, geometry=%2x%3 at %4,%5")
                                        .arg(graphicsWindow->isVisible() ? 1 : 0)
                                        .arg(graphicsWindow->width())
@@ -4084,8 +4082,8 @@ void MainWindow::showGraphicsOutput(bool on)
     }
     else
     {
-        if (graphicsRepaintTimer)
-            graphicsRepaintTimer->stop();
+        // Nothing to stop: the window paces itself and stops asking for frames once it
+        // is hidden, because paintGL() is what requests them.
         if (graphicsWindow)
             graphicsWindow->hide();
         showStatusAndAnnounce(tr("Hiding graphics output..."), 2000);

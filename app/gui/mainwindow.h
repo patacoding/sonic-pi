@@ -908,9 +908,6 @@ private:
     // Not owned either. The shared handover point between the render thread and the
     // output window; see setGraphicsSharedFrame().
     SonicPi::GraphicsSharedFrameSlot* graphicsSharedFrame = nullptr;
-    // Drives continuous repaint while the window is visible. Without it the
-    // window would only redraw on expose, which is not a render loop.
-    QTimer* graphicsRepaintTimer = nullptr;
 #if defined(Q_OS_MAC) || defined(Q_OS_WIN)
     QAction *recordShowCursorAct;
     QAction *recordFlashIconAct;

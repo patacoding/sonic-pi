@@ -112,6 +112,13 @@ public:
     // reloaded belongs to the render thread's context. Reloading is requested through
     // GraphicsRenderThread::requestShaderReload() and applied by that thread.
 
+    // There is no setFrameRate() here either, and no repaint timer.
+    //
+    // The window paces itself: paintGL() ends by calling requestUpdate(), so the
+    // cadence is the platform's frame cycle. Nothing outside needs to know it and
+    // nothing outside can get it wrong. See the note in paintGL() for what the
+    // previous arrangement - a 16ms timer in MainWindow - cost.
+
 signals:
     // Emitted when the user closes the window directly, so the menu action that
     // opened it can be un-ticked. A QDockWidget reports this to Qt for free; an

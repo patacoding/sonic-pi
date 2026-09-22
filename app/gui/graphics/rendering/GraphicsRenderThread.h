@@ -244,9 +244,17 @@ private:
     GLsync m_retiredFence[kTargetCount] = { nullptr, nullptr };
 
     // How many times waiting for the consumer to release a target hit its 500ms bound.
-    // Expected to stay at zero; a non-zero value means the consumer's context is not
-    // making progress at all, which is worth an error rather than a silent stall.
+    //
+    // NOT by itself a fault: a window mode change blocks the GUI thread for about
+    // 500ms on Windows, during which the consumer genuinely cannot release the target.
+    // The producer draws anyway and recovers within a frame. A count that keeps growing
+    // is the interesting case - that means a consumer is persistently not reading.
     quint64 m_waitTimeouts = 0;
+
+    // How many times glClientWaitSync returned GL_WAIT_FAILED, which is a different
+    // thing entirely: the fence cannot be waited on from this context at all (wrong
+    // share group, or already deleted). Expected to stay at zero.
+    quint64 m_waitFailures = 0;
 
     bool    m_verbose   = true;
     bool    m_contextOk = false;
