@@ -170,10 +170,16 @@ void GraphicsRenderThread::run()
 
     installDebugLogger();
 
-    // ---- Phase 0.2: framebuffer + readback verification ------------------
+    // ---- Phase 0.2/0.3: framebuffer, shader, readback verification --------
     // Offscreen rendering has nothing to look at, so "it did not crash" proves
-    // nothing. The framebuffer is cleared to a known colour and read back, and
-    // the pixels are compared against what was asked for.
+    // nothing. A frame is drawn with the file-loaded shader and its pixels are
+    // read back and compared against the pattern that shader is supposed to
+    // produce.
+    //
+    // The pattern comes from anchors.frag, not default.frag: the check is of the
+    // pipeline, so it must not depend on - or constrain - whatever picture the
+    // default shader happens to draw. The anchors and their expected colours are
+    // documented in app/gui/graphics/shaders/anchors.frag.
     //
     // The size is a placeholder: the real target size follows the output window
     // once there is one, and a mismatched framebuffer is exactly what step 1.5
@@ -182,7 +188,7 @@ void GraphicsRenderThread::run()
         m_gfxRenderer = std::make_unique<GraphicsRenderer>();
         if (m_gfxRenderer->initialize(QSize(640, 360)))
         {
-            m_renderVerified = m_gfxRenderer->verifyClearColour();
+            m_renderVerified = m_gfxRenderer->verifyShaderOutput();
         }
         else
         {

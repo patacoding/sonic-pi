@@ -14,9 +14,14 @@
 #include "GraphicsRenderer.h"
 #include "GraphicsLog.h"
 
+#include <QDir>
+#include <QFile>
 #include <QOpenGLContext>
 #include <QOpenGLFramebufferObject>
 #include <QOpenGLFramebufferObjectFormat>
+#include <QOpenGLBuffer>
+#include <QOpenGLShaderProgram>
+#include <QSet>
 
 #include <cmath>
 
@@ -35,19 +40,39 @@ int toByte(float v)
     return int(std::lround(double(v) * 255.0));
 }
 
-bool channelClose(unsigned char actual, float expected)
+// Where the shader files live. GRAPHICS_SHADER_DIR is set by CMake to the
+// source-tree copy; the user copy takes priority so the shipped files are never
+// edited in place.
+#ifndef GRAPHICS_SHADER_DIR
+#define GRAPHICS_SHADER_DIR ""
+#endif
+
+// Live renderers, so a reload triggered from the GUI can reach them.
+//
+// A registry rather than a global shader object: GL shader programs belong to a
+// context, so there is nothing shareable between renderers, and an explicit
+// registry avoids introducing a singleton for the sake of one menu action.
+QSet<GraphicsRenderer*>& liveRenderers()
 {
-    return std::abs(int(actual) - toByte(expected)) <= kChannelTolerance;
+    static QSet<GraphicsRenderer*> set;
+    return set;
 }
 } // namespace
 
 GraphicsRenderer::~GraphicsRenderer()
 {
-    // QOpenGLFramebufferObject's destructor needs the context that created it to
-    // be current. The render thread releases the context after this object is
-    // gone, so by then it is safe; asserting here would false-positive during
-    // teardown, so the contract is documented instead:
+    // Destroying a shader program or framebuffer needs the context that created
+    // it to be current. The caller releases the context after this object is
+    // gone, so by then it is safe. Contract, not an assertion:
     //   GraphicsRenderer must be destroyed while its context is current.
+    liveRenderers().remove(this);
+
+    // Destroyed before the context goes away: QOpenGLVertexArrayObject's
+    // destructor needs that context to be current, which is the same contract
+    // the framebuffer and program rely on.
+    m_vbo.reset();
+    m_vao.reset();
+    m_program.reset();
     m_fbo.reset();
 }
 
@@ -69,9 +94,8 @@ bool GraphicsRenderer::initialize(const QSize& size)
     QOpenGLFramebufferObjectFormat fmt;
     fmt.setAttachment(QOpenGLFramebufferObject::CombinedDepthStencil);
     // The attachment is the texture the display window will later share, so it
-    // is created as a plain 2D colour texture rather than a multisampled one:
-    // multisampled attachments would need a resolve blit before anything else
-    // could read them.
+    // is a plain 2D colour texture rather than a multisampled one: multisampled
+    // attachments would need a resolve blit before anything else could read them.
     fmt.setSamples(0);
 
     m_fbo = std::make_unique<QOpenGLFramebufferObject>(size, fmt);
@@ -83,10 +107,272 @@ bool GraphicsRenderer::initialize(const QSize& size)
     }
 
     m_size = size;
+    liveRenderers().insert(this);
+
+    // Vertex array object, then the quad's interleaved position+uv buffer.
+    //
+    // The VAO is needed even when a shader derives its own coordinates: a
+    // core-profile context requires one bound for any draw call, and without it
+    // glDrawArrays raises GL_INVALID_OPERATION (0x502).
+    m_vao = std::make_unique<QOpenGLVertexArrayObject>();
+    if (!m_vao->create() || !m_vao->isCreated())
+    {
+        GraphicsLog::error(QStringLiteral("renderer: could not create a vertex array object"));
+        m_vao.reset();
+        return false;
+    }
+    m_vao->bind();
+
+    // Full-screen quad: two triangles, six vertices, interleaved x,y,u,v.
+    //
+    // The order matters and is the bottom-left, bottom-right, top-right then
+    // bottom-left, top-right, top-left winding.
+    //
+    //   (-1,-1) uv(0,0)  bottom-left
+    //   ( 1,-1) uv(1,0)  bottom-right
+    //   ( 1, 1) uv(1,1)  top-right
+    //   (-1, 1) uv(0,1)  top-left
+    //
+    // (0,0) at the bottom-left because that is OpenGL's origin; the readback in
+    // verifyShaderOutput reads with the same sense on purpose.
+    static const float kQuad[] = {
+        -1.0f, -1.0f, 0.0f, 0.0f,
+         1.0f, -1.0f, 1.0f, 0.0f,
+         1.0f,  1.0f, 1.0f, 1.0f,
+        -1.0f, -1.0f, 0.0f, 0.0f,
+         1.0f,  1.0f, 1.0f, 1.0f,
+        -1.0f,  1.0f, 0.0f, 1.0f,
+    };
+
+    m_vbo = std::make_unique<QOpenGLBuffer>(QOpenGLBuffer::VertexBuffer);
+    if (!m_vbo->create() || !m_vbo->bind())
+    {
+        GraphicsLog::error(QStringLiteral("renderer: could not create the vertex buffer"));
+        m_vbo.reset();
+        return false;
+    }
+    m_vbo->setUsagePattern(QOpenGLBuffer::StaticDraw);
+    m_vbo->allocate(kQuad, int(sizeof(kQuad)));
+
     GraphicsLog::info(QStringLiteral("framebuffer ready: %1x%2, texture id %3")
                           .arg(size.width())
                           .arg(size.height())
                           .arg(m_fbo->texture()));
+
+    // A shader that will not compile is reported but not fatal: render() falls
+    // back to a flat clear, so the output still shows something identifiable.
+    if (!loadShaders())
+        GraphicsLog::warn(QStringLiteral("renderer: no usable shader; falling back to a flat clear"));
+
+    return true;
+}
+
+QString GraphicsRenderer::resolveShaderPath(const QString& fileName) const
+{
+    QString home = qEnvironmentVariable("SONIC_PI_HOME");
+    if (home.isEmpty())
+        home = qEnvironmentVariable("USERPROFILE");
+    if (home.isEmpty())
+        home = QDir::homePath();
+
+    // User copy first: this is the one to edit, and editing it cannot dirty the
+    // source tree.
+    const QString userDir = home + QStringLiteral("/.sonic-pi/graphics/shaders");
+    const QString userPath = userDir + QLatin1Char('/') + fileName;
+    if (QFile::exists(userPath))
+        return userPath;
+
+    // Fall back to the copy shipped with the source, so a fresh checkout works
+    // without a copying step.
+    const QString shipped = QStringLiteral(GRAPHICS_SHADER_DIR) + QLatin1Char('/') + fileName;
+    if (QFile::exists(shipped))
+        return shipped;
+
+    GraphicsLog::error(QStringLiteral("renderer: shader '%1' not found. Looked in:\n  %2\n  %3")
+                           .arg(fileName, userPath, shipped));
+    return QString();
+}
+
+std::unique_ptr<QOpenGLShaderProgram> GraphicsRenderer::buildProgram(const QString& vertexFile,
+                                                                     const QString& fragmentFile)
+{
+    const QString vert = resolveShaderPath(vertexFile);
+    const QString frag = resolveShaderPath(fragmentFile);
+    if (vert.isEmpty() || frag.isEmpty())
+        return nullptr;
+
+    auto program = std::make_unique<QOpenGLShaderProgram>();
+
+    if (!program->addShaderFromSourceFile(QOpenGLShader::Vertex, vert))
+    {
+        GraphicsLog::error(QStringLiteral("renderer: vertex shader failed to compile (%1)\n%2")
+                               .arg(vert, program->log()));
+        return nullptr;
+    }
+    if (!program->addShaderFromSourceFile(QOpenGLShader::Fragment, frag))
+    {
+        GraphicsLog::error(QStringLiteral("renderer: fragment shader failed to compile (%1)\n%2")
+                               .arg(frag, program->log()));
+        return nullptr;
+    }
+    if (!program->link())
+    {
+        GraphicsLog::error(QStringLiteral("renderer: shader program failed to link\n%1")
+                               .arg(program->log()));
+        return nullptr;
+    }
+
+    return program;
+}
+
+bool GraphicsRenderer::loadShaders()
+{
+    const QString vertexFile = QStringLiteral("passthrough.vert");
+    const QString fragmentFile = QStringLiteral("default.frag");
+
+    auto program = buildProgram(vertexFile, fragmentFile);
+    if (!program)
+        return false;
+
+    // Only replace the working program once the new one is proven good, so a
+    // failed edit leaves the previous picture on screen.
+    m_program = std::move(program);
+    m_vertexPath = resolveShaderPath(vertexFile);
+    m_fragmentPath = resolveShaderPath(fragmentFile);
+
+    GraphicsLog::info(QStringLiteral("shader: loaded\n  vertex   : %1\n  fragment : %2")
+                          .arg(m_vertexPath, m_fragmentPath));
+    return true;
+}
+
+bool GraphicsRenderer::reloadShaders()
+{
+    if (!QOpenGLContext::currentContext())
+    {
+        GraphicsLog::error(QStringLiteral("renderer: reload requested with no current context"));
+        return false;
+    }
+    // Deliberately not clearing m_program first: loadShaders() only swaps it in
+    // on success, so the old one keeps rendering if the edit is broken.
+    return loadShaders();
+}
+
+int GraphicsRenderer::reloadAll()
+{
+    // Copy first: reloadShaders() does not add or remove renderers, but iterating
+    // a container that a callee could in principle touch is a habit worth keeping.
+    const QList<GraphicsRenderer*> renderers = liveRenderers().values();
+
+    int ok = 0;
+    for (GraphicsRenderer* r : renderers)
+    {
+        QOpenGLContext* ctx = QOpenGLContext::currentContext();
+        QSurface* surface = ctx ? ctx->surface() : nullptr;
+        if (!surface)
+        {
+            GraphicsLog::warn(QStringLiteral("reload: a renderer has no current surface; skipped"));
+            continue;
+        }
+        if (ctx->makeCurrent(surface) && r->reloadShaders())
+            ++ok;
+        ctx->doneCurrent();
+    }
+
+    if (renderers.isEmpty())
+        GraphicsLog::info(QStringLiteral("reload: no live renderer to reload"));
+    else
+        GraphicsLog::info(QStringLiteral("reload: %1 of %2 renderer(s) reloaded")
+                              .arg(ok).arg(renderers.size()));
+    return ok;
+}
+
+bool GraphicsRenderer::render()
+{
+    if (!m_fbo || !m_fbo->isValid())
+    {
+        GraphicsLog::error(QStringLiteral("renderer: render requested with no framebuffer"));
+        return false;
+    }
+
+    QOpenGLContext* ctx = QOpenGLContext::currentContext();
+    QOpenGLFunctions* f = ctx ? ctx->functions() : nullptr;
+    if (!f)
+    {
+        GraphicsLog::error(QStringLiteral("renderer: render requested with no current context"));
+        return false;
+    }
+
+    // Save the viewport for the same reason as the framebuffer binding below:
+    // render() may be called with the framebuffer already bound by a caller that
+    // has its own viewport set up, and leaving ours behind would corrupt its next
+    // draw.
+    GLint savedViewport[4] = { 0, 0, 0, 0 };
+    f->glGetIntegerv(GL_VIEWPORT, savedViewport);
+
+    m_fbo->bind();
+
+    // The viewport must be set explicitly. QOpenGLFramebufferObject::bind() binds
+    // the framebuffer but does NOT touch glViewport, so the viewport is whatever
+    // the surface last left behind - on this machine 1894x1092, the size of the
+    // offscreen surface's default framebuffer, against a 640x360 attachment.
+    //
+    // That mismatch is a silent wrong-picture bug rather than a crash: the quad
+    // is rasterised across the full viewport and only the part landing inside the
+    // attachment survives, so the image is cropped to roughly its bottom-left
+    // third and every interpolated varying is compressed into the same third of
+    // its range - the verification anchors read rgb(85,82) where rgb(255,255) was
+    // expected, and a shader that looked up a texture by those coordinates would
+    // sample the wrong region entirely.
+    f->glViewport(0, 0, m_size.width(), m_size.height());
+
+    // Clear first so anything the shader does not cover is a known colour rather
+    // than whatever was in the buffer before.
+    f->glClearColor(kClearR, kClearG, kClearB, kClearA);
+    f->glClear(GL_COLOR_BUFFER_BIT);
+
+    if (m_program && m_program->isLinked())
+    {
+        m_program->bind();
+
+        // Attribute locations are hardcoded in passthrough.vert via
+        // layout(location = ...), so the same numbers are used here. Bound and
+        // enabled per frame rather than once at setup: the cost is negligible
+        // and it cannot drift out of sync with the VAO state.
+        if (m_vbo && m_vao)
+        {
+            m_vao->bind();
+            m_vbo->bind();
+
+            m_program->enableAttributeArray(0);
+            m_program->setAttributeBuffer(0, GL_FLOAT, 0, 2, 4 * sizeof(float));
+            m_program->enableAttributeArray(1);
+            m_program->setAttributeBuffer(1, GL_FLOAT, 2 * sizeof(float), 2, 4 * sizeof(float));
+
+            // Six vertices: two triangles forming the full-screen quad.
+            f->glDrawArrays(GL_TRIANGLES, 0, 6);
+
+            m_program->disableAttributeArray(0);
+            m_program->disableAttributeArray(1);
+            m_vbo->release();
+            m_vao->release();
+        }
+
+        m_program->release();
+    }
+
+    m_fbo->release();
+
+    // Put the caller's viewport back, matching the framebuffer binding that
+    // release() just restored. Without this, a caller that had its own viewport
+    // set would find it silently replaced by ours.
+    f->glViewport(savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3]);
+
+    const GLenum err = f->glGetError();
+    if (err != GL_NO_ERROR)
+    {
+        GraphicsLog::error(QStringLiteral("renderer: GL error 0x%1 after render").arg(err, 0, 16));
+        return false;
+    }
     return true;
 }
 
@@ -98,9 +384,8 @@ bool GraphicsRenderer::readPixels(QSize* sizeOut, std::unique_ptr<unsigned char[
         return false;
     }
 
-    QOpenGLFunctions* f = QOpenGLContext::currentContext()
-                              ? QOpenGLContext::currentContext()->functions()
-                              : nullptr;
+    QOpenGLContext* ctx = QOpenGLContext::currentContext();
+    QOpenGLFunctions* f = ctx ? ctx->functions() : nullptr;
     if (!f)
     {
         GraphicsLog::error(QStringLiteral("renderer: readback requested with no current context"));
@@ -132,13 +417,12 @@ bool GraphicsRenderer::readPixels(QSize* sizeOut, std::unique_ptr<unsigned char[
     return true;
 }
 
-bool GraphicsRenderer::colourMatches(const unsigned char* rgba) const
+bool GraphicsRenderer::channelClose(unsigned char actual, float expected) const
 {
-    return channelClose(rgba[0], kClearR) && channelClose(rgba[1], kClearG)
-           && channelClose(rgba[2], kClearB) && channelClose(rgba[3], kClearA);
+    return std::abs(int(actual) - toByte(expected)) <= kChannelTolerance;
 }
 
-bool GraphicsRenderer::verifyClearColour()
+bool GraphicsRenderer::verifyShaderOutput()
 {
     if (!m_fbo || !m_fbo->isValid())
     {
@@ -146,72 +430,96 @@ bool GraphicsRenderer::verifyClearColour()
         return false;
     }
 
-    QOpenGLContext* ctx = QOpenGLContext::currentContext();
-    QOpenGLFunctions* f = ctx ? ctx->functions() : nullptr;
-    if (!f)
+    // Draw the test pattern rather than the current default shader. The check is
+    // of the pipeline - buffer, attributes, projection, framebuffer, readback -
+    // and needs a known image to compare against, which default.frag deliberately
+    // is not.
+    auto anchors = buildProgram(QStringLiteral("passthrough.vert"), QStringLiteral("anchors.frag"));
+    if (!anchors)
     {
-        GraphicsLog::error(QStringLiteral("renderer: verify requested with no current context"));
+        GraphicsLog::error(QStringLiteral("renderer: could not build the verification shader"));
         return false;
     }
+    std::unique_ptr<QOpenGLShaderProgram> saved = std::move(m_program);
+    m_program = std::move(anchors);
 
-    m_fbo->bind();
-    f->glClearColor(kClearR, kClearG, kClearB, kClearA);
-    f->glClear(GL_COLOR_BUFFER_BIT);
-    m_fbo->release();
+    // Restore the default program however this returns, so a failed verification
+    // does not leave the test pattern on screen.
+    struct Restore
+    {
+        std::unique_ptr<QOpenGLShaderProgram>* slot;
+        std::unique_ptr<QOpenGLShaderProgram>* saved;
+        ~Restore() { *slot = std::move(*saved); }
+    } restore{ &m_program, &saved };
+
+    if (!render())
+        return false;
 
     QSize readSize;
     std::unique_ptr<unsigned char[]> pixels;
     if (!readPixels(&readSize, &pixels))
         return false;
 
-    // The clear is a uniform colour, so checking a few points is enough to catch
-    // "nothing was drawn" and "the wrong thing was bound". Corner-to-corner plus
-    // the centre, rather than every pixel.
     const int w = readSize.width();
     const int h = readSize.height();
-    const struct { int x; int y; const char* label; } points[] = {
-        { 0,        0,        "bottom-left" },
-        { w - 1,    0,        "bottom-right" },
-        { 0,        h - 1,    "top-left" },
-        { w - 1,    h - 1,    "top-right" },
-        { w / 2,    h / 2,    "centre" },
+
+    // Anchor points matching anchors.frag.
+    //
+    // The y axis here is OpenGL's: row 0 is the BOTTOM of the image, because
+    // that is where GL's origin is. So y=0 is "bottom" in shader terms and h-1
+    // is "top". Reading these the habitually screen-like way round would compare
+    // the wrong corners and either pass by luck or fail confusingly.
+    struct Anchor
+    {
+        const char* label;
+        int x;
+        int y;
+        float r, g, b;
+    };
+    // Sampled away from the exact corner so the shader's interior region is
+    // what gets checked, not a boundary pixel.
+    const int inset = 8;
+    const Anchor anchorsTable[] = {
+        { "bottom-left  (uv 0,0)", inset,     inset,     1.0f, 0.0f, 0.0f },
+        { "bottom-right (uv 1,0)", w - inset, inset,     0.0f, 1.0f, 0.0f },
+        { "top-left     (uv 0,1)", inset,     h - inset, 0.0f, 0.0f, 1.0f },
+        { "top-right    (uv 1,1)", w - inset, h - inset, 1.0f, 1.0f, 0.0f },
+        { "centre",                w / 2,     h / 2,     1.0f, 1.0f, 1.0f },
     };
 
     bool allOk = true;
-    for (const auto& p : points)
+    for (const auto& a : anchorsTable)
     {
-        const size_t offset = (size_t(p.y) * size_t(w) + size_t(p.x)) * 4;
+        const size_t offset = (size_t(a.y) * size_t(w) + size_t(a.x)) * 4;
         const unsigned char* px = pixels.get() + offset;
-        const bool ok = colourMatches(px);
+        const bool ok = channelClose(px[0], a.r) && channelClose(px[1], a.g)
+                        && channelClose(px[2], a.b);
+
+        // Alpha is reported but not asserted: the test pattern is fully opaque,
+        // so a wrong alpha here could only mean a wrong attachment format, and
+        // including it in the log makes that visible without turning a
+        // format difference into a pipeline failure.
         allOk = allOk && ok;
 
-        GraphicsLog::info(QStringLiteral("  %1 (%2,%3) = rgba(%4,%5,%6,%7) %8")
-                              .arg(QString::fromLatin1(p.label))
-                              .arg(p.x)
-                              .arg(p.y)
+        GraphicsLog::info(QStringLiteral("  %1 (%2,%3) = rgb(%4,%5,%6) a=%7 want(%8,%9,%10) %11")
+                              .arg(QString::fromLatin1(a.label))
+                              .arg(a.x)
+                              .arg(a.y)
                               .arg(px[0])
                               .arg(px[1])
                               .arg(px[2])
                               .arg(px[3])
+                              .arg(toByte(a.r))
+                              .arg(toByte(a.g))
+                              .arg(toByte(a.b))
                               .arg(ok ? QStringLiteral("ok") : QStringLiteral("MISMATCH")));
     }
 
-    const QString expected = QStringLiteral("expected rgba(%1,%2,%3,%4) +/-%5")
-                                 .arg(toByte(kClearR))
-                                 .arg(toByte(kClearG))
-                                 .arg(toByte(kClearB))
-                                 .arg(toByte(kClearA))
-                                 .arg(kChannelTolerance);
-
     if (allOk)
-    {
-        GraphicsLog::info(QStringLiteral("readback verified: %1x%2, %3")
-                              .arg(w).arg(h).arg(expected));
-    }
+        GraphicsLog::info(QStringLiteral("shader output verified: %1x%2").arg(w).arg(h));
     else
-    {
-        GraphicsLog::error(QStringLiteral("readback FAILED: %1").arg(expected));
-    }
+        GraphicsLog::error(QStringLiteral("shader output FAILED at one or more anchors"));
+
     return allOk;
 }
 

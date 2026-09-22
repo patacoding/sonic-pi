@@ -679,3 +679,12 @@ source_group(NewApi FILES ${NEW_API_SOURCES})
 
 source_group(Qt\\AutoMoc FILES ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}_automoc.cpp )
 source_group(Qt\\AutoMoc REGULAR_EXPRESSION "(mocs_*|qrc_.*)" )
+
+# Where the renderer looks for shader files. Placed after the target is
+# created: target_compile_definitions cannot be called before that.
+# The user copy under ~/.sonic-pi/graphics/shaders takes priority; this is
+# the fallback so a fresh checkout works with no copying step. Deliberately
+# not installed as an asset - the point is that these files stay readable
+# and editable where they are.
+target_compile_definitions(${APP_NAME} PRIVATE
+    GRAPHICS_SHADER_DIR="${QTAPP_ROOT}/graphics/shaders")

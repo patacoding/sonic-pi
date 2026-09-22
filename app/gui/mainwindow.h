@@ -881,6 +881,9 @@ private:
     // independent of the GUI; these are its menu and toolbar entry points.
     QAction *graphicsOutAct;
     QAction *graphicsFullscreenAct;
+    // Re-reads the shader files from disk. They live outside the binary so they
+    // can be edited and reloaded without a rebuild.
+    QAction *graphicsReloadShaderAct;
     // The output window, created lazily on first show and owned here.
     SonicPi::GraphicsWindow* graphicsWindow = nullptr;
     // Drives continuous repaint while the window is visible. Without it the

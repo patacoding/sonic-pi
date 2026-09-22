@@ -83,6 +83,7 @@
 // The output window itself, and its log. The graphics module is deliberately
 // self-contained; mainwindow only creates the window and forwards menu actions.
 #include "graphics/rendering/GraphicsLog.h"
+#include "graphics/rendering/GraphicsRenderer.h"
 #include "graphics/ui/GraphicsWindow.h"
 #include "widgets/sonicpitooltip.h"
 #include <QFileOpenEvent>
@@ -5383,6 +5384,7 @@ const QList<ShortcutDef>& MainWindow::shortcutDefs()
     // here: fullscreen hides the menu bar, leaving no other way back out.
     { "GraphicsOutput", QT_TR_NOOP("Show or hide the graphics output window"), "Ctrl+Shift+G", "Ctrl+Shift+G", "Ctrl+Shift+G", "Graphics", &MainWindow::graphicsOutAct },
     { "GraphicsFullscreen", QT_TR_NOOP("Toggle fullscreen for the graphics output"), "Ctrl+Shift+F", "Ctrl+Shift+F", "Ctrl+Shift+F", "Graphics", &MainWindow::graphicsFullscreenAct },
+    { "GraphicsReloadShader", QT_TR_NOOP("Re-read the graphics shader from disk"), "Ctrl+Shift+R", "Ctrl+Shift+R", "Ctrl+Shift+R", "Graphics", &MainWindow::graphicsReloadShaderAct },
     { "CycleThemes", QT_TR_NOOP("Cycle through the available colour themes"), "ShiftMeta+M", "ShiftMeta+M", "ShiftMeta+M", "Visuals", &MainWindow::cycleThemesAct },
     { "Info", QT_TR_NOOP("Toggle information about Sonic Pi"), "Meta+n", "Meta+1", "Meta+1", "View", &MainWindow::infoAct },
 #if defined(Q_OS_MAC)
@@ -6203,6 +6205,16 @@ void MainWindow::createToolBar()
                               2000);
     });
 
+    // Re-read the shader from disk. Present so the shader can be edited and
+    // reloaded without rebuilding, which is what makes it possible to try things
+    // out. A failed compile keeps the previous picture (see GraphicsRenderer).
+    graphicsReloadShaderAct = new QAction(tr("Reload Shader"), this);
+    connect(graphicsReloadShaderAct, &QAction::triggered, this, []() {
+        const int reloaded = SonicPi::GraphicsRenderer::reloadAll();
+        SonicPi::GraphicsLog::info(QStringLiteral("menu: reload shader -> %1 renderer(s)")
+                                       .arg(reloaded));
+    });
+
     toolBar->addAction(scopeAct);
     toolBar->addAction(graphicsOutAct);
     toolBar->addAction(infoAct);
@@ -6413,6 +6425,8 @@ void MainWindow::createToolBar()
     graphicsMenu = menuBar()->addMenu(tr("Graphics"));
     graphicsMenu->addAction(graphicsOutAct);
     graphicsMenu->addAction(graphicsFullscreenAct);
+    graphicsMenu->addSeparator();
+    graphicsMenu->addAction(graphicsReloadShaderAct);
 
     // The IO menu is grouped into labelled sections (addSection) so the
     // device controls, network controls and capture controls read as
