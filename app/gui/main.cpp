@@ -157,14 +157,23 @@ int main(int argc, char* argv[])
     // an earlier revision did - meant graphics.log was written and then
     // immediately rotated away, leaving the live file permanently empty.
     //
-    // TEMPORARY: the render loop replaces the run-to-completion below, and the
-    // thread will then be owned by GraphicsRuntime rather than started here.
+    // The thread is NOT waited on. Creating a GL context pulls in the GPU driver
+    // and measured about four seconds here; blocking on it delayed audio device
+    // setup far enough that Spider's five-second promise expired in
+    // load_synthdefs and Sonic Pi failed to boot with "Could not connect to
+    // Sonic Pi Server". contextReady() is queued back to this thread instead.
+    //
+    // TEMPORARY: the render loop replaces the run-to-completion inside the
+    // thread, and GraphicsRuntime will own it rather than main().
     {
-        SonicPi::GraphicsRenderThread gfxThread;
-        gfxThread.start();
-        gfxThread.wait();
-        if (!gfxThread.contextIsValid())
-            std::cout << "[GUI] - graphics context could not be created" << std::endl;
+        auto* gfxThread = new SonicPi::GraphicsRenderThread(&app);
+        QObject::connect(gfxThread, &SonicPi::GraphicsRenderThread::contextReady,
+                         &app, [](bool ok) {
+                             if (!ok)
+                                 std::cout << "[GUI] - graphics context could not be created"
+                                           << std::endl;
+                         });
+        gfxThread->start();
 
         // Self-check for the logging itself. The warning and error paths only
         // fire when something has already gone wrong, which means they would

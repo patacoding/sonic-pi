@@ -52,6 +52,15 @@ void info(const QString& msg);
 void warn(const QString& msg);
 void error(const QString& msg);
 
+// Fire-and-forget logging for code that can run every frame.
+//
+// Repeated identical messages are suppressed within a rolling window, with a
+// note recording how many were dropped. This exists because a log call inside a
+// render loop is an easy mistake with a disproportionate result: one such call
+// produced 7790 entries and a 3.2 MB log in 154 seconds. Prefer this over
+// info()/warn()/error() in anything frame-rate driven.
+void throttled(Level level, const QString& msg, int intervalMs = 1000);
+
 // Where the log actually goes, resolved. Useful to report in the one place that
 // can still reach the user if the log itself cannot be opened.
 QString filePath();

@@ -128,15 +128,15 @@ void GraphicsWindow::paintGL()
     if (!f)
         return;
 
-    // Phase 1.1 draws what Phase 0.2 verified - the cleared target - so the
-    // window's job right now is to prove the surface, the resize path and the
-    // fullscreen path, not to produce interesting pixels. The shader replaces
-    // this in Phase 0.3/2.
-    if (m_renderer)
-        m_renderer->verifyClearColour();
-
-    // A solid clear of the default framebuffer. When the render target becomes a
-    // shared texture this is where it gets blitted instead.
+    // Phase 1.1 clears the surface to the colour Phase 0.2 verified. The shader
+    // replaces this in Phase 0.3/2.
+    //
+    // Deliberately NO readback here. GraphicsRenderer::verifyClearColour() reads
+    // the framebuffer back to the CPU, which stalls on the GPU. An earlier
+    // revision called it every frame, which produced 7790 readbacks, a 3.2 MB
+    // log over 154 seconds, and held the frame rate at ~50Hz instead of 60. It
+    // is a one-shot verification tool for the render thread, not a frame loop
+    // step.
     f->glClearColor(GraphicsRenderer::kClearR,
                     GraphicsRenderer::kClearG,
                     GraphicsRenderer::kClearB,

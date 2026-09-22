@@ -15,6 +15,7 @@
 
 #include <QDateTime>
 #include <QDir>
+#include <QHash>
 #include <QMutex>
 #include <QMutexLocker>
 
@@ -152,6 +153,51 @@ void warn(const QString& msg)
 void error(const QString& msg)
 {
     write(Level::Error, msg);
+}
+
+void throttled(Level level, const QString& msg, int intervalMs)
+{
+    struct Entry
+    {
+        qint64 lastMs = 0;
+        int    suppressed = 0;
+    };
+    // Keyed on level+message. Only touched here, and the state update happens
+    // under the same mutex write() uses, so it is safe from several threads.
+    static QHash<QString, Entry> seen;
+
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const QString key = QString::number(int(level)) + QLatin1Char('\x1f') + msg;
+
+    bool shouldEmit = false;
+    int dropped = 0;
+    {
+        QMutexLocker lock(&logMutex());
+        Entry& e = seen[key];
+        if (e.lastMs == 0 || now - e.lastMs >= intervalMs)
+        {
+            shouldEmit = true;
+            dropped = e.suppressed;
+            e.suppressed = 0;
+            e.lastMs = now;
+        }
+        else
+        {
+            ++e.suppressed;
+        }
+    }
+
+    if (!shouldEmit)
+        return;
+
+    if (dropped > 0)
+    {
+        write(level, QStringLiteral("%1  (+%2 identical suppressed)").arg(msg).arg(dropped));
+    }
+    else
+    {
+        write(level, msg);
+    }
 }
 
 } // namespace GraphicsLog

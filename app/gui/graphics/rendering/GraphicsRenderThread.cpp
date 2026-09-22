@@ -195,6 +195,10 @@ void GraphicsRenderThread::run()
     // ---------------------------------------------------------------------
 
     m_context->doneCurrent();
+
+    // Tell any listener the outcome. Emitted from this thread; a queued
+    // connection is what a GUI-side receiver needs.
+    emit contextReady(m_contextOk);
 }
 
 } // namespace SonicPi

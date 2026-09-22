@@ -51,6 +51,17 @@ public:
     // contexts end up shareable.
     static QSurfaceFormat requestedFormat();
 
+    // NOTE on starting this: do not block the caller on it.
+    //
+    // Creating a GL context pulls in the GPU driver, which is not cheap - on
+    // this machine it measured around four seconds. Running it on the startup
+    // critical path delayed audio device setup far enough that Spider's
+    // five-second promise timed out in load_synthdefs, and Sonic Pi failed to
+    // boot. Connect to contextReady() instead, or start it from a worker.
+    //
+    // contextReady() is emitted from the render thread once the context exists
+    // (or has failed), so the result can be reported without waiting.
+
     explicit GraphicsRenderThread(QObject* parent = nullptr);
     ~GraphicsRenderThread() override;
 
@@ -66,6 +77,13 @@ public:
 
     // Ask the loop to finish and block until the thread has stopped.
     void shutdown();
+
+signals:
+    // Emitted from the render thread once the context succeeds or fails. Lets a
+    // caller report the outcome without blocking on start(), which matters
+    // because context creation is slow enough to break Sonic Pi's boot if it
+    // runs on the critical path.
+    void contextReady(bool ok);
 
 protected:
     void run() override;
