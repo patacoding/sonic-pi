@@ -27,6 +27,7 @@
 #include "utils/dividerproxystyle.h"
 #include "utils/fontroles.h"
 
+#include "graphics/rendering/GraphicsLog.h"
 #include "graphics/rendering/GraphicsRenderThread.h"
 
 #include "mainwindow.h"
@@ -164,6 +165,24 @@ int main(int argc, char* argv[])
         gfxThread.wait();
         if (!gfxThread.contextIsValid())
             std::cout << "[GUI] - graphics context could not be created" << std::endl;
+
+        // Self-check for the logging itself. The warning and error paths only
+        // fire when something has already gone wrong, which means they would
+        // otherwise never be exercised - and a broken format discovered during a
+        // real failure is the worst time to find it. Set the variable and every
+        // level is written once, along with the resolved path.
+        //
+        //   set SONIC_PI_GRAPHICS_LOG_SELFTEST=1
+        if (qEnvironmentVariableIsSet("SONIC_PI_GRAPHICS_LOG_SELFTEST"))
+        {
+            SonicPi::GraphicsLog::info(QStringLiteral("log self-check"));
+            SonicPi::GraphicsLog::warn(QStringLiteral("log self-check: warning level"));
+            SonicPi::GraphicsLog::error(QStringLiteral("log self-check: error level"));
+            SonicPi::GraphicsLog::info(QStringLiteral("multiline message:\n")
+                                       + QStringLiteral("second line should be indented"));
+            std::cout << "[GUI] - graphics log at: "
+                      << SonicPi::GraphicsLog::filePath().toStdString() << std::endl;
+        }
     }
     // ---------------------------------------------------------------------
 
