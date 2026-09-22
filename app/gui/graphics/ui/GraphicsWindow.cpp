@@ -138,6 +138,153 @@ void GraphicsWindow::resizeGL(int w, int h)
     update();
 }
 
+// The display shader: show a texture, flipped vertically.
+//
+// The flip is not optional and not a preference. GL's texture origin is its
+// bottom-left, so sampling with v increasing upward shows the renderer's
+// framebuffer the same way up as it was drawn; the D3D interop path needs the
+// opposite for the same reason. Which way round it goes is a property of the two
+// coordinate systems, so it is pinned here once rather than left to each caller.
+static const char* kDisplayVertexShader = R"(
+#version 330 core
+layout(location = 0) in vec2 a_pos;
+out vec2 v_uv;
+void main() {
+    // a_pos is already in clip space (-1..1); derive uv from it rather than
+    // carrying a second attribute, since the quad is exactly the whole viewport.
+    v_uv = a_pos * 0.5 + 0.5;
+    gl_Position = vec4(a_pos, 0.0, 1.0);
+}
+)";
+
+static const char* kDisplayFragmentShader = R"(
+#version 330 core
+uniform sampler2D u_texture;
+in vec2 v_uv;
+layout(location = 0) out vec4 FragColor;
+void main() {
+    FragColor = texture(u_texture, v_uv);
+}
+)";
+
+bool GraphicsWindow::initDisplay()
+{
+    if (m_displayReady)
+        return true;
+
+    auto program = std::make_unique<QOpenGLShaderProgram>();
+    if (!program->addShaderFromSourceCode(QOpenGLShader::Vertex, kDisplayVertexShader)
+        || !program->addShaderFromSourceCode(QOpenGLShader::Fragment, kDisplayFragmentShader)
+        || !program->link())
+    {
+        GraphicsLog::error(QStringLiteral("window: the display shader failed\n%1").arg(program->log()));
+        return false;
+    }
+
+    m_displayVao = std::make_unique<QOpenGLVertexArrayObject>();
+    if (!m_displayVao->create())
+    {
+        GraphicsLog::error(QStringLiteral("window: could not create a VAO for the display"));
+        m_displayVao.reset();
+        return false;
+    }
+    m_displayVao->bind();
+
+    // A quad covering clip space, in the two triangles a core profile needs.
+    static const float kQuad[] = {
+        -1.0f, -1.0f,
+         1.0f, -1.0f,
+         1.0f,  1.0f,
+        -1.0f, -1.0f,
+         1.0f,  1.0f,
+        -1.0f,  1.0f,
+    };
+    m_displayVbo = std::make_unique<QOpenGLBuffer>(QOpenGLBuffer::VertexBuffer);
+    if (!m_displayVbo->create() || !m_displayVbo->bind())
+    {
+        GraphicsLog::error(QStringLiteral("window: could not create a VBO for the display"));
+        m_displayVbo.reset();
+        m_displayVao.reset();
+        return false;
+    }
+    m_displayVbo->setUsagePattern(QOpenGLBuffer::StaticDraw);
+    m_displayVbo->allocate(kQuad, int(sizeof(kQuad)));
+    m_displayVao->release();
+    m_displayVbo->release();
+
+    m_displayProgram = std::move(program);
+    m_displayReady = true;
+    GraphicsLog::info(QStringLiteral("window: display shader ready (samples the shared texture)"));
+    return true;
+}
+
+bool GraphicsWindow::drawSharedFrame(const QRect& destination)
+{
+    if (!m_sharedFrame || destination.isEmpty())
+        return false;
+
+    const GraphicsSharedFrame shared = m_sharedFrame->read();
+    if (!shared.valid())
+        return false;
+
+    if (!initDisplay())
+        return false;
+
+    QOpenGLFunctions* f = context() ? context()->functions() : nullptr;
+    if (!f)
+        return false;
+
+    // The texture name belongs to the render thread's context. It is usable here
+    // only because the two contexts are in one share group - see the share-group
+    // logging in initializeGL, which exists to make a silent failure of that
+    // visible.
+    if (shared.texture != m_boundDisplayTexture)
+    {
+        m_boundDisplayTexture = shared.texture;
+        GraphicsLog::info(QStringLiteral("window: displaying shared texture %1 (%2x%3)")
+                              .arg(shared.texture)
+                              .arg(shared.size.width())
+                              .arg(shared.size.height()));
+    }
+
+    // Report the frame number being shown, once a second.
+    //
+    // This is the acceptance check for the whole handover: the render thread logs
+    // its iFrame, and if the window is displaying that thread's output then the
+    // numbers must describe the same sequence. Before sharing they were two
+    // unrelated counters that both happened to advance, which is exactly the kind
+    // of thing that looks fine and proves nothing. Throttled because this runs
+    // per frame.
+    GraphicsLog::throttled(GraphicsLog::Level::Info,
+                           QStringLiteral("window: showing shared frame %1").arg(shared.frameIndex),
+                           1000);
+
+    // Filtering is set per texture rather than per frame: these are state on the
+    // texture object, and re-setting them every frame would be noise. GL_NEAREST
+    // because the view is 1:1 - any filtering here would soften pixels that are
+    // meant to be shown exactly as rendered. Set while the texture is bound.
+    f->glActiveTexture(GL_TEXTURE0);
+    f->glBindTexture(GL_TEXTURE_2D, shared.texture);
+    f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    m_displayProgram->bind();
+    m_displayProgram->setUniformValue("u_texture", 0);
+    m_displayVao->bind();
+    m_displayVbo->bind();
+    m_displayProgram->enableAttributeArray(0);
+    m_displayProgram->setAttributeBuffer(0, GL_FLOAT, 0, 2, 2 * sizeof(float));
+    f->glDrawArrays(GL_TRIANGLES, 0, 6);
+    m_displayProgram->disableAttributeArray(0);
+    m_displayVbo->release();
+    m_displayVao->release();
+    m_displayProgram->release();
+
+    return true;
+}
+
 void GraphicsWindow::paintGL()
 {
     QOpenGLFunctions* f = context() ? context()->functions() : nullptr;
@@ -194,8 +341,55 @@ void GraphicsWindow::paintGL()
     // margin around it.
     //
     // The rectangle comes from a helper rather than being computed inline, because
-    // the shared-texture step needs exactly the same rectangle to blit into.
+    // both paths below need exactly the same rectangle.
     const QRect destination = cropRect();
+
+    const qreal dpr = devicePixelRatio();
+    const QSize surface(qMax(1, int(width() * dpr)), qMax(1, int(height() * dpr)));
+
+    // Clear the whole surface first, so the area outside `destination` is the
+    // documented background rather than whatever the previous frame left there.
+    // A window larger than the output shows margin, and that margin has to be
+    // painted by someone.
+    f->glViewport(0, 0, surface.width(), surface.height());
+    f->glClearColor(GraphicsRenderer::kClearR,
+                    GraphicsRenderer::kClearG,
+                    GraphicsRenderer::kClearB,
+                    GraphicsRenderer::kClearA);
+    f->glClear(GL_COLOR_BUFFER_BIT);
+
+    // Preferred path: display the render thread's frame.
+    //
+    // This is what removes the second renderer and the second clock: the picture
+    // is drawn once, by the render thread, and the window only shows it. The
+    // viewport is set from the same crop rectangle, so a window smaller than the
+    // output reveals less of the image rather than scaling it.
+    if (m_sharedFrame)
+    {
+        // glViewport takes framebuffer pixels with the origin at the BOTTOM-left,
+        // while the crop rectangle is in Qt's top-left coordinates - hence the y
+        // conversion. Done here because this is where the two conventions meet.
+        f->glViewport(destination.x(),
+                      surface.height() - (destination.y() + destination.height()),
+                      destination.width(),
+                      destination.height());
+        if (drawSharedFrame(destination))
+            return;
+        // Nothing published yet: fall through and draw for ourselves so the window
+        // shows something rather than a bare background.
+    }
+
+    // Fallback: draw the shader here. Reached before the render thread has
+    // published a frame, and when no slot was provided at all.
+    //
+    // The window's own shader clock. Anchored to the first painted frame and read
+    // as a difference, never accumulated - see GraphicsFrame::timeSeconds.
+    if (!m_clockStarted)
+    {
+        m_clock.start();
+        m_sinceLastPaint.start();
+        m_clockStarted = true;
+    }
 
     GraphicsFrame frame;
     frame.timeSeconds = double(m_clock.elapsed()) / 1000.0;

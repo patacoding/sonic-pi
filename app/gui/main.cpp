@@ -184,10 +184,25 @@ int main(int argc, char* argv[])
     // TEMPORARY: the render loop replaces the run-to-completion inside the
     // thread, and GraphicsRuntime will own it rather than main().
     {
+        // The handover point between the render thread and the output window.
+        //
+        // Created here, before the thread starts, and owned for the process's
+        // lifetime rather than by either side: both need the SAME object, and
+        // neither owns the other. It has to exist before start() because the loop
+        // publishes from its very first frame, and any frame published into a slot
+        // set later would simply be lost.
+        //
+        // Static rather than a stack local so it outlives both users regardless of
+        // destruction order at shutdown - a consumer reading a destroyed slot would
+        // be a use-after-free during exit, which is exactly when it is hardest to
+        // diagnose.
+        static SonicPi::GraphicsSharedFrameSlot gfxSharedFrame;
+
         auto* gfxThread = new SonicPi::GraphicsRenderThread(&app);
         // The frame rate ceiling, from Graphics' own settings file. 0 means no
         // explicit preference, so the renderer uses its default cap.
         gfxThread->setTargetFps(SonicPi::GraphicsSettings::frameCapHz());
+        gfxThread->setSharedFrameSlot(&gfxSharedFrame);
         QObject::connect(gfxThread, &SonicPi::GraphicsRenderThread::contextReady,
                          &app, [](bool ok) {
                              if (!ok)
@@ -200,6 +215,7 @@ int main(int argc, char* argv[])
         // to render at. The window is created lazily on first use, long after
         // this, so the handle has to be stored rather than passed at construction.
         mainWin.setGraphicsRenderThread(gfxThread);
+        mainWin.setGraphicsSharedFrame(&gfxSharedFrame);
 
         // Self-check for the logging itself. The warning and error paths only
         // fire when something has already gone wrong, which means they would

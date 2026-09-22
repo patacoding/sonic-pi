@@ -14,6 +14,7 @@
 #pragma once
 
 #include "GraphicsRenderer.h"
+#include "GraphicsSharedFrame.h"
 
 #include <QThread>
 #include <QString>
@@ -119,6 +120,18 @@ public:
     // A snapshot of the loop's counters. Safe from any thread.
     GraphicsFrameStats frameStats() const;
 
+    // Where this thread publishes the frame it has just drawn, for the output
+    // window to display.
+    //
+    // Handed in rather than owned, because the same slot has to reach the window,
+    // which lives on the GUI thread. Must be set before start(): the loop publishes
+    // from its first frame, and a slot set later would silently drop early frames.
+    //
+    // Null is legal and means "publish nowhere" - the loop then runs without a
+    // consumer, which is the case when no window will ever be shown.
+    void setSharedFrameSlot(GraphicsSharedFrameSlot* slot) { m_sharedFrame = slot; }
+
+
     // The size the render target should be, in pixels.
     //
     // Set once from the user's configured output resolution. It is not driven by
@@ -199,6 +212,9 @@ private:
     bool    m_renderVerified = false;
     // Frame rate ceiling. 0 means use kDefaultFrameCapHz.
     int     m_targetFps = 0;
+
+    // Not owned. See setSharedFrameSlot().
+    GraphicsSharedFrameSlot* m_sharedFrame = nullptr;
     // The GL_RENDERER string. Distinct from m_gfxRenderer, which is the object
     // that draws.
     QString m_renderer;

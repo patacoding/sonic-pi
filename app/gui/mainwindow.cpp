@@ -4014,6 +4014,11 @@ void MainWindow::setGraphicsRenderThread(SonicPi::GraphicsRenderThread* thread)
     graphicsRenderThread = thread;
 }
 
+void MainWindow::setGraphicsSharedFrame(SonicPi::GraphicsSharedFrameSlot* slot)
+{
+    graphicsSharedFrame = slot;
+}
+
 void MainWindow::showGraphicsOutput(bool on)
 {
     piSettings->show_graphics = on;
@@ -4034,6 +4039,9 @@ void MainWindow::showGraphicsOutput(bool on)
             // showing a crop of. It does not dictate that output's size - see
             // GraphicsWindow::setRenderThread.
             graphicsWindow->setRenderThread(graphicsRenderThread);
+            // The same slot the render thread publishes into, so the window shows
+            // the renderer's picture rather than drawing its own copy of it.
+            graphicsWindow->setSharedFrameSlot(graphicsSharedFrame);
             SonicPi::GraphicsLog::info(QStringLiteral("menu: created output window"));
 
             // A window closed by the user must un-tick the action, or the tick

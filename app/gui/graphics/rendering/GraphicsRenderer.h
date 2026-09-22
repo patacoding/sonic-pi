@@ -141,6 +141,20 @@ public:
 
     QSize size() const { return m_size; }
 
+    // The colour attachment of the framebuffer, as a GL texture name.
+    //
+    // Deliberately decoupled from size(): resizing a framebuffer in Qt keeps the
+    // texture name and only reallocates its storage, so a consumer that displays
+    // this texture has to watch the SIZE for correctness but only needs to rebuild
+    // its own state when the NAME changes. Conflating the two would make every
+    // crop change look like a new texture and force needless rebuilding.
+    //
+    // Shared across contexts: another context in the same share group can sample
+    // this texture directly, which is what lets the output window display the
+    // render thread's framebuffer instead of drawing its own copy. Zero when there
+    // is no framebuffer.
+    GLuint framebufferTexture() const { return m_fbo ? m_fbo->texture() : 0; }
+
     // Where the fragment shader was loaded from, so it can be reported to the
     // user (and so they know which copy to edit).
     QString fragmentShaderPath() const { return m_fragmentPath; }

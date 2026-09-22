@@ -50,6 +50,7 @@ namespace SonicPi
 // so forward declarations keep the OpenGL headers out of this one.
 class GraphicsWindow;
 class GraphicsRenderThread;
+class GraphicsSharedFrameSlot;
 } // namespace SonicPi
 class QsciScintilla;
 class QProcess;
@@ -167,6 +168,11 @@ public:
     // Held so the output window, which is created lazily on first use, can be given
     // the handle. Not owned.
     void setGraphicsRenderThread(SonicPi::GraphicsRenderThread* thread);
+
+    // The slot the render thread publishes frames into and the output window
+    // displays them from. Both must be given the SAME object, so it is owned here
+    // between them. Called by main() alongside setGraphicsRenderThread().
+    void setGraphicsSharedFrame(SonicPi::GraphicsSharedFrameSlot* slot);
 
     void addCuePath(QString path, QString val);
     // True when the job ran from an editor buffer (workspace_*), not the help
@@ -899,6 +905,9 @@ private:
     // Not owned. Set by main() once the render thread is started; see
     // setGraphicsRenderThread().
     SonicPi::GraphicsRenderThread* graphicsRenderThread = nullptr;
+    // Not owned either. The shared handover point between the render thread and the
+    // output window; see setGraphicsSharedFrame().
+    SonicPi::GraphicsSharedFrameSlot* graphicsSharedFrame = nullptr;
     // Drives continuous repaint while the window is visible. Without it the
     // window would only redraw on expose, which is not a render loop.
     QTimer* graphicsRepaintTimer = nullptr;

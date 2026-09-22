@@ -158,6 +158,12 @@ bool GraphicsRenderThread::applyRenderTargetSizeRequest()
     // half-replaced target. The window only ever publishes a number.
     QMutexLocker lock(&m_rendererMutex);
 
+    // Withdraw the current frame first. The texture is about to be destroyed, and
+    // a consumer still holding its name would sample a deleted texture - which on
+    // some drivers renders nothing and on others faults.
+    if (m_sharedFrame)
+        m_sharedFrame->clear();
+
     m_gfxRenderer.reset();
     m_gfxRenderer = std::make_unique<GraphicsRenderer>();
 
@@ -498,6 +504,15 @@ void GraphicsRenderThread::run()
                 // drawn into.
                 frame.resolution = m_gfxRenderer->size();
                 m_gfxRenderer->render(frame);
+
+                // Publish for the output window to display. Only after render()
+                // returns, because the texture is not safe to sample while a frame
+                // is being drawn into it - and this is the only synchronisation
+                // between the two threads, so it has to be in the right place.
+                if (m_sharedFrame)
+                    m_sharedFrame->publish(m_gfxRenderer->framebufferTexture(),
+                                           m_gfxRenderer->size(),
+                                           frame.frameIndex);
             }
         }
 

@@ -14,11 +14,17 @@
 #pragma once
 
 #include <QElapsedTimer>
+#include <QOpenGLBuffer>
+#include <QOpenGLShaderProgram>
+#include <QOpenGLVertexArrayObject>
 #include <QOpenGLWindow>
 #include <QSize>
 
 #include "GraphicsRenderer.h"
 #include "GraphicsRenderThread.h"
+#include "GraphicsSharedFrame.h"
+
+#include <memory>
 
 class QScreen;
 
@@ -76,6 +82,15 @@ public:
     // Not owned. Call before show().
     void setRenderThread(GraphicsRenderThread* thread);
 
+    // The slot the render thread publishes its frames into. Not owned; must be the
+    // same object handed to the render thread. When set, the window DISPLAYS that
+    // texture instead of drawing a shader of its own - which is the whole point:
+    // one renderer, one clock, one picture.
+    //
+    // Null is legal and falls back to the window drawing for itself, which is the
+    // pre-sharing behaviour.
+    void setSharedFrameSlot(GraphicsSharedFrameSlot* slot) { m_sharedFrame = slot; }
+
     // Move to the next screen in QGuiApplication::screens(), wrapping around.
     // Returns the screen it landed on, or nullptr if there is only one.
     QScreen* showOnNextScreen();
@@ -112,6 +127,29 @@ private:
     // with a top-left origin. 1:1 and centred, never scaled: the window is a
     // viewport onto the output, not a scaling surface.
     QRect cropRect() const;
+
+    // Draw the texture the render thread published, filling `destination`.
+    //
+    // Returns false when there is nothing to show or the display shader is not
+    // ready, so the caller can fall back to drawing for itself.
+    bool drawSharedFrame(const QRect& destination);
+
+    // Build the display shader and its quad. Requires a current context.
+    bool initDisplay();
+
+    // Samples another context's texture and shows it. Only the pieces the window
+    // needs; deliberately not a GraphicsRenderer, because this draws no shader of
+    // the user's - it shows one.
+    std::unique_ptr<QOpenGLShaderProgram>     m_displayProgram;
+    std::unique_ptr<QOpenGLVertexArrayObject> m_displayVao;
+    std::unique_ptr<QOpenGLBuffer>            m_displayVbo;
+    bool m_displayReady = false;
+
+    // Not owned. See setSharedFrameSlot().
+    GraphicsSharedFrameSlot* m_sharedFrame = nullptr;
+    // The texture currently bound for display, so the sampler's filter can be set
+    // once per texture rather than per frame. Zero means "nothing set up yet".
+    GLuint m_boundDisplayTexture = 0;
 
     // Owns the shader program and the quad. Not a pointer: there is exactly one
     // for the window's whole life, and a pointer only added a null case.
