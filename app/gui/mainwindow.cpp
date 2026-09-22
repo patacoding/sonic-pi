@@ -7607,6 +7607,15 @@ void MainWindow::readSettings()
     // GraphicsSettings for why; the short version is that an optional feature
     // should not leave keys in the product's config.
     piSettings->show_graphics = SonicPi::GraphicsSettings::showOutput();
+    // Reported because this preference has already been silently wrong once: the
+    // settings module wrote its keys into a group and read them without one, so
+    // the value saved correctly and was never seen again. A one-line record of
+    // what was actually loaded makes the next occurrence of that obvious instead
+    // of a puzzle.
+    SonicPi::GraphicsLog::info(QStringLiteral("settings: graphics show-output = %1 (from %2)")
+                                   .arg(piSettings->show_graphics ? QStringLiteral("true")
+                                                                  : QStringLiteral("false"))
+                                   .arg(SonicPi::GraphicsSettings::filePath()));
     piSettings->show_scope_labels = gui_settings->value("prefs/scope/show-labels", false).toBool();
     piSettings->show_cues = gui_settings->value("prefs/show_cues", true).toBool();
     piSettings->show_metro = gui_settings->value("prefs/show_metro", true).toBool();

@@ -26,6 +26,21 @@ namespace GraphicsSettings
 namespace
 {
 
+// All keys live in one group.
+//
+// This is not cosmetic. QSettings writes a key with no group into a "[General]"
+// section, but a read with a bare key name does NOT look inside that section - so a
+// value written as "show-output" and then read as "show-output" travels through two
+// different places and never comes back. The symptom is a setting that saves
+// correctly, appears in the file, and is silently never honoured again, because the
+// reader only ever sees its default.
+//
+// That is exactly what this module shipped with: the output window opened once, the
+// app saved the preference, and from then on the window never appeared again while
+// graphics.ini plainly said "show-output". Every access now goes through one of the
+// two helpers below, so the two halves cannot drift apart again.
+const QString kGroup = QStringLiteral("General");
+
 // Resolved once, on first use, the same way GraphicsLog resolves its directory.
 //
 // This module finds its own settings rather than being handed a QSettings by the
@@ -55,17 +70,36 @@ QString ensurePath()
     return cachedPath();
 }
 
-// One-time move of the keys that used to live in the GUI's settings file.
+QVariant readSetting(const QString& key, const QVariant& fallback)
+{
+    QSettings s(ensurePath(), QSettings::IniFormat);
+    s.beginGroup(kGroup);
+    const QVariant v = s.value(key, fallback);
+    s.endGroup();
+    return v;
+}
+
+void writeSetting(const QString& key, const QVariant& value)
+{
+    QSettings s(ensurePath(), QSettings::IniFormat);
+    s.beginGroup(kGroup);
+    s.setValue(key, value);
+    s.endGroup();
+    s.sync();
+}
+
+// One-time move of the keys that briefly lived in the GUI's settings file.
 //
-// The feature's settings were briefly written to v5-gui-settings.ini under
-// "prefs/graphics/". Anyone who ran that build has a window preference there, and
-// silently resetting it would look like the window had forgotten how to remember
-// itself. This reads the old file once and copies across only what the new file
-// does not already have, then leaves the old keys alone - removing them from a
-// file this module does not own is not its business, and they are inert.
+// An early revision of this feature wrote its settings to v5-gui-settings.ini under
+// "prefs/graphics/", which is what the settings were explicitly meant not to do.
+// Anyone who ran that build has a window preference sitting there, and dropping it
+// silently would look like the window had forgotten how to remember itself. So the
+// old keys are read once and copied across, then left alone in the old file -
+// deleting keys from a file this module does not own is not its business, and they
+// are inert.
 //
-// Runs at most once per process, and never after the new file exists, so it cannot
-// fight with a user's current settings.
+// Runs at most once per process, and never when the new file already exists, so it
+// cannot fight with a user's current settings.
 void migrateFromGuiSettingsOnce()
 {
     static bool done = false;
@@ -93,18 +127,12 @@ void migrateFromGuiSettingsOnce()
     if (!show.isValid() && !cap.isValid())
         return;
 
-    QSettings newSettings(ensurePath(), QSettings::IniFormat);
+    // Written through the same helper the readers use, so the migrated value lands
+    // where it will actually be found.
     if (show.isValid())
-        newSettings.setValue(QStringLiteral("show-output"), show.toBool());
+        writeSetting(QStringLiteral("show-output"), show.toBool());
     if (cap.isValid())
-        newSettings.setValue(QStringLiteral("frame-cap-hz"), cap.toInt());
-    newSettings.sync();
-}
-
-QSettings open()
-{
-    migrateFromGuiSettingsOnce();
-    return QSettings(ensurePath(), QSettings::IniFormat);
+        writeSetting(QStringLiteral("frame-cap-hz"), cap.toInt());
 }
 
 } // namespace
@@ -116,15 +144,16 @@ QString filePath()
 
 int frameCapHz()
 {
-    return open().value(QStringLiteral("frame-cap-hz"), 0).toInt();
+    migrateFromGuiSettingsOnce();
+    return readSetting(QStringLiteral("frame-cap-hz"), 0).toInt();
 }
 
 QSize outputSize()
 {
-    QSettings s = open();
+    migrateFromGuiSettingsOnce();
 
-    const int w = s.value(QStringLiteral("output-width"), kDefaultOutputWidth).toInt();
-    const int h = s.value(QStringLiteral("output-height"), kDefaultOutputHeight).toInt();
+    const int w = readSetting(QStringLiteral("output-width"), kDefaultOutputWidth).toInt();
+    const int h = readSetting(QStringLiteral("output-height"), kDefaultOutputHeight).toInt();
 
     // Guard here rather than at every use: a size of zero or less would make the
     // render target allocation fail, and a config file is easy to get wrong by
@@ -144,29 +173,24 @@ QSize outputSize()
 
 void setOutputSize(const QSize& size)
 {
-    QSettings s = open();
-    s.setValue(QStringLiteral("output-width"), size.width());
-    s.setValue(QStringLiteral("output-height"), size.height());
-    s.sync();
+    writeSetting(QStringLiteral("output-width"), size.width());
+    writeSetting(QStringLiteral("output-height"), size.height());
 }
 
 bool showOutput()
 {
-    return open().value(QStringLiteral("show-output"), false).toBool();
+    migrateFromGuiSettingsOnce();
+    return readSetting(QStringLiteral("show-output"), false).toBool();
 }
 
 void setFrameCapHz(int hz)
 {
-    QSettings s = open();
-    s.setValue(QStringLiteral("frame-cap-hz"), hz);
-    s.sync();
+    writeSetting(QStringLiteral("frame-cap-hz"), hz);
 }
 
 void setShowOutput(bool show)
 {
-    QSettings s = open();
-    s.setValue(QStringLiteral("show-output"), show);
-    s.sync();
+    writeSetting(QStringLiteral("show-output"), show);
 }
 
 } // namespace GraphicsSettings

@@ -494,16 +494,47 @@ bool GraphicsRenderer::renderToBoundFramebuffer(const QSize& passSize, const QRe
         // and it cannot drift out of sync with the VAO state.
         if (m_vbo && m_vao)
         {
+            // Drain any earlier error, then check after each step of the setup.
+            //
+            // A single check after the draw cannot say WHERE a GL_INVALID_OPERATION
+            // came from, and 0x502 is exactly the error this pipeline raises when a
+            // core-profile requirement is unmet - the VAO being unbound was one
+            // such cause earlier in this project. Reporting it once, with the step
+            // that produced it, turns a guess into a reading. Only the first
+            // occurrence is logged.
+            static bool diagnosed = false;
+            const auto step = [&](const char* what) {
+                const GLenum e = f->glGetError();
+                if (e != GL_NO_ERROR && !diagnosed)
+                {
+                    diagnosed = true;
+                    GraphicsLog::error(QStringLiteral("renderer: GL error 0x%1 at '%2' "
+                                                      "(program=%3 vao=%4 vbo=%5)")
+                                           .arg(e, 0, 16)
+                                           .arg(QString::fromLatin1(what))
+                                           .arg(m_program && m_program->isLinked() ? 1 : 0)
+                                           .arg(m_vao && m_vao->isCreated() ? 1 : 0)
+                                           .arg(m_vbo && m_vbo->isCreated() ? 1 : 0));
+                }
+            };
+
+            while (f->glGetError() != GL_NO_ERROR) { /* drain */ }
+
             m_vao->bind();
+            step("vao bind");
             m_vbo->bind();
+            step("vbo bind");
 
             m_program->enableAttributeArray(0);
             m_program->setAttributeBuffer(0, GL_FLOAT, 0, 2, 4 * sizeof(float));
+            step("attribute 0");
             m_program->enableAttributeArray(1);
             m_program->setAttributeBuffer(1, GL_FLOAT, 2 * sizeof(float), 2, 4 * sizeof(float));
+            step("attribute 1");
 
             // Six vertices: two triangles forming the full-screen quad.
             f->glDrawArrays(GL_TRIANGLES, 0, 6);
+            step("glDrawArrays");
 
             m_program->disableAttributeArray(0);
             m_program->disableAttributeArray(1);

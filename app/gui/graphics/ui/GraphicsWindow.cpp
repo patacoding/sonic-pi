@@ -15,6 +15,8 @@
 #include "GraphicsLog.h"
 #include "GraphicsSettings.h"
 
+#include <QDateTime>
+
 #include <QCloseEvent>
 #include <QGuiApplication>
 #include <QKeyEvent>
@@ -45,17 +47,16 @@ GraphicsWindow::GraphicsWindow(QWindow* parent)
 
 GraphicsWindow::~GraphicsWindow()
 {
-    // The renderer holds GL objects, which need a current context to be
-    // destroyed. makeCurrent() on a window whose surface is already gone can
-    // fail, in which case they are leaked rather than crashing - Qt is tearing
-    // the context down with the window anyway.
-    if (m_shaderReady && context())
+    // Release the display objects while the context can still be made current.
+    // Their destructors need it, and a window whose surface is already gone cannot
+    // provide one - in that case they leak rather than crash, and Qt is tearing the
+    // context down with the window anyway.
+    if (m_displayReady && context() && context()->makeCurrent(this))
     {
-        if (context()->makeCurrent(this))
-        {
-            m_renderer.destroy();
-            context()->doneCurrent();
-        }
+        m_displayVbo.reset();
+        m_displayVao.reset();
+        m_displayProgram.reset();
+        context()->doneCurrent();
     }
 }
 
@@ -63,7 +64,7 @@ void GraphicsWindow::setRenderThread(GraphicsRenderThread* thread)
 {
     // Stored, not used to set a size: the window does not decide the output
     // resolution. It is kept so the window can report which render target it is
-    // displaying, and so step 1.2 can read the shared texture from it.
+    // displaying.
     m_renderThread = thread;
 }
 
@@ -96,11 +97,9 @@ void GraphicsWindow::initializeGL()
                                   : QStringLiteral("DIFFERENT from Qt's global group"))));
     }
 
-    // The render target size is the user's configured output resolution, decided
-    // by the render thread from settings. Captured here so the log shows both
-    // numbers side by side, and so cropRect() has the size without reaching across
-    // to the render thread on every frame: this window is a crop of that target,
-    // and a mismatch between the two is what explains a window that looks clipped.
+    // The size being displayed is the render target's, so the crop matches what was
+    // actually rendered. Taken from the render thread rather than re-read from
+    // settings: a second copy of the setting could disagree with the target.
     m_outputSize = m_renderThread ? m_renderThread->renderTargetSize()
                                   : GraphicsSettings::outputSize();
     {
@@ -114,18 +113,8 @@ void GraphicsWindow::initializeGL()
                               .arg(dpr));
     }
 
-    // No framebuffer: this renderer draws straight to the window's surface. See
-    // the class comment for why there is deliberately no intermediate target.
-    if (!m_renderer.initializeWithoutFramebuffer())
-    {
-        GraphicsLog::error(QStringLiteral("window: could not load the shader"));
-        return;
-    }
-
-    m_shaderReady = true;
-    GraphicsLog::info(QStringLiteral("window: shader loaded, drawing to surface\n"
-                                     "  fragment : %1")
-                          .arg(m_renderer.fragmentShaderPath()));
+    // Nothing else to set up here: this window displays the render thread's
+    // texture and builds its display shader lazily on the first frame it can show.
 }
 
 void GraphicsWindow::resizeGL(int w, int h)
@@ -253,11 +242,19 @@ bool GraphicsWindow::drawSharedFrame(const QRect& destination)
     // its iFrame, and if the window is displaying that thread's output then the
     // numbers must describe the same sequence. Before sharing they were two
     // unrelated counters that both happened to advance, which is exactly the kind
-    // of thing that looks fine and proves nothing. Throttled because this runs
-    // per frame.
-    GraphicsLog::throttled(GraphicsLog::Level::Info,
-                           QStringLiteral("window: showing shared frame %1").arg(shared.frameIndex),
-                           1000);
+    // of thing that looks fine and proves nothing.
+    //
+    // Throttled by hand rather than through GraphicsLog::throttled(). That helper
+    // suppresses by message CONTENT, so a message carrying a frame number is
+    // different every frame and nothing is ever suppressed - it flooded the log
+    // with one line per frame the first time this ran. A time check is what this
+    // needs, not a content check.
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (now - m_lastFrameReportMs >= 1000)
+    {
+        m_lastFrameReportMs = now;
+        GraphicsLog::info(QStringLiteral("window: showing shared frame %1").arg(shared.frameIndex));
+    }
 
     // Filtering is set per texture rather than per frame: these are state on the
     // texture object, and re-setting them every frame would be noise. GL_NEAREST
@@ -270,6 +267,8 @@ bool GraphicsWindow::drawSharedFrame(const QRect& destination)
     f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
+    // No diagnostic readback here. Whether the picture is correct is judged by
+    // looking at it - see docs/dev-discipline.md.
     m_displayProgram->bind();
     m_displayProgram->setUniformValue("u_texture", 0);
     m_displayVao->bind();
@@ -291,66 +290,22 @@ void GraphicsWindow::paintGL()
     if (!f)
         return;
 
-    if (!m_shaderReady)
-    {
-        // No usable shader: a flat clear is more useful than a stale or undefined
-        // surface, and it makes "the shader never loaded" visibly different from
-        // "the shader draws black".
-        f->glClearColor(GraphicsRenderer::kClearR,
-                        GraphicsRenderer::kClearG,
-                        GraphicsRenderer::kClearB,
-                        GraphicsRenderer::kClearA);
-        f->glClear(GL_COLOR_BUFFER_BIT);
-        return;
-    }
-
-    // QOpenGLWindow::paintGL's contract is that the context and the framebuffer
-    // are bound and the viewport is set before this is called, so the default
-    // framebuffer is already current here. renderToBoundFramebuffer sets the
-    // viewport itself, because the window shows only part of the output.
+    // This window is a CONSUMER. It displays the frame the render thread produced
+    // and never draws a shader of its own.
     //
-    // Deliberately NO readback on this path. Reading the framebuffer back to the
-    // CPU stalls on the GPU; an earlier revision did it every frame and held the
-    // rate at ~50Hz instead of 60 with a 3.2 MB log.
-
-    // The window's own shader clock.
-    //
-    // Anchored to the first painted frame and read as a difference, never
-    // accumulated - see GraphicsFrame::timeSeconds for why that matters.
-    //
-    // The window keeps its own clock rather than sharing the render thread's
-    // because the two draw from different contexts: this one draws to the window's
-    // surface, the thread draws to an offscreen target. When the shared-texture
-    // step makes the window display the thread's target instead of drawing for
-    // itself, this clock goes away along with the renderer that uses it.
-    if (!m_clockStarted)
-    {
-        m_clock.start();
-        m_sinceLastPaint.start();
-        m_clockStarted = true;
-    }
-
-    // The window shows a 1:1 crop of the fixed output resolution, centred, with no
-    // scaling and no aspect correction.
-    //
-    // No scaling is the point: the output is authored at a set resolution, and
-    // seeing it stretched to whatever shape the window happens to be would make it
-    // impossible to judge what an external consumer receives. Cropping means a
-    // window smaller than the output reveals less of the image rather than
-    // shrinking it, and a window larger than the output shows the whole thing with
-    // margin around it.
-    //
-    // The rectangle comes from a helper rather than being computed inline, because
-    // both paths below need exactly the same rectangle.
-    const QRect destination = cropRect();
-
+    // The earlier "fall back to drawing it here" branch is deliberately gone. It
+    // existed so the window would show something before the first frame arrived,
+    // but a second thing that can draw the picture is a second producer: two
+    // renderers, two clocks, and a uniform that has to be set in two places. A
+    // consumer that cannot get a frame shows the background, which is honest and
+    // cannot drift.
     const qreal dpr = devicePixelRatio();
     const QSize surface(qMax(1, int(width() * dpr)), qMax(1, int(height() * dpr)));
 
-    // Clear the whole surface first, so the area outside `destination` is the
-    // documented background rather than whatever the previous frame left there.
-    // A window larger than the output shows margin, and that margin has to be
-    // painted by someone.
+    // Clear the whole surface first, so the area outside the crop is the documented
+    // background rather than whatever the previous frame left there. A window
+    // larger than the output shows margin, and the margin has to be painted by
+    // someone.
     f->glViewport(0, 0, surface.width(), surface.height());
     f->glClearColor(GraphicsRenderer::kClearR,
                     GraphicsRenderer::kClearG,
@@ -358,50 +313,41 @@ void GraphicsWindow::paintGL()
                     GraphicsRenderer::kClearA);
     f->glClear(GL_COLOR_BUFFER_BIT);
 
-    // Preferred path: display the render thread's frame.
+    // 1:1 crop, centred, never scaled - see cropRect().
+    const QRect destination = cropRect();
+    if (destination.isEmpty())
+        return;
+
+    // glViewport takes framebuffer pixels with the origin at the BOTTOM-left, while
+    // the crop rectangle is in Qt's top-left coordinates - hence the y conversion.
+    // Done here because this is where the two conventions meet.
+    f->glViewport(destination.x(),
+                  surface.height() - (destination.y() + destination.height()),
+                  destination.width(),
+                  destination.height());
+
+    drawSharedFrame(destination);
+
+    // Report which frame is on screen, once a second.
     //
-    // This is what removes the second renderer and the second clock: the picture
-    // is drawn once, by the render thread, and the window only shows it. The
-    // viewport is set from the same crop rectangle, so a window smaller than the
-    // output reveals less of the image rather than scaling it.
-    if (m_sharedFrame)
-    {
-        // glViewport takes framebuffer pixels with the origin at the BOTTOM-left,
-        // while the crop rectangle is in Qt's top-left coordinates - hence the y
-        // conversion. Done here because this is where the two conventions meet.
-        f->glViewport(destination.x(),
-                      surface.height() - (destination.y() + destination.height()),
-                      destination.width(),
-                      destination.height());
-        if (drawSharedFrame(destination))
-            return;
-        // Nothing published yet: fall through and draw for ourselves so the window
-        // shows something rather than a bare background.
-    }
-
-    // Fallback: draw the shader here. Reached before the render thread has
-    // published a frame, and when no slot was provided at all.
+    // The acceptance check for the whole handover: the render thread logs its
+    // iFrame, and if this window is showing that thread's output then the two must
+    // describe one sequence. Before sharing they were two unrelated counters that
+    // both happened to advance, which looks fine and proves nothing.
     //
-    // The window's own shader clock. Anchored to the first painted frame and read
-    // as a difference, never accumulated - see GraphicsFrame::timeSeconds.
-    if (!m_clockStarted)
+    // Timed by hand rather than through GraphicsLog::throttled(), which suppresses
+    // by message CONTENT - a message carrying a frame number differs every frame,
+    // so nothing is ever suppressed and the log gets one line per frame.
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (now - m_lastFrameReportMs >= 1000)
     {
-        m_clock.start();
-        m_sinceLastPaint.start();
-        m_clockStarted = true;
+        m_lastFrameReportMs = now;
+        const GraphicsSharedFrame shared = m_sharedFrame ? m_sharedFrame->read()
+                                                         : GraphicsSharedFrame();
+        GraphicsLog::info(shared.valid()
+                              ? QStringLiteral("window: showing shared frame %1").arg(shared.frameIndex)
+                              : QStringLiteral("window: no frame published yet"));
     }
-
-    GraphicsFrame frame;
-    frame.timeSeconds = double(m_clock.elapsed()) / 1000.0;
-    frame.deltaSeconds = m_havePainted ? double(m_sinceLastPaint.elapsed()) / 1000.0 : 0.0;
-    frame.frameIndex = m_frameIndex;
-    frame.resolution = m_outputSize;
-
-    m_renderer.renderToBoundFramebuffer(m_outputSize, destination, frame);
-
-    m_sinceLastPaint.restart();
-    m_havePainted = true;
-    ++m_frameIndex;
 }
 
 // Where the output image goes on the window's surface, in device pixels with a
@@ -430,46 +376,16 @@ QRect GraphicsWindow::cropRect() const
 
 bool GraphicsWindow::reloadShaders()
 {
-    if (!m_shaderReady)
-    {
-        // initializeGL() failed to load a shader, which is exactly when a reload
-        // is worth trying - the fix may be an edit to the file. Attempt the load
-        // now that a context exists.
-        if (!context() || !context()->isValid())
-        {
-            GraphicsLog::error(QStringLiteral("window: reload with no valid context"));
-            return false;
-        }
-        if (!context()->makeCurrent(this))
-        {
-            GraphicsLog::error(QStringLiteral("window: could not make its context current to reload"));
-            return false;
-        }
-        m_shaderReady = m_renderer.initializeWithoutFramebuffer();
-        context()->doneCurrent();
-        if (m_shaderReady)
-            update();
-        return m_shaderReady;
-    }
-
-    if (!context() || !context()->isValid())
-    {
-        GraphicsLog::error(QStringLiteral("window: reload with no valid context"));
-        return false;
-    }
-    if (!context()->makeCurrent(this))
-    {
-        GraphicsLog::error(QStringLiteral("window: could not make its context current to reload"));
-        return false;
-    }
-
-    const bool ok = m_renderer.reloadShaders();
-    context()->doneCurrent();
-
-    if (ok)
-        update();
-
-    return ok;
+    // Nothing to reload here, and that is the point.
+    //
+    // This window displays the render thread's texture; it does not own a shader.
+    // Reloading is the producer's job, and the render thread applies it on its own
+    // context at the top of the next frame - see
+    // GraphicsRenderThread::requestShaderReload(). A consumer that also tried to
+    // compile shaders would be a second producer again, which is what this design
+    // removes.
+    update();
+    return true;
 }
 
 QScreen* GraphicsWindow::showOnNextScreen()

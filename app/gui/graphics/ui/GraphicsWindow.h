@@ -130,8 +130,10 @@ private:
 
     // Draw the texture the render thread published, filling `destination`.
     //
-    // Returns false when there is nothing to show or the display shader is not
-    // ready, so the caller can fall back to drawing for itself.
+    // Returns false when there is nothing published yet, which leaves the
+    // background showing. There is deliberately no fallback that draws the shader
+    // here: this window is a consumer, and a second thing able to draw the picture
+    // would be a second producer.
     bool drawSharedFrame(const QRect& destination);
 
     // Build the display shader and its quad. Requires a current context.
@@ -147,31 +149,21 @@ private:
 
     // Not owned. See setSharedFrameSlot().
     GraphicsSharedFrameSlot* m_sharedFrame = nullptr;
+    // Time of the last "showing shared frame" report, so it appears once a second
+    // instead of once a frame. See the note where it is used.
+    qint64 m_lastFrameReportMs = 0;
     // The texture currently bound for display, so the sampler's filter can be set
     // once per texture rather than per frame. Zero means "nothing set up yet".
     GLuint m_boundDisplayTexture = 0;
 
-    // Owns the shader program and the quad. Not a pointer: there is exactly one
-    // for the window's whole life, and a pointer only added a null case.
-    GraphicsRenderer m_renderer;
     // Not owned, and not used to set the output size. See setRenderThread().
     GraphicsRenderThread* m_renderThread = nullptr;
-    // The resolution being shown, in pixels. Seeded from the render thread's
-    // target at initializeGL(), and kept as a member so cropRect() does not have
-    // to reach across to the render thread on every frame.
+    // The resolution being shown, in pixels. Taken from the published frame so the
+    // crop matches what was actually rendered rather than a second copy of the
+    // setting that could disagree with it.
     QSize m_outputSize;
-    bool m_shaderReady = false;
     bool m_fullscreen = false;
 
-    // The window's own shader clock. m_clock is started on the first painted
-    // frame and never restarted, so it is the animation timeline;
-    // m_sinceLastPaint is restarted every frame, so it measures one frame's
-    // interval.
-    QElapsedTimer m_clock;
-    QElapsedTimer m_sinceLastPaint;
-    bool m_clockStarted = false;
-    bool m_havePainted = false;
-    unsigned long long m_frameIndex = 0;
     // The screen fullscreen was entered on, so leaving can put the window back on
     // the screen it came from rather than the primary one. No geometry is saved:
     // leaving fullscreen always assigns a small centred rect instead.
