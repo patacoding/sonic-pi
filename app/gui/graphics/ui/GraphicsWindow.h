@@ -16,8 +16,6 @@
 #include <QOpenGLWindow>
 #include <QSize>
 
-#include <memory>
-
 #include "GraphicsRenderer.h"
 
 class QScreen;
@@ -33,6 +31,19 @@ namespace SonicPi
 // window is unaffected - a QOpenGLWidget inside the app window would push the
 // whole window onto Qt's RHI composition path and cost a backing-store copy per
 // frame, which the audio scope already avoids for exactly that reason.
+//
+// What it draws: the shader, straight to its own surface. There is deliberately
+// no intermediate framebuffer here. An earlier revision allocated one and never
+// drew to it, while paintGL() cleared the surface to a flat colour, so the window
+// showed a solid blue rectangle no matter what the shader said - the shader was
+// only ever running in the offscreen verification on the render thread, which
+// nothing displayed. The window now owns the only renderer on the display path,
+// so an edit plus Reload Shader is visible immediately.
+//
+// Drawing to the surface rather than to a framebuffer is the Phase 0 shape. When
+// step 1.5/1.6 introduces a shared render target, the window's job changes to
+// displaying a texture another context rendered into, and this class stops owning
+// a renderer at all.
 //
 // Lifecycle: created and destroyed by MainWindow. Like any QWindow it must be
 // used from the GUI thread only.
@@ -67,6 +78,10 @@ public:
     // and for the status line.
     QString describeOutput() const;
 
+    // Re-read the shader from disk. Called on the GUI thread, where this window's
+    // context lives, so it can make that context current itself.
+    bool reloadShaders();
+
 signals:
     // Emitted when the user closes the window directly, so the menu action that
     // opened it can be un-ticked. A QDockWidget reports this to Qt for free; an
@@ -81,14 +96,11 @@ protected:
     void closeEvent(QCloseEvent* e) override;
 
 private:
-    // Rebuild the framebuffer to match the surface. Called on resize and when
-    // the surface moves to a screen with a different pixel density.
-    void resizeTarget(int pixelWidth, int pixelHeight);
-
-    std::unique_ptr<GraphicsRenderer> m_renderer;
-    QSize m_targetSize;
-    bool  m_glReady  = false;
-    bool  m_fullscreen = false;
+    // Owns the shader program and the quad. Not a pointer: there is exactly one
+    // for the window's whole life, and a pointer only added a null case.
+    GraphicsRenderer m_renderer;
+    bool m_shaderReady = false;
+    bool m_fullscreen = false;
     // The screen fullscreen was entered on, so leaving can put the window back on
     // the screen it came from rather than the primary one. No geometry is saved:
     // leaving fullscreen always assigns a small centred rect instead.

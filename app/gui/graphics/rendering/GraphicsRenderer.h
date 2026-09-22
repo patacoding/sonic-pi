@@ -59,8 +59,29 @@ public:
     // Returns false and logs why on failure.
     bool initialize(const QSize& size);
 
+    // Loads the shaders with no framebuffer. Requires a current context.
+    //
+    // For a caller that draws the shader straight to a surface it owns - the
+    // output window - rather than through an intermediate framebuffer. Use
+    // initialize() when the frame has to land in a framebuffer first, such as when
+    // it will be read back or shared with another context.
+    bool initializeWithoutFramebuffer();
+
     // Draws one frame into the framebuffer with the current shader.
     bool render();
+
+    // Draws one frame with the current shader into whichever framebuffer is
+    // already bound, leaving the binding alone.
+    //
+    // Sets the viewport to `viewportSize` and clears to the documented background
+    // colour first. Used by the output window to draw to its own surface.
+    bool renderToBoundFramebuffer(const QSize& viewportSize);
+
+    // Release the GL objects now, while the caller can still make the owning
+    // context current. Calling this is optional - the destructor does the same -
+    // but a window being torn down cannot rely on its context surviving into
+    // member destruction, so it calls this first.
+    void destroy();
 
     // Reads the framebuffer back and compares anchor points against the quadrant
     // test pattern in anchors.frag. Returns false if the pixels differ.
@@ -82,6 +103,11 @@ public:
 
     // Recompile the shaders of every live renderer, making each context current
     // for the duration. Returns how many succeeded.
+    //
+    // This reaches only renderers created by initialize(), which are the offscreen
+    // ones whose contexts belong to the render thread. A renderer created by
+    // initializeWithoutFramebuffer() is driven from the thread that owns its
+    // context and reloads itself, so it does not register here.
     //
     // A registry rather than a global shader object: shaders are per-context, so
     // there is nothing sensible to share, and keeping the reload explicit avoids
@@ -112,6 +138,9 @@ public:
     static constexpr float kClearA = 1.0f;
 
 private:
+    // The VAO and the quad's vertex buffer, both required before any draw.
+    bool createQuadGeometry();
+
     // Compile a vertex/fragment pair from disk into a linked program. Returns
     // nullptr and logs the compiler output on any failure.
     std::unique_ptr<QOpenGLShaderProgram> buildProgram(const QString& vertexFile,

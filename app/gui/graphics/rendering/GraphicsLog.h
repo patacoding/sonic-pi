@@ -15,6 +15,8 @@
 
 #include <QString>
 
+#include <functional>
+
 namespace SonicPi
 {
 namespace GraphicsLog
@@ -60,6 +62,27 @@ void error(const QString& msg);
 // produced 7790 entries and a 3.2 MB log in 154 seconds. Prefer this over
 // info()/warn()/error() in anything frame-rate driven.
 void throttled(Level level, const QString& msg, int intervalMs = 1000);
+
+// A second destination for entries, so they can be shown to the user.
+//
+// Why a callback rather than the GUI being called directly: this module is a
+// leaf. It must not know that a MainWindow, a log pane or even Qt widgets exist,
+// or the graphics feature stops being usable without the GUI and every unit that
+// touches logging inherits the GUI's headers. The GUI registers a sink at
+// startup and this module just hands over the text.
+//
+// Threading: write() is called from whichever thread logged - the render thread
+// as well as the GUI thread - so a sink can be invoked from a non-GUI thread.
+// A sink that touches widgets must therefore marshal to the GUI thread itself
+// (QMetaObject::invokeMethod with Qt::QueuedConnection, or a queued signal).
+//
+// Called while the log mutex is NOT held, so a sink may log again without
+// deadlocking.
+using Sink = std::function<void(Level, const QString&)>;
+
+// Install (or, with an empty function, remove) the sink. Replaces any previous
+// one. Safe to call before any logging happens, which is how the GUI uses it.
+void setSink(Sink sink);
 
 // Where the log actually goes, resolved. Useful to report in the one place that
 // can still reach the user if the log itself cannot be opened.

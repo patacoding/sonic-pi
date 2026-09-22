@@ -90,7 +90,28 @@ const char* levelTag(Level level)
     }
 }
 
+Sink& sinkSlot()
+{
+    static Sink s;
+    return s;
+}
+
+// Guards the sink against being replaced while an entry is being delivered, and
+// lets the copy be taken without holding the log mutex - a sink is free to log
+// again, and doing that under the mutex would deadlock.
+QMutex& sinkMutex()
+{
+    static QMutex m;
+    return m;
+}
+
 } // namespace
+
+void setSink(Sink sink)
+{
+    QMutexLocker lock(&sinkMutex());
+    sinkSlot() = std::move(sink);
+}
 
 QString directoryPath()
 {
@@ -116,28 +137,47 @@ void write(Level level, const QString& msg)
                                      QString(msg).replace(QLatin1Char('\n'),
                                                           QStringLiteral("\n           ")));
 
-    QMutexLocker lock(&logMutex());
-
-    const QString path = ensurePath();
-
-    // Opened per entry rather than kept open: CycleLogs() truncates and replaces
-    // files underneath us at startup, so a handle held across that would keep
-    // writing to a rotated file. Opening per write is cheap at the rate this
-    // logs, and is correct regardless of what else touches the directory.
-    //
-    // Written with a single fwrite so concurrent writers cannot interleave
-    // mid-line even if the file is opened by more than one handle.
-    if (FILE* f = _wfopen(reinterpret_cast<const wchar_t*>(path.utf16()), L"ab"))
     {
-        const QByteArray utf8 = payload.toUtf8();
-        std::fwrite(utf8.constData(), 1, size_t(utf8.size()), f);
-        std::fclose(f);
+        QMutexLocker lock(&logMutex());
+
+        const QString path = ensurePath();
+
+        // Opened per entry rather than kept open: CycleLogs() truncates and
+        // replaces files underneath us at startup, so a handle held across that
+        // would keep writing to a rotated file. Opening per write is cheap at the
+        // rate this logs, and is correct regardless of what else touches the
+        // directory.
+        //
+        // Written with a single fwrite so concurrent writers cannot interleave
+        // mid-line even if the file is opened by more than one handle.
+        if (FILE* f = _wfopen(reinterpret_cast<const wchar_t*>(path.utf16()), L"ab"))
+        {
+            const QByteArray utf8 = payload.toUtf8();
+            std::fwrite(utf8.constData(), 1, size_t(utf8.size()), f);
+            std::fclose(f);
+        }
+        // If the open fails there is nowhere left to report it: stdout is not
+        // reliable here (it is only redirected once the GUI boots) and stderr is
+        // not redirected at all. The failure is therefore silent by necessity,
+        // which is why directoryPath() exists - a caller that needs to prove
+        // logging works can check the resolved location instead of trusting this
+        // call.
     }
-    // If the open fails there is nowhere left to report it: stdout is not
-    // reliable here (it is only redirected once the GUI boots) and stderr is not
-    // redirected at all. The failure is therefore silent by necessity, which is
-    // why directoryPath() exists - a caller that needs to prove logging works
-    // can check the resolved location instead of trusting this call.
+
+    // Hand the entry to the GUI, if one registered a sink.
+    //
+    // Deliberately after the file mutex is released and on a copy of the sink:
+    // a sink is allowed to log, and doing that while holding the mutex would
+    // deadlock on a non-recursive QMutex. The message is passed as written
+    // rather than as the file's padded payload, so a sink decides its own
+    // layout.
+    Sink sink;
+    {
+        QMutexLocker lock(&sinkMutex());
+        sink = sinkSlot();
+    }
+    if (sink)
+        sink(level, msg);
 }
 
 void info(const QString& msg)

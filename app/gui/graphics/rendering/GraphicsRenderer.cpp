@@ -66,7 +66,11 @@ GraphicsRenderer::~GraphicsRenderer()
     // gone, so by then it is safe. Contract, not an assertion:
     //   GraphicsRenderer must be destroyed while its context is current.
     liveRenderers().remove(this);
+    destroy();
+}
 
+void GraphicsRenderer::destroy()
+{
     // Destroyed before the context goes away: QOpenGLVertexArrayObject's
     // destructor needs that context to be current, which is the same contract
     // the framebuffer and program rely on.
@@ -74,6 +78,7 @@ GraphicsRenderer::~GraphicsRenderer()
     m_vao.reset();
     m_program.reset();
     m_fbo.reset();
+    m_size = QSize();
 }
 
 bool GraphicsRenderer::initialize(const QSize& size)
@@ -109,6 +114,24 @@ bool GraphicsRenderer::initialize(const QSize& size)
     m_size = size;
     liveRenderers().insert(this);
 
+    if (!createQuadGeometry())
+        return false;
+
+    GraphicsLog::info(QStringLiteral("framebuffer ready: %1x%2, texture id %3")
+                          .arg(size.width())
+                          .arg(size.height())
+                          .arg(m_fbo->texture()));
+
+    // A shader that will not compile is reported but not fatal: render() falls
+    // back to a flat clear, so the output still shows something identifiable.
+    if (!loadShaders())
+        GraphicsLog::warn(QStringLiteral("renderer: no usable shader; falling back to a flat clear"));
+
+    return true;
+}
+
+bool GraphicsRenderer::createQuadGeometry()
+{
     // Vertex array object, then the quad's interleaved position+uv buffer.
     //
     // The VAO is needed even when a shader derives its own coordinates: a
@@ -154,15 +177,28 @@ bool GraphicsRenderer::initialize(const QSize& size)
     m_vbo->setUsagePattern(QOpenGLBuffer::StaticDraw);
     m_vbo->allocate(kQuad, int(sizeof(kQuad)));
 
-    GraphicsLog::info(QStringLiteral("framebuffer ready: %1x%2, texture id %3")
-                          .arg(size.width())
-                          .arg(size.height())
-                          .arg(m_fbo->texture()));
+    return true;
+}
 
-    // A shader that will not compile is reported but not fatal: render() falls
-    // back to a flat clear, so the output still shows something identifiable.
+bool GraphicsRenderer::initializeWithoutFramebuffer()
+{
+    if (!QOpenGLContext::currentContext())
+    {
+        GraphicsLog::error(QStringLiteral("renderer: no current context at initialize"));
+        return false;
+    }
+
+    // No framebuffer, so nothing registers with the reload registry: a reload only
+    // needs to reach renderers whose context a GUI action cannot make current
+    // itself, and this one is driven from the GUI thread.
+    if (!createQuadGeometry())
+        return false;
+
     if (!loadShaders())
+    {
         GraphicsLog::warn(QStringLiteral("renderer: no usable shader; falling back to a flat clear"));
+        return false;
+    }
 
     return true;
 }
@@ -302,28 +338,41 @@ bool GraphicsRenderer::render()
         return false;
     }
 
-    // Save the viewport for the same reason as the framebuffer binding below:
-    // render() may be called with the framebuffer already bound by a caller that
-    // has its own viewport set up, and leaving ours behind would corrupt its next
-    // draw.
-    GLint savedViewport[4] = { 0, 0, 0, 0 };
-    f->glGetIntegerv(GL_VIEWPORT, savedViewport);
-
     m_fbo->bind();
+    const bool ok = renderToBoundFramebuffer(m_size);
+    m_fbo->release();
+    return ok;
+}
 
-    // The viewport must be set explicitly. QOpenGLFramebufferObject::bind() binds
-    // the framebuffer but does NOT touch glViewport, so the viewport is whatever
-    // the surface last left behind - on this machine 1894x1092, the size of the
-    // offscreen surface's default framebuffer, against a 640x360 attachment.
+bool GraphicsRenderer::renderToBoundFramebuffer(const QSize& viewportSize)
+{
+    if (!viewportSize.isValid() || viewportSize.isEmpty())
+    {
+        GraphicsLog::error(QStringLiteral("renderer: refusing to draw into a %1x%2 viewport")
+                               .arg(viewportSize.width())
+                               .arg(viewportSize.height()));
+        return false;
+    }
+
+    QOpenGLContext* ctx = QOpenGLContext::currentContext();
+    QOpenGLFunctions* f = ctx ? ctx->functions() : nullptr;
+    if (!f)
+    {
+        GraphicsLog::error(QStringLiteral("renderer: draw requested with no current context"));
+        return false;
+    }
+
+    // Set the viewport explicitly rather than assuming it.
     //
-    // That mismatch is a silent wrong-picture bug rather than a crash: the quad
-    // is rasterised across the full viewport and only the part landing inside the
-    // attachment survives, so the image is cropped to roughly its bottom-left
-    // third and every interpolated varying is compressed into the same third of
-    // its range - the verification anchors read rgb(85,82) where rgb(255,255) was
-    // expected, and a shader that looked up a texture by those coordinates would
-    // sample the wrong region entirely.
-    f->glViewport(0, 0, m_size.width(), m_size.height());
+    // QOpenGLFramebufferObject::bind() binds the framebuffer and does NOT touch
+    // glViewport - its only GL call is glBindFramebuffer - so the viewport is
+    // whatever the surface last left behind. Before this was set, drawing into a
+    // 640x360 attachment happened with the offscreen surface's 1894x1092 viewport
+    // still in force: the quad was rasterised across the larger area and only the
+    // part landing inside the attachment survived, cropping the image to its
+    // bottom-left third and compressing every interpolated varying into the same
+    // third of its range.
+    f->glViewport(0, 0, viewportSize.width(), viewportSize.height());
 
     // Clear first so anything the shader does not cover is a known colour rather
     // than whatever was in the buffer before.
@@ -360,17 +409,10 @@ bool GraphicsRenderer::render()
         m_program->release();
     }
 
-    m_fbo->release();
-
-    // Put the caller's viewport back, matching the framebuffer binding that
-    // release() just restored. Without this, a caller that had its own viewport
-    // set would find it silently replaced by ours.
-    f->glViewport(savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3]);
-
     const GLenum err = f->glGetError();
     if (err != GL_NO_ERROR)
     {
-        GraphicsLog::error(QStringLiteral("renderer: GL error 0x%1 after render").arg(err, 0, 16));
+        GraphicsLog::error(QStringLiteral("renderer: GL error 0x%1 after draw").arg(err, 0, 16));
         return false;
     }
     return true;

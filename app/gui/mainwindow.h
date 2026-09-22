@@ -395,6 +395,10 @@ private slots:
     // that surface it.
     void showGraphicsOutput(bool on);
     void graphicsVisibilityChanged();
+
+    // Mirrors one Graphics log entry into the log pane. Invoked on the GUI
+    // thread even when the entry was written from the render thread.
+    void appendGraphicsLog(int level, const QString& message);
     void showScopeLabelsMenuChanged();
     void toggleIcons();
     void help();

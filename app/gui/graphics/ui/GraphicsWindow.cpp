@@ -44,19 +44,18 @@ GraphicsWindow::GraphicsWindow(QWindow* parent)
 
 GraphicsWindow::~GraphicsWindow()
 {
-    // The renderer holds a framebuffer, which needs a current context to be
+    // The renderer holds GL objects, which need a current context to be
     // destroyed. makeCurrent() on a window whose surface is already gone can
-    // fail, in which case the framebuffer is leaked rather than crashing - Qt is
-    // tearing the context down with the window anyway.
-    if (m_glReady && context())
+    // fail, in which case they are leaked rather than crashing - Qt is tearing
+    // the context down with the window anyway.
+    if (m_shaderReady && context())
     {
         if (context()->makeCurrent(this))
         {
-            m_renderer.reset();
+            m_renderer.destroy();
             context()->doneCurrent();
         }
     }
-    m_renderer.reset();
 }
 
 void GraphicsWindow::initializeGL()
@@ -74,52 +73,29 @@ void GraphicsWindow::initializeGL()
                               .arg(QString::fromLatin1(
                                   reinterpret_cast<const char*>(f->glGetString(GL_VERSION)))));
     }
-    m_glReady = true;
+
+    // No framebuffer: this renderer draws straight to the window's surface. See
+    // the class comment for why there is deliberately no intermediate target.
+    if (!m_renderer.initializeWithoutFramebuffer())
+    {
+        GraphicsLog::error(QStringLiteral("window: could not load the shader"));
+        return;
+    }
+
+    m_shaderReady = true;
+    GraphicsLog::info(QStringLiteral("window: shader loaded, drawing to surface\n"
+                                     "  fragment : %1")
+                          .arg(m_renderer.fragmentShaderPath()));
 }
 
 void GraphicsWindow::resizeGL(int w, int h)
 {
-    // w/h are in logical pixels; the framebuffer follows device pixels so the
-    // output stays sharp on a HiDPI screen.
-    const qreal dpr = devicePixelRatio();
-    const int pw = qMax(1, int(w * dpr));
-    const int ph = qMax(1, int(h * dpr));
-    resizeTarget(pw, ph);
-}
-
-void GraphicsWindow::resizeTarget(int pixelWidth, int pixelHeight)
-{
-    if (!m_glReady || !context())
-        return;
-
-    const QSize want(pixelWidth, pixelHeight);
-    if (want == m_targetSize && m_renderer)
-        return;
-
-    if (!context()->makeCurrent(this))
-    {
-        GraphicsLog::warn(QStringLiteral("window: could not make context current to resize target"));
-        return;
-    }
-
-    if (!m_renderer)
-        m_renderer = std::make_unique<GraphicsRenderer>();
-
-    if (m_renderer->initialize(want))
-    {
-        m_targetSize = want;
-        GraphicsLog::info(QStringLiteral("window target size %1x%2 (device pixels)")
-                              .arg(want.width())
-                              .arg(want.height()));
-    }
-    else
-    {
-        GraphicsLog::error(QStringLiteral("window: could not create a %1x%2 target")
-                               .arg(want.width())
-                               .arg(want.height()));
-    }
-
-    context()->doneCurrent();
+    // Nothing to rebuild - the shader covers whatever the surface is - but the
+    // window must be repainted at the new size. Qt does send an expose event on
+    // resize, so this is belt and braces rather than the only trigger.
+    Q_UNUSED(w);
+    Q_UNUSED(h);
+    update();
 }
 
 void GraphicsWindow::paintGL()
@@ -128,20 +104,75 @@ void GraphicsWindow::paintGL()
     if (!f)
         return;
 
-    // Phase 1.1 clears the surface to the colour Phase 0.2 verified. The shader
-    // replaces this in Phase 0.3/2.
+    if (!m_shaderReady)
+    {
+        // No usable shader: a flat clear is more useful than a stale or undefined
+        // surface, and it makes "the shader never loaded" visibly different from
+        // "the shader draws black".
+        f->glClearColor(GraphicsRenderer::kClearR,
+                        GraphicsRenderer::kClearG,
+                        GraphicsRenderer::kClearB,
+                        GraphicsRenderer::kClearA);
+        f->glClear(GL_COLOR_BUFFER_BIT);
+        return;
+    }
+
+    // QOpenGLWindow::paintGL's contract is that the context and the framebuffer
+    // are bound and the viewport is set before this is called, so the default
+    // framebuffer is already current here. The viewport is still passed
+    // explicitly: renderToBoundFramebuffer sets it from the device-pixel size,
+    // which is what keeps the output sharp on a HiDPI screen.
     //
-    // Deliberately NO readback here. GraphicsRenderer::verifyClearColour() reads
-    // the framebuffer back to the CPU, which stalls on the GPU. An earlier
-    // revision called it every frame, which produced 7790 readbacks, a 3.2 MB
-    // log over 154 seconds, and held the frame rate at ~50Hz instead of 60. It
-    // is a one-shot verification tool for the render thread, not a frame loop
-    // step.
-    f->glClearColor(GraphicsRenderer::kClearR,
-                    GraphicsRenderer::kClearG,
-                    GraphicsRenderer::kClearB,
-                    GraphicsRenderer::kClearA);
-    f->glClear(GL_COLOR_BUFFER_BIT);
+    // Deliberately NO readback on this path. Reading the framebuffer back to the
+    // CPU stalls on the GPU; an earlier revision did it every frame and held the
+    // rate at ~50Hz instead of 60 with a 3.2 MB log.
+    const qreal dpr = devicePixelRatio();
+    m_renderer.renderToBoundFramebuffer(
+        QSize(qMax(1, int(width() * dpr)), qMax(1, int(height() * dpr))));
+}
+
+bool GraphicsWindow::reloadShaders()
+{
+    if (!m_shaderReady)
+    {
+        // initializeGL() failed to load a shader, which is exactly when a reload
+        // is worth trying - the fix may be an edit to the file. Attempt the load
+        // now that a context exists.
+        if (!context() || !context()->isValid())
+        {
+            GraphicsLog::error(QStringLiteral("window: reload with no valid context"));
+            return false;
+        }
+        if (!context()->makeCurrent(this))
+        {
+            GraphicsLog::error(QStringLiteral("window: could not make its context current to reload"));
+            return false;
+        }
+        m_shaderReady = m_renderer.initializeWithoutFramebuffer();
+        context()->doneCurrent();
+        if (m_shaderReady)
+            update();
+        return m_shaderReady;
+    }
+
+    if (!context() || !context()->isValid())
+    {
+        GraphicsLog::error(QStringLiteral("window: reload with no valid context"));
+        return false;
+    }
+    if (!context()->makeCurrent(this))
+    {
+        GraphicsLog::error(QStringLiteral("window: could not make its context current to reload"));
+        return false;
+    }
+
+    const bool ok = m_renderer.reloadShaders();
+    context()->doneCurrent();
+
+    if (ok)
+        update();
+
+    return ok;
 }
 
 QScreen* GraphicsWindow::showOnNextScreen()

@@ -31,6 +31,7 @@
 #include <QDialogButtonBox>
 #include <QDockWidget>
 #include <QDateTime>
+#include <QTime>
 #include <QDir>
 #include <QRegularExpression>
 #include <QFile>
@@ -2700,6 +2701,21 @@ void MainWindow::honourPrefs()
     toggleOSCServer(1);
     toggleIcons();
     scope();
+
+    // Restore the graphics output window, the same way the scope is restored
+    // above.
+    //
+    // Without this, "prefs/graphics/show-output" only ever ticked the menu action
+    // - nothing called showGraphicsOutput() on the boot path - so a remembered
+    // window opened only if the user toggled the item off and on again. The
+    // preference looked saved and was silently not honoured.
+    //
+    // Guarded on the action existing because honourPrefs() runs more than once
+    // (onServerReady and onSpiderReady); showGraphicsOutput() is idempotent, so
+    // repeating it is harmless, but reaching it before the menu is built is not.
+    if (graphicsOutAct && piSettings->show_graphics && !(graphicsWindow && graphicsWindow->isVisible()))
+        showGraphicsOutput(true);
+
     changeShowAutoCompletion();
     changeShowCompletionHelp();
     changeShowContext();
@@ -4052,6 +4068,45 @@ void MainWindow::showGraphicsOutput(bool on)
         if (graphicsWindow)
             graphicsWindow->hide();
         showStatusAndAnnounce(tr("Hiding graphics output..."), 2000);
+    }
+}
+
+// Mirrors one Graphics log entry into the log pane. Runs on the GUI thread: the
+// sink that feeds it may be called from the render thread.
+void MainWindow::appendGraphicsLog(int level, const QString& message)
+{
+    if (!outputPane)
+        return;
+
+    const auto lvl = SonicPi::GraphicsLog::Level(level);
+    const QString tag = lvl == SonicPi::GraphicsLog::Level::Error ? QStringLiteral("ERROR")
+                        : lvl == SonicPi::GraphicsLog::Level::Warn ? QStringLiteral("WARN ")
+                                                                   : QStringLiteral("info ");
+    const QString stamp =
+        QTime::currentTime().toString(QStringLiteral("HH:mm:ss.zzz"));
+
+    // Colour roles are the ones already in the theme, not invented names. Errors
+    // take the same background qt_api_client gives a highlighted message so a
+    // failure is not lost in a scroll of info lines; everything else takes the
+    // plain info role.
+    SonicPiTheme* th = theme;
+    const bool emphasise = (lvl == SonicPi::GraphicsLog::Level::Error) && th;
+    if (emphasise)
+        outputPane->setTextBgFgColorKeys(th, "LogInfoBackground_1", "LogInfoForeground_1");
+    else if (th)
+        outputPane->setTextBgFgColorKeys(th, "LogInfoBackground", "LogInfoForeground");
+
+    // Indent continuation lines so a multi-line block - a shader compiler log,
+    // for instance - reads as one record, matching how graphics.log formats it.
+    const QString body =
+        QString(message).replace(QLatin1Char('\n'), QStringLiteral("\n           "));
+    outputPane->appendPlainText(
+        QStringLiteral("[%1] [Graphics] [%2] %3").arg(stamp, tag, body));
+
+    if (th)
+    {
+        outputPane->setTextColorKey(th, "LogForeground");
+        outputPane->setTextBackgroundColorKey(th, "LogBackground");
     }
 }
 
@@ -6208,11 +6263,20 @@ void MainWindow::createToolBar()
     // Re-read the shader from disk. Present so the shader can be edited and
     // reloaded without rebuilding, which is what makes it possible to try things
     // out. A failed compile keeps the previous picture (see GraphicsRenderer).
+    //
+    // The window is asked first and by name. It owns the renderer that actually
+    // draws the visible output, and its context lives on this thread, so it can
+    // make that context current itself. reloadAll() only knows about renderers
+    // that hold a framebuffer - the offscreen ones - so relying on it alone would
+    // reload the invisible copy and leave the window showing the old shader.
     graphicsReloadShaderAct = new QAction(tr("Reload Shader"), this);
-    connect(graphicsReloadShaderAct, &QAction::triggered, this, []() {
-        const int reloaded = SonicPi::GraphicsRenderer::reloadAll();
-        SonicPi::GraphicsLog::info(QStringLiteral("menu: reload shader -> %1 renderer(s)")
-                                       .arg(reloaded));
+    connect(graphicsReloadShaderAct, &QAction::triggered, this, [this]() {
+        const bool windowOk = graphicsWindow && graphicsWindow->reloadShaders();
+        const int offscreen = SonicPi::GraphicsRenderer::reloadAll();
+        SonicPi::GraphicsLog::info(
+            QStringLiteral("menu: reload shader -> window %1, %2 offscreen renderer(s)")
+                .arg(windowOk ? QStringLiteral("ok") : QStringLiteral("failed"))
+                .arg(offscreen));
     });
 
     toolBar->addAction(scopeAct);
@@ -6427,6 +6491,24 @@ void MainWindow::createToolBar()
     graphicsMenu->addAction(graphicsFullscreenAct);
     graphicsMenu->addSeparator();
     graphicsMenu->addAction(graphicsReloadShaderAct);
+
+    // Route Graphics log entries into the log pane.
+    //
+    // The pane is the natural place for these: it is where every other failure
+    // this app can produce already appears, it is themed, it scrolls, and the
+    // user is already looking at it when something goes wrong. Graphics keeps
+    // writing its own file as well - that record has to survive the GUI and
+    // carries more detail - but a shader that will not compile has to be visible
+    // without going to disk to find out.
+    //
+    // Registered once, here, after the pane exists. The sink may be called from
+    // the render thread, so it marshals to the GUI thread instead of touching
+    // widgets directly.
+    SonicPi::GraphicsLog::setSink(
+        [this](SonicPi::GraphicsLog::Level level, const QString& message) {
+            QMetaObject::invokeMethod(this, "appendGraphicsLog", Qt::QueuedConnection,
+                                      Q_ARG(int, int(level)), Q_ARG(QString, message));
+        });
 
     // The IO menu is grouped into labelled sections (addSection) so the
     // device controls, network controls and capture controls read as
