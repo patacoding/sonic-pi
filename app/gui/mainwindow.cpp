@@ -80,6 +80,10 @@
 #include <Qsci/qsciscintilla.h>
 
 #include "model/sonicpitheme.h"
+// The output window itself, and its log. The graphics module is deliberately
+// self-contained; mainwindow only creates the window and forwards menu actions.
+#include "graphics/rendering/GraphicsLog.h"
+#include "graphics/ui/GraphicsWindow.h"
 #include "widgets/sonicpitooltip.h"
 #include <QFileOpenEvent>
 
@@ -3988,16 +3992,66 @@ void MainWindow::toggleScope()
 void MainWindow::showGraphicsOutput(bool on)
 {
     piSettings->show_graphics = on;
-    showStatusAndAnnounce(on ? tr("Showing graphics output...")
-                             : tr("Hiding graphics output..."),
-                          2000);
     emit settingsChanged();
 
-    // Phase 0 has no output window yet: the rendering side is still being
-    // verified on its own. Say so rather than failing silently, so the control
-    // can be checked end to end before the window exists.
-    std::cout << "[GUI] - Graphics output " << (on ? "shown" : "hidden")
-              << " (no output window yet)" << std::endl;
+    SonicPi::GraphicsLog::info(QStringLiteral("menu: show graphics output = %1")
+                                   .arg(on ? QStringLiteral("on") : QStringLiteral("off")));
+
+    if (on)
+    {
+        // Created lazily: the window owns a GL context and a framebuffer, and
+        // there is no reason to pay for either until someone asks for output.
+        if (!graphicsWindow)
+        {
+            graphicsWindow = new SonicPi::GraphicsWindow();
+            SonicPi::GraphicsLog::info(QStringLiteral("menu: created output window"));
+
+            // A window closed by the user must un-tick the action, or the tick
+            // and reality drift apart. The signal is emitted from closeEvent.
+            connect(graphicsWindow, &SonicPi::GraphicsWindow::closedByUser,
+                    this, [this]() {
+                        if (graphicsWindow)
+                            graphicsWindow->hide();
+                        if (piSettings->show_graphics)
+                        {
+                            piSettings->show_graphics = false;
+                            graphicsVisibilityChanged();
+                            emit settingsChanged();
+                        }
+                    });
+
+            // Continuous repaint. A QOpenGLWindow only redraws on expose
+            // otherwise, which would show one frame and then sit still.
+            //
+            // 16ms is the 60Hz cap the design settled on for V1. The window's
+            // swap interval is the real pacer; this just keeps frames coming.
+            graphicsRepaintTimer = new QTimer(this);
+            graphicsRepaintTimer->setInterval(16);
+            connect(graphicsRepaintTimer, &QTimer::timeout, this, [this]() {
+                if (graphicsWindow && graphicsWindow->isVisible())
+                    graphicsWindow->update();
+            });
+        }
+
+        graphicsWindow->show();
+        graphicsRepaintTimer->start();
+        SonicPi::GraphicsLog::info(QStringLiteral("menu: window shown, isVisible=%1, geometry=%2x%3 at %4,%5")
+                                       .arg(graphicsWindow->isVisible() ? 1 : 0)
+                                       .arg(graphicsWindow->width())
+                                       .arg(graphicsWindow->height())
+                                       .arg(graphicsWindow->x())
+                                       .arg(graphicsWindow->y()));
+        showStatusAndAnnounce(tr("Showing graphics output on %1").arg(graphicsWindow->describeOutput()),
+                              2000);
+    }
+    else
+    {
+        if (graphicsRepaintTimer)
+            graphicsRepaintTimer->stop();
+        if (graphicsWindow)
+            graphicsWindow->hide();
+        showStatusAndAnnounce(tr("Hiding graphics output..."), 2000);
+    }
 }
 
 // Called when the output window's own visibility changes - notably when the
@@ -6130,10 +6184,23 @@ void MainWindow::createToolBar()
     graphicsFullscreenAct->setCheckable(true);
     graphicsFullscreenAct->setChecked(false);
     connect(graphicsFullscreenAct, &QAction::toggled, this, [this](bool on) {
-        // Wired up with the display window in Phase 1. Until then this records
-        // the request and says so, rather than silently doing nothing.
-        std::cout << "[GUI] - Graphics fullscreen requested: " << (on ? "on" : "off")
-                  << " (no output window yet)" << std::endl;
+        if (!graphicsWindow)
+        {
+            // Nothing to go fullscreen with. Reflect that back rather than
+            // leaving the tick on with no window behind it.
+            QSignalBlocker blocker(graphicsFullscreenAct);
+            graphicsFullscreenAct->setChecked(false);
+            showStatusAndAnnounce(tr("Show graphics output first"), 2000);
+            return;
+        }
+
+        if (on)
+            graphicsWindow->enterFullscreen(nullptr);
+        else
+            graphicsWindow->leaveFullscreen();
+
+        showStatusAndAnnounce(tr("Graphics output on %1").arg(graphicsWindow->describeOutput()),
+                              2000);
     });
 
     toolBar->addAction(scopeAct);

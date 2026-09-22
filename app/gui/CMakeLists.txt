@@ -100,6 +100,8 @@ set(GRAPHICS_SOURCES
     ${QTAPP_ROOT}/graphics/rendering/GraphicsRenderer.h
     ${QTAPP_ROOT}/graphics/rendering/GraphicsRenderThread.cpp
     ${QTAPP_ROOT}/graphics/rendering/GraphicsRenderThread.h
+    ${QTAPP_ROOT}/graphics/ui/GraphicsWindow.cpp
+    ${QTAPP_ROOT}/graphics/ui/GraphicsWindow.h
     )
 
 set(EDITOR_SOURCES
@@ -555,6 +557,7 @@ target_include_directories(${APP_NAME}
     ${QTAPP_ROOT}/model
     ${QTAPP_ROOT}/visualizer
     ${QTAPP_ROOT}/graphics/rendering
+    ${QTAPP_ROOT}/graphics/ui
     ${QTAPP_ROOT}/widgets
     ${QTAPP_ROOT}/Utils
     ${CMAKE_BINARY_DIR}

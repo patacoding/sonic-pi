@@ -41,6 +41,15 @@ class QActionGroup;
 class QMenu;
 class QToolBar;
 class QLineEdit;
+class QTimer;
+
+namespace SonicPi
+{
+// Defined in graphics/ui/GraphicsWindow.h, included by the .cpp. Only a pointer
+// is held here, so a forward declaration keeps the OpenGL headers out of this
+// one.
+class GraphicsWindow;
+} // namespace SonicPi
 class QsciScintilla;
 class QProcess;
 class QTextEdit;
@@ -872,6 +881,11 @@ private:
     // independent of the GUI; these are its menu and toolbar entry points.
     QAction *graphicsOutAct;
     QAction *graphicsFullscreenAct;
+    // The output window, created lazily on first show and owned here.
+    SonicPi::GraphicsWindow* graphicsWindow = nullptr;
+    // Drives continuous repaint while the window is visible. Without it the
+    // window would only redraw on expose, which is not a render loop.
+    QTimer* graphicsRepaintTimer = nullptr;
 #if defined(Q_OS_MAC) || defined(Q_OS_WIN)
     QAction *recordShowCursorAct;
     QAction *recordFlashIconAct;
