@@ -206,12 +206,36 @@ void GraphicsWindow::leaveFullscreen()
     if (!m_fullscreen)
         return;
 
-    showNormal();
-    m_fullscreen = false;
+#ifdef Q_OS_WIN
+    // Windows does not reliably restore the frame on showNormal() alone, so the
+    // window can come back with no title bar and no close button - leaving the
+    // Graphics menu as the only way to get rid of it.
+    //
+    // The intent mirrors MainWindow::updateFullScreenMode's own fullscreen exit,
+    // which resets the window flags, clears FramelessWindowHint explicitly, then
+    // restores geometry and activation. The API differs: this is a QWindow, so
+    // it is setFlags/flags rather than QWidget's setWindowFlags/windowFlags.
+    setFlags(Qt::Window | Qt::WindowTitleHint | Qt::WindowSystemMenuHint
+             | Qt::WindowMinimizeButtonHint | Qt::WindowMaximizeButtonHint
+             | Qt::WindowCloseButtonHint);
+    setFlags(flags() & ~Qt::FramelessWindowHint);
 
+    QScreen* back = m_screenBeforeFullscreen ? m_screenBeforeFullscreen : screen();
+    if (back)
+    {
+        const QRect geom = back->geometry();
+        setGeometry(geom.x() + 40, geom.y() + 40, kDefaultWidth, kDefaultHeight);
+    }
+    setWindowState(Qt::WindowState((windowState() & ~Qt::WindowMinimized) | Qt::WindowActive));
+    showNormal();
+#else
+    showNormal();
     if (m_screenBeforeFullscreen)
         setScreen(m_screenBeforeFullscreen);
     resize(kDefaultWidth, kDefaultHeight);
+#endif
+    m_fullscreen = false;
+    show();
 
     GraphicsLog::info(QStringLiteral("window left fullscreen, now: %1").arg(describeOutput()));
 }
