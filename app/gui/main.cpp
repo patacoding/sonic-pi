@@ -27,6 +27,8 @@
 #include "utils/dividerproxystyle.h"
 #include "utils/fontroles.h"
 
+#include "graphics/rendering/GraphicsRenderThread.h"
+
 #include "mainwindow.h"
 
 #include "widgets/sonicpilog.h"
@@ -142,6 +144,28 @@ int main(int argc, char* argv[])
     }
 
     MainWindow mainWin(app, splash);
+
+    // ---- Graphics feature, Phase 0 scaffolding --------------------------
+    // Step 0.1 only: create the render thread's offscreen GL context and report
+    // what the driver gave us.
+    //
+    // Positioned *after* MainWindow on purpose. Two things happen inside its
+    // construction that this must not race: SonicPiAPI::CycleLogs() rotates the
+    // previous session's logs into log/history and truncates the live ones, and
+    // then stdout is redirected into gui.log. Starting the thread earlier - as
+    // an earlier revision did - meant graphics.log was written and then
+    // immediately rotated away, leaving the live file permanently empty.
+    //
+    // TEMPORARY: the render loop replaces the run-to-completion below, and the
+    // thread will then be owned by GraphicsRuntime rather than started here.
+    {
+        SonicPi::GraphicsRenderThread gfxThread;
+        gfxThread.start();
+        gfxThread.wait();
+        if (!gfxThread.contextIsValid())
+            std::cout << "[GUI] - graphics context could not be created" << std::endl;
+    }
+    // ---------------------------------------------------------------------
 
     return app.exec();
 }

@@ -91,6 +91,15 @@ set(NEW_API_SOURCES
     ${QTAPP_ROOT}/visualizer/scope_window.h
     )
 
+# Graphics output feature. Phase 0 is the rendering side only - a render thread
+# with its own offscreen GL context; the display window arrives in Phase 1.
+set(GRAPHICS_SOURCES
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsLog.cpp
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsLog.h
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsRenderThread.cpp
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsRenderThread.h
+    )
+
 set(EDITOR_SOURCES
     ${QTAPP_ROOT}/widgets/sonicpiscintilla.cpp
     ${QTAPP_ROOT}/widgets/sonicpierrorcard.cpp
@@ -308,7 +317,7 @@ elseif(APPLE)
     PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 endif()
 
-set(ALL_SOURCES ${QT_SOURCES} ${SOURCES} ${EDITOR_SOURCES} ${OLD_API_SOURCES} ${NEW_API_SOURCES})
+set(ALL_SOURCES ${QT_SOURCES} ${SOURCES} ${EDITOR_SOURCES} ${OLD_API_SOURCES} ${NEW_API_SOURCES} ${GRAPHICS_SOURCES})
 
 # Create the Qt version of the app
 if (APPLE)
@@ -543,6 +552,7 @@ target_include_directories(${APP_NAME}
     ${QTAPP_ROOT}/osc
     ${QTAPP_ROOT}/model
     ${QTAPP_ROOT}/visualizer
+    ${QTAPP_ROOT}/graphics/rendering
     ${QTAPP_ROOT}/widgets
     ${QTAPP_ROOT}/Utils
     ${CMAKE_BINARY_DIR}
@@ -597,6 +607,7 @@ target_link_libraries(${APP_NAME}
     PRIVATE
     SonicPi::API
     QScintilla
+    Qt6::OpenGL
     Threads::Threads)
 
 # ─── The Tracks tab ──────────────────────────────────────────────────────────
