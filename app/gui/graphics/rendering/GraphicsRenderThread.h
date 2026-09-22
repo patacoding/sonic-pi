@@ -225,6 +225,19 @@ private:
     // frame. Written only by this thread.
     int m_readyIndex = -1;
 
+    // Completion fences, one per target.
+    //
+    // Placed after a target's draw and published with it, so a consumer can wait for
+    // the frame to be finished before sampling. This is the access protection the
+    // design lacked: without it a consumer reads memory whose draw has been issued
+    // but not completed, which shows up as flicker between a finished and a partial
+    // image.
+    //
+    // Owned by the producer's context and deleted by it. The old fence for a target
+    // is deleted only when that target is about to be drawn into again, by which time
+    // no consumer can still be waiting on it.
+    GLsync m_targetFence[kTargetCount] = { nullptr, nullptr };
+
     bool    m_verbose   = true;
     bool    m_contextOk = false;
     bool    m_renderVerified = false;

@@ -19,6 +19,7 @@
 #include <QOffscreenSurface>
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
+#include <QOpenGLExtraFunctions>
 #include <QSurfaceFormat>
 
 namespace SonicPi
@@ -551,6 +552,35 @@ void GraphicsRenderThread::run()
                 frame.resolution = target.size();
                 if (m_gfxRenderer->renderInto(target, frame))
                 {
+                    QOpenGLExtraFunctions* f = m_context ? m_context->extraFunctions() : nullptr;
+                    if (f)
+                    {
+                        // Access protection, as Spout calls it.
+                        //
+                        // The fence marks the point in the GPU command stream where
+                        // this frame is complete. A consumer waits on it before
+                        // sampling, which is what stops it reading a draw that has been
+                        // issued but not finished - the cause of the flicker between a
+                        // finished image and a partial one.
+                        //
+                        // The target's previous fence is deleted here, immediately
+                        // before the target is drawn into again: by this point the
+                        // consumer has either waited on it or moved on to a newer
+                        // frame, and nothing can still be waiting on a fence this old.
+                        if (m_targetFence[back])
+                        {
+                            f->glDeleteSync(m_targetFence[back]);
+                            m_targetFence[back] = nullptr;
+                        }
+                        m_targetFence[back] = f->glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+
+                        // Flush so the fence is actually submitted. Without this the
+                        // command may sit in the driver's queue and the fence never
+                        // signals, which would make every consumer wait out its
+                        // timeout.
+                        f->glFlush();
+                    }
+
                     // Publish for consumers. Only after the draw, and the published
                     // index is what tells a consumer whether there is anything new -
                     // it compares against the index it last used and repeats its
@@ -558,7 +588,7 @@ void GraphicsRenderThread::run()
                     m_readyIndex = back;
                     if (m_sharedFrame)
                         m_sharedFrame->publish(target.texture(), target.size(),
-                                               frame.frameIndex);
+                                               frame.frameIndex, m_targetFence[back]);
                 }
             }
         }

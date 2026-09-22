@@ -22,6 +22,7 @@
 #include <QKeyEvent>
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
+#include <QOpenGLExtraFunctions>
 #include <QScreen>
 
 namespace SonicPi
@@ -219,9 +220,39 @@ bool GraphicsWindow::drawSharedFrame(const QRect& destination)
     if (!initDisplay())
         return false;
 
-    QOpenGLFunctions* f = context() ? context()->functions() : nullptr;
+    QOpenGLContext* ctx = context();
+    QOpenGLFunctions* f = ctx ? ctx->functions() : nullptr;
     if (!f)
         return false;
+
+    // Wait for the producer to finish this frame before sampling it.
+    //
+    // This is the access protection the design was missing, and its absence is what
+    // made the window flicker: without it this code samples a texture whose draw has
+    // been issued but not necessarily completed, so consecutive frames alternate
+    // between a finished image and a partial one.
+    //
+    // glClientWaitSync rather than glFinish: it waits for one fence, not for the whole
+    // pipeline, so it orders the two contexts without stalling everything. This is the
+    // same mechanism Chromium's GPU synchronisation uses for shared textures. Spout
+    // states the requirement plainly - "access protection ensures that the texture can
+    // only be accessed by one process at a time" - and a fence is that protection
+    // without a blocking CPU lock.
+    //
+    // Zero timeout: if the producer has not finished, showing the previous frame once
+    // more is better than stalling the GUI thread. That is Spout's own policy for a
+    // fast consumer - "it will read duplicate frames".
+    if (shared.fence)
+    {
+        QOpenGLExtraFunctions* extra = ctx ? ctx->extraFunctions() : nullptr;
+        if (extra)
+        {
+            const GLenum r = extra->glClientWaitSync(shared.fence,
+                                                     GL_SYNC_FLUSH_COMMANDS_BIT, 0);
+            if (r == GL_TIMEOUT_EXPIRED || r == GL_WAIT_FAILED)
+                return false;   // keep showing what we had; try again next frame
+        }
+    }
 
     // The texture name belongs to the render thread's context. It is usable here
     // only because the two contexts are in one share group - see the share-group
