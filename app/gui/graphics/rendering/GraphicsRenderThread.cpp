@@ -242,6 +242,28 @@ void GraphicsRenderThread::run()
     const QSurfaceFormat fmt = requestedFormat();
 
     m_context = std::make_unique<QOpenGLContext>();
+
+    // Join Qt's global share group, explicitly.
+    //
+    // AA_ShareOpenGLContexts makes Qt create a global share context; it does NOT
+    // make a manually created context a member of it. Qt's own documentation is
+    // blunt about this ("you can create a new context which shares with the global
+    // one"), and the implementation confirms it: QOpenGLContextPrivate::adopt()
+    // sets shareGroup from shareContext alone, and drops shareContext entirely if
+    // the platform could not create the context as sharing.
+    //
+    // Measured before this was added: the window's context reported "matches Qt's
+    // global group" while this one reported "DIFFERENT from Qt's global group", so
+    // the two could not see each other's textures - which is the whole point of the
+    // render thread's framebuffer.
+    //
+    // Set before create(), because the share relationship is fixed at creation.
+    // Left unset when there is no global share context, which is a legitimate state
+    // (the attribute may be ignored on some platforms); the log below reports which
+    // happened rather than leaving it to be discovered later.
+    if (QOpenGLContext* global = QOpenGLContext::globalShareContext())
+        m_context->setShareContext(global);
+
     m_context->setFormat(fmt);
     if (!m_context->create())
     {
@@ -285,6 +307,18 @@ void GraphicsRenderThread::run()
                        + (m_context->format().profile() == QSurfaceFormat::CoreProfile
                               ? QStringLiteral("Core")
                               : QStringLiteral("non-Core")));
+
+                // Reported because texture sharing between this context and the
+                // output window depends on it, and the failure mode is silent:
+                // without a share group everything still runs, the window simply
+                // cannot see this context's textures. Printing the group makes
+                // "sharing is on" a fact in the log rather than an assumption.
+                QOpenGLContext* group = QOpenGLContext::globalShareContext();
+                GraphicsLog::info(QStringLiteral("  share group : %1")
+                       .arg(!group ? QStringLiteral("NONE (AG has no global share context)")
+                                   : (m_context->shareGroup() == group->shareGroup()
+                                          ? QStringLiteral("matches Qt's global group")
+                                          : QStringLiteral("DIFFERENT from Qt's global group"))));
             }
         }
         else

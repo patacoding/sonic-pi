@@ -67,6 +67,23 @@ int main(int argc, char* argv[])
 
     QApplication::setAttribute(Qt::AA_DontShowIconsInMenus, true);
 
+    // Put every QOpenGLContext in one share group, so a texture written by one is
+    // usable by another.
+    //
+    // This is what makes the graphics output work at all: the render thread draws
+    // into its own framebuffer on its own context, and the output window displays
+    // that texture from a different context. Without sharing, the window can only
+    // draw its own copy of the shader - which is exactly the duplication this
+    // removes - and it would have to be told the picture some other way.
+    //
+    // Must be set before QApplication is constructed and therefore before any
+    // window or context exists; Qt reads it once when it sets up its global share
+    // context. The splash window created further down would already be too late.
+    //
+    // Qt honours this on Windows and X11 but warns and ignores it on macOS, which
+    // is why the graphics feature is Windows-first.
+    QApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
+
     // Sync GL surfaces to the display refresh (vsync). The scope is the only
     // QOpenGLWidget; this caps its swaps to the refresh rate and lets Qt's
     // repaint coalescing keep the GUI to one frame per refresh instead of

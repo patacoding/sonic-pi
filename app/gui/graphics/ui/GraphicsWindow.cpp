@@ -83,6 +83,19 @@ void GraphicsWindow::initializeGL()
                                   reinterpret_cast<const char*>(f->glGetString(GL_VERSION)))));
     }
 
+    // Whether this window can actually see the render thread's textures. Reported
+    // because the failure is silent - everything runs, the picture is just missing
+    // - and because the answer depends on AA_ShareOpenGLContexts having been set
+    // before QApplication, which is easy to get wrong and impossible to see.
+    {
+        QOpenGLContext* group = QOpenGLContext::globalShareContext();
+        GraphicsLog::info(QStringLiteral("window: share group %1")
+               .arg(!group ? QStringLiteral("NONE (Qt has no global share context)")
+                           : (context()->shareGroup() == group->shareGroup()
+                                  ? QStringLiteral("matches Qt's global group")
+                                  : QStringLiteral("DIFFERENT from Qt's global group"))));
+    }
+
     // The render target size is the user's configured output resolution, decided
     // by the render thread from settings. Captured here so the log shows both
     // numbers side by side, and so cropRect() has the size without reaching across
