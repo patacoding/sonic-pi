@@ -187,7 +187,9 @@ bool GraphicsWindow::enterFullscreen(QScreen* target)
     }
 
     if (!m_fullscreen)
+    {
         m_screenBeforeFullscreen = screen();
+    }
 
     setScreen(want);
     // Some window managers keep the pre-fullscreen geometry unless it is set
@@ -206,21 +208,36 @@ void GraphicsWindow::leaveFullscreen()
     if (!m_fullscreen)
         return;
 
-    // Deliberately minimal: showNormal(), restore the screen, restore the size.
-    //
-    // An earlier revision also reset the window flags here to force the frame
-    // back, mirroring MainWindow::updateFullScreenMode. That was a guess at a
-    // reported symptom rather than a diagnosis, and it broke fullscreen outright.
-    // Reverted. Do not re-add window-flag manipulation here without a
-    // reproduction of the actual problem.
     showNormal();
     m_fullscreen = false;
 
-    if (m_screenBeforeFullscreen)
-        setScreen(m_screenBeforeFullscreen);
-    resize(kDefaultWidth, kDefaultHeight);
+    // Put it back as a small, centred, fully on-screen window - always.
+    //
+    // Not a restore of the previous geometry. enterFullscreen() stretches the
+    // window to the screen before showFullScreen(), so showNormal()'s notion of
+    // "normal" is a screen-sized rect. That is what produced a window as big as
+    // the display with its title bar above the top edge, which reads as "the
+    // window has lost its title bar". Saving and restoring the geometry is one
+    // way around it; simply picking a windowed size is simpler and has no
+    // ambiguous state to get wrong.
+    QScreen* back = m_screenBeforeFullscreen ? m_screenBeforeFullscreen : screen();
+    if (back)
+        setScreen(back);
 
-    GraphicsLog::info(QStringLiteral("window left fullscreen, now: %1").arg(describeOutput()));
+    const QRect avail = back ? back->availableGeometry() : QRect(0, 0, kWindowedWidth, kWindowedHeight);
+    // Clamp, so a small screen cannot leave part of the window off it.
+    const int w = qMin(kWindowedWidth, avail.width());
+    const int h = qMin(kWindowedHeight, avail.height());
+    setGeometry(avail.x() + (avail.width() - w) / 2,
+                avail.y() + (avail.height() - h) / 2,
+                w, h);
+
+    GraphicsLog::info(QStringLiteral("window left fullscreen, now: %1  geometry=%2x%3 at %4,%5")
+                          .arg(describeOutput())
+                          .arg(width())
+                          .arg(height())
+                          .arg(x())
+                          .arg(y()));
 }
 
 QString GraphicsWindow::describeOutput() const

@@ -41,10 +41,14 @@ class GraphicsWindow : public QOpenGLWindow
     Q_OBJECT
 
 public:
-    // The size the window opens at when not fullscreen. Deliberately 16:9 and
-    // modest; the composer resizes it.
+    // The size the window opens at when not fullscreen, and the size it is put
+    // back to when leaving fullscreen. Deliberately small: leaving fullscreen
+    // should hand back an obviously windowed, fully on-screen window rather than
+    // anything derived from the fullscreen rect.
     static constexpr int kDefaultWidth = 960;
     static constexpr int kDefaultHeight = 540;
+    static constexpr int kWindowedWidth = 480;
+    static constexpr int kWindowedHeight = 320;
 
     explicit GraphicsWindow(QWindow* parent = nullptr);
     ~GraphicsWindow() override;
@@ -85,8 +89,9 @@ private:
     QSize m_targetSize;
     bool  m_glReady  = false;
     bool  m_fullscreen = false;
-    // The screen fullscreen was entered on, so leaving can restore the window to
-    // the screen it came from rather than the primary one.
+    // The screen fullscreen was entered on, so leaving can put the window back on
+    // the screen it came from rather than the primary one. No geometry is saved:
+    // leaving fullscreen always assigns a small centred rect instead.
     QScreen* m_screenBeforeFullscreen = nullptr;
 };
 
