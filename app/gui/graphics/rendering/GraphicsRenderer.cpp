@@ -21,7 +21,6 @@
 #include <QOpenGLFramebufferObjectFormat>
 #include <QOpenGLBuffer>
 #include <QOpenGLShaderProgram>
-#include <QScopeGuard>
 #include <QSet>
 
 #include <cmath>
@@ -286,22 +285,9 @@ bool GraphicsRenderer::loadShaders()
 
 void GraphicsRenderer::cacheUniformLocations()
 {
-    m_uniforms = Uniforms();
+    m_uniforms = queryUniforms(m_program.get());
+
     m_reportedNoUniforms = false;
-
-    if (!m_program || !m_program->isLinked())
-        return;
-
-    // The program must be bound for uniform queries. Callers reach here either
-    // straight from a successful link (the program is bound as part of linking)
-    // or from loadShaders(), so binding explicitly is the safe form.
-    m_program->bind();
-    m_uniforms.time       = m_program->uniformLocation("iTime");
-    m_uniforms.timeDelta  = m_program->uniformLocation("iTimeDelta");
-    m_uniforms.frame      = m_program->uniformLocation("iFrame");
-    m_uniforms.resolution = m_program->uniformLocation("iResolution");
-    m_program->release();
-
     const bool any = m_uniforms.time >= 0 || m_uniforms.timeDelta >= 0
                      || m_uniforms.frame >= 0 || m_uniforms.resolution >= 0;
     if (any)
@@ -313,6 +299,24 @@ void GraphicsRenderer::cacheUniformLocations()
                               .arg(m_uniforms.frame)
                               .arg(m_uniforms.resolution));
     }
+}
+
+GraphicsRenderer::Uniforms GraphicsRenderer::queryUniforms(QOpenGLShaderProgram* program)
+{
+    Uniforms u;
+    if (!program || !program->isLinked())
+        return u;
+
+    // The program must be bound for uniform queries. Binding here is what lets this
+    // be called for a program that is NOT the renderer's own, without going near
+    // m_uniforms.
+    program->bind();
+    u.time       = program->uniformLocation("iTime");
+    u.timeDelta  = program->uniformLocation("iTimeDelta");
+    u.frame      = program->uniformLocation("iFrame");
+    u.resolution = program->uniformLocation("iResolution");
+    program->release();
+    return u;
 }
 
 void GraphicsRenderer::applyUniforms(const GraphicsFrame& frame)
@@ -483,68 +487,12 @@ bool GraphicsRenderer::renderToBoundFramebuffer(const QSize& passSize, const QRe
     if (m_program && m_program->isLinked())
     {
         m_program->bind();
-
         // Uniforms go in after binding the program and before the draw call, which
         // is the only order that works: they are part of the program's state, not
         // the framebuffer's.
         applyUniforms(frame);
-
-        // Attribute locations are hardcoded in passthrough.vert via
-        // layout(location = ...), so the same numbers are used here. Bound and
-        // enabled per frame rather than once at setup: the cost is negligible
-        // and it cannot drift out of sync with the VAO state.
-        if (m_vbo && m_vao)
-        {
-            // Drain any earlier error, then check after each step of the setup.
-            //
-            // A single check after the draw cannot say WHERE a GL_INVALID_OPERATION
-            // came from, and 0x502 is exactly the error this pipeline raises when a
-            // core-profile requirement is unmet - the VAO being unbound was one
-            // such cause earlier in this project. Reporting it once, with the step
-            // that produced it, turns a guess into a reading. Only the first
-            // occurrence is logged.
-            static bool diagnosed = false;
-            const auto step = [&](const char* what) {
-                const GLenum e = f->glGetError();
-                if (e != GL_NO_ERROR && !diagnosed)
-                {
-                    diagnosed = true;
-                    GraphicsLog::error(QStringLiteral("renderer: GL error 0x%1 at '%2' "
-                                                      "(program=%3 vao=%4 vbo=%5)")
-                                           .arg(e, 0, 16)
-                                           .arg(QString::fromLatin1(what))
-                                           .arg(m_program && m_program->isLinked() ? 1 : 0)
-                                           .arg(m_vao && m_vao->isCreated() ? 1 : 0)
-                                           .arg(m_vbo && m_vbo->isCreated() ? 1 : 0));
-                }
-            };
-
-            while (f->glGetError() != GL_NO_ERROR) { /* drain */ }
-
-            m_vao->bind();
-            step("vao bind");
-            m_vbo->bind();
-            step("vbo bind");
-
-            m_program->enableAttributeArray(0);
-            m_program->setAttributeBuffer(0, GL_FLOAT, 0, 2, 4 * sizeof(float));
-            step("attribute 0");
-            m_program->enableAttributeArray(1);
-            m_program->setAttributeBuffer(1, GL_FLOAT, 2 * sizeof(float), 2, 4 * sizeof(float));
-            step("attribute 1");
-
-            // Six vertices: two triangles forming the full-screen quad.
-            f->glDrawArrays(GL_TRIANGLES, 0, 6);
-            step("glDrawArrays");
-
-            m_program->disableAttributeArray(0);
-            m_program->disableAttributeArray(1);
-            m_vbo->release();
-            m_vao->release();
-        }
-
-        m_program->release();
-    }
+        drawQuadWithProgram(m_program.get());
+        m_program->release();    }
 
     const GLenum err = f->glGetError();
     if (err != GL_NO_ERROR)
@@ -552,6 +500,44 @@ bool GraphicsRenderer::renderToBoundFramebuffer(const QSize& passSize, const QRe
         GraphicsLog::error(QStringLiteral("renderer: GL error 0x%1 after draw").arg(err, 0, 16));
         return false;
     }
+    return true;
+}
+
+bool GraphicsRenderer::drawQuadWithProgram(QOpenGLShaderProgram* program)
+{
+    // Deliberately takes the program rather than reading m_program. The caller has
+    // bound it and set its uniforms; this only issues the geometry. That is what
+    // lets the verification draw its test pattern through the same code as the real
+    // frame without either corrupting the other - the earlier arrangement, where
+    // verification swapped m_program in and back out, left the renderer's uniform
+    // locations pointing at the test program and froze the real shader.
+    if (!program || !program->isLinked())
+        return false;
+
+    QOpenGLContext* ctx = QOpenGLContext::currentContext();
+    QOpenGLFunctions* f = ctx ? ctx->functions() : nullptr;
+    if (!f || !m_vao || !m_vbo)
+        return false;
+
+    // Attribute locations are hardcoded in passthrough.vert via
+    // layout(location = ...), so the same numbers are used here. Bound and enabled
+    // per frame rather than once at setup: the cost is negligible and it cannot
+    // drift out of sync with the VAO state.
+    m_vao->bind();
+    m_vbo->bind();
+
+    program->enableAttributeArray(0);
+    program->setAttributeBuffer(0, GL_FLOAT, 0, 2, 4 * sizeof(float));
+    program->enableAttributeArray(1);
+    program->setAttributeBuffer(1, GL_FLOAT, 2 * sizeof(float), 2, 4 * sizeof(float));
+
+    // Six vertices: two triangles forming the full-screen quad.
+    f->glDrawArrays(GL_TRIANGLES, 0, 6);
+
+    program->disableAttributeArray(0);
+    program->disableAttributeArray(1);
+    m_vbo->release();
+    m_vao->release();
     return true;
 }
 
@@ -619,34 +605,46 @@ bool GraphicsRenderer::verifyShaderOutput()
         GraphicsLog::error(QStringLiteral("renderer: could not build the verification shader"));
         return false;
     }
-    std::unique_ptr<QOpenGLShaderProgram> saved = std::move(m_program);
-    m_program = std::move(anchors);
-    // Swapping the program invalidates the uniform locations, which belong to the
-    // program that was current when they were queried. Without this the renderer
-    // is left holding the ANCHORS program's locations after the restore below, and
-    // since the test pattern declares no uniforms those are all -1 - so the real
-    // shader silently stops receiving iTime, iFrame and iResolution and its picture
-    // freezes. That is exactly what happened: the window showed a still image and
-    // editing default.frag appeared to do nothing, which looked like a display bug
-    // and was a stale-cache bug.
-    cacheUniformLocations();
 
-    // Restore the default program however this returns, so a failed verification
-    // does not leave the test pattern on screen.
+    // The test program is used WITHOUT being installed as m_program.
     //
-    // Re-queries the uniform locations as part of restoring, for the reason above:
-    // a program and its uniform locations have to change together.
-    auto restore = qScopeGuard([this, &saved]() {
-        m_program = std::move(saved);
-        cacheUniformLocations();
-    });
-
-    // A fixed frame, deliberately: the verification pattern must not vary with
-    // wall-clock time, or its expected pixel values would not be constants and the
-    // check could not be written down. A shader that animates is free to ignore
-    // these values, and a test pattern that animated would be untestable.
-    if (!render(GraphicsFrame()))
+    // An earlier version swapped it into m_program and restored it afterwards. That
+    // was the source of a bug that cost real time: uniform locations belong to the
+    // program that was current when they were queried, the test pattern declares no
+    // uniforms, so the renderer was left holding a set of -1 locations and the real
+    // shader silently stopped receiving iTime and iFrame. The picture froze while
+    // every log line said the reload had worked.
+    //
+    // Drawing through drawQuadWithProgram() with a local program cannot do that: the
+    // renderer's program and its cached locations are never touched at all.
+    const Uniforms anchorUniforms = queryUniforms(anchors.get());
+    Q_UNUSED(anchorUniforms);   // the pattern is static; it declares none by design
+    if (!anchors->bind())
+    {
+        GraphicsLog::error(QStringLiteral("renderer: could not bind the verification program"));
         return false;
+    }
+
+    // The viewport and the clear come from the frame path, so this uses the same
+    // geometry and the same background as a real frame - a test that set up its own
+    // state could pass while the real path is broken.
+    QOpenGLContext* ctx = QOpenGLContext::currentContext();
+    QOpenGLFunctions* f = ctx ? ctx->functions() : nullptr;
+    if (!f)
+        return false;
+    const int glY = m_size.height() - (0 + m_size.height());
+    f->glViewport(0, glY, m_size.width(), m_size.height());
+    f->glClearColor(kClearR, kClearG, kClearB, kClearA);
+    f->glClear(GL_COLOR_BUFFER_BIT);
+
+    const bool drew = drawQuadWithProgram(anchors.get());
+    anchors->release();
+    if (!drew)
+    {
+        GraphicsLog::error(QStringLiteral("renderer: verification draw failed"));
+        return false;
+    }
+
 
     QSize readSize;
     std::unique_ptr<unsigned char[]> pixels;

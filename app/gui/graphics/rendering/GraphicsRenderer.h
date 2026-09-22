@@ -199,6 +199,16 @@ private:
     // program bound.
     void applyUniforms(const GraphicsFrame& frame);
 
+    // Draw the quad with `program`, which the caller has already bound and whose
+    // uniforms it has set.
+    //
+    // Split out because two callers need it with DIFFERENT programs - the normal
+    // frame path with m_program, and the verification with its own test program -
+    // and sharing the body is what makes it impossible for the two to drift. It
+    // reads no member that identifies a program, which is deliberately the property
+    // that keeps a verification pass from corrupting the render path.
+    bool drawQuadWithProgram(QOpenGLShaderProgram* program);
+
     bool channelClose(unsigned char actual, float expected) const;
 
     // Uniform locations for the current program, or -1 when it does not declare
@@ -212,6 +222,12 @@ private:
         int frame = -1;
         int resolution = -1;
     };
+
+    // Uniform locations for an arbitrary program, or -1 for each it does not
+    // declare. Static and taking the program explicitly so the verification can ask
+    // about its own program WITHOUT disturbing the cached locations belonging to
+    // m_program.
+    static Uniforms queryUniforms(QOpenGLShaderProgram* program);
     Uniforms m_uniforms;
 
     // Whether "this program declares no uniforms at all" has already been
