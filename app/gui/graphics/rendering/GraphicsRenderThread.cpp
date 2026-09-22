@@ -518,6 +518,14 @@ void GraphicsRenderThread::run()
 
     quint64 windowFrames = 0;
     double  windowWorstMs = 0.0;
+    // How long this loop spent waiting for the consumer to release a target, over the
+    // last report window. This is the whole cost of the handoff, and the design says it
+    // should be in the microseconds: the fence being waited on was placed a frame
+    // earlier, so it has almost always signalled already. A value approaching the frame
+    // interval means the consumer is the bottleneck, which is a fact worth reporting
+    // rather than a state worth hiding behind a skipped frame.
+    qint64  windowWaitUs = 0;
+    qint64  windowWaitWorstUs = 0;
     quint64 totalFrames = 0;
     qint64  nextDeadlineNs = frameTimer.nsecsElapsed();
 
@@ -554,65 +562,109 @@ void GraphicsRenderThread::run()
         frame.frameIndex = totalFrames;
         lastFrameStartNs = frameStartNs;
 
+        // Target selection and the one wait in the whole handoff.
+        //
+        // The rule is one sentence: write whichever target the consumer is not
+        // reading. The published index is exactly that target, so the choice is the
+        // other one - no flag, no bookkeeping, no way for the two sides to disagree
+        // about which texture is which.
+        //
+        // Then wait for the consumer to have finished with it last time. This is the
+        // ONLY place the producer blocks, and it is deliberately a block rather than a
+        // skip: a producer that can keep going faster than the consumer can only be
+        // rendering something trivially cheap, and letting it run ahead would mean
+        // overwriting a texture the consumer is still reading - which is the flicker,
+        // not a performance win. Waiting here costs nothing in practice because the
+        // fence being waited on was placed a whole frame earlier.
+        //
+        // Measured, not assumed: the wait is accumulated and reported as `last wait` in
+        // the per-second line. It should sit in the microseconds; if it does not, the
+        // consumer is genuinely the bottleneck and that is worth seeing.
+        const int back = (m_readyIndex == 0) ? 1 : 0;
+
+        if (m_gfxRenderer && m_targets[back])
         {
-            QMutexLocker lock(&m_rendererMutex);
-            if (m_gfxRenderer && m_targets[0] && m_targets[1])
+            GraphicsTarget& target = *m_targets[back];
+
+            QOpenGLExtraFunctions* f = m_context ? m_context->extraFunctions() : nullptr;
+
+            QElapsedTimer wait;
+            wait.start();
+            if (m_sharedFrame && f)
             {
-                // Choose the target NOT currently published.
-                //
-                // This step is what makes double buffering double buffering, and
-                // omitting it would silently reduce the whole scheme to a single
-                // texture with all the tearing that implies. A consumer may be
-                // sampling m_readyIndex right now, so that one is left alone and the
-                // frame goes into the other; the published one only changes when this
-                // frame is complete.
-                const int back = (m_readyIndex == 0) ? 1 : 0;
-                GraphicsTarget& target = *m_targets[back];
+                GraphicsTargetFence& tf = m_sharedFrame->targetFence(back);
 
-                // Report the size the shader will actually be given, not a second copy
-                // of it, so iResolution cannot disagree with the target being drawn
-                // into.
-                frame.resolution = target.size();
-                if (m_gfxRenderer->renderInto(target, frame))
+                // Take the fence the consumer left, whatever it is. Null on the first
+                // use of this target, which is why the wait is conditional.
+                GLsync consumerFence = tf.consumerFence.exchange(nullptr,
+                                                                 std::memory_order_acq_rel);
+                if (consumerFence)
                 {
-                    QOpenGLExtraFunctions* f = m_context ? m_context->extraFunctions() : nullptr;
-                    if (f)
+                    // Wait for the GPU to have finished reading this texture. A
+                    // generous bound rather than an infinite one: if the consumer's
+                    // context has died, blocking here would take the render loop with
+                    // it, and the loop is what keeps the audio engine's thread budget
+                    // intact. A timeout is reported rather than hidden.
+                    constexpr GLuint64 kWaitNs = 500 * 1000 * 1000;   // 500ms
+                    const GLenum r = f->glClientWaitSync(consumerFence,
+                                                         GL_SYNC_FLUSH_COMMANDS_BIT,
+                                                         kWaitNs);
+                    if (r == GL_TIMEOUT_EXPIRED || r == GL_WAIT_FAILED)
                     {
-                        // Access protection, as Spout calls it.
-                        //
-                        // The fence marks the point in the GPU command stream where
-                        // this frame is complete. A consumer waits on it before
-                        // sampling, which is what stops it reading a draw that has been
-                        // issued but not finished - the cause of the flicker between a
-                        // finished image and a partial one.
-                        //
-                        // The target's previous fence is deleted here, immediately
-                        // before the target is drawn into again: by this point the
-                        // consumer has either waited on it or moved on to a newer
-                        // frame, and nothing can still be waiting on a fence this old.
-                        if (m_targetFence[back])
-                        {
-                            f->glDeleteSync(m_targetFence[back]);
-                            m_targetFence[back] = nullptr;
-                        }
-                        m_targetFence[back] = f->glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-
-                        // Flush so the fence is actually submitted. Without this the
-                        // command may sit in the driver's queue and the fence never
-                        // signals, which would make every consumer wait out its
-                        // timeout.
-                        f->glFlush();
+                        ++m_waitTimeouts;
+                        GraphicsLog::warn(QStringLiteral("render loop: waited 500ms for the consumer "
+                                                         "to release target %1; drawing anyway").arg(back));
                     }
-
-                    // Publish for consumers. Only after the draw, and the published
-                    // index is what tells a consumer whether there is anything new -
-                    // it compares against the index it last used and repeats its
-                    // previous frame if this has not moved.
-                    m_readyIndex = back;
-                    if (m_sharedFrame)
-                        m_sharedFrame->publish(target.texture(), target.size(),
-                                               frame.frameIndex, m_targetFence[back]);
+                    // Safe to delete: the fence has signalled, or we have given up on
+                    // it and will never look at it again.
+                    f->glDeleteSync(consumerFence);
                 }
+            }
+            const qint64 waitUs = wait.nsecsElapsed() / 1000;
+            windowWaitUs += waitUs;
+            windowWaitWorstUs = qMax(windowWaitWorstUs, waitUs);
+
+            // Report the size the shader will actually be given, not a second copy
+            // of it, so iResolution cannot disagree with the target being drawn
+            // into.
+            frame.resolution = target.size();
+            if (m_gfxRenderer->renderInto(target, frame))
+            {
+                if (f)
+                {
+                    // Retire the fence from TWO frames ago, not the one from the
+                    // previous frame.
+                    //
+                    // A consumer reads the fence handle out of the slot and then waits
+                    // on it. Deleting a fence that a consumer may still be holding is
+                    // undefined behaviour, and the symptom is exactly the flicker being
+                    // chased here. Deferring deletion by one further frame means the
+                    // fence being retired was published two frames ago, by which time
+                    // any consumer has long since either waited on it or moved to a
+                    // newer frame.
+                    if (m_retiredFence[back])
+                    {
+                        f->glDeleteSync(m_retiredFence[back]);
+                        m_retiredFence[back] = nullptr;
+                    }
+                    m_retiredFence[back] = m_targetFence[back];
+                    m_targetFence[back] = nullptr;
+
+                    m_targetFence[back] = f->glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+
+                    // Flush so the fence is actually submitted. Without this the
+                    // command may sit in the driver's queue and the fence never
+                    // signals, which would make every consumer wait out its timeout.
+                    f->glFlush();
+                }
+
+                // Publish for consumers. Only after the draw, and the published index
+                // is what tells a consumer which target is now the readable one - and
+                // therefore which one the next frame must NOT use.
+                m_readyIndex = back;
+                if (m_sharedFrame)
+                    m_sharedFrame->publish(target.texture(), target.size(),
+                                           frame.frameIndex, m_targetFence[back], back);
             }
         }
 
@@ -635,18 +687,24 @@ void GraphicsRenderThread::run()
             m_worstFrameMs.store(windowWorstMs, std::memory_order_relaxed);
 
             GraphicsLog::info(QStringLiteral("render loop: %1 frames in %2s = %3 fps, last %4ms, worst %5ms, "
-                                             "iTime %6s, iFrame %7")
+                                             "consumer wait avg %6us worst %7us (%8 timeouts), "
+                                             "iTime %9s, iFrame %10")
                                   .arg(windowFrames)
                                   .arg(secs, 0, 'f', 2)
                                   .arg(fps, 0, 'f', 1)
                                   .arg(frameMs, 0, 'f', 2)
                                   .arg(windowWorstMs, 0, 'f', 2)
+                                  .arg(windowFrames ? windowWaitUs / qint64(windowFrames) : 0)
+                                  .arg(windowWaitWorstUs)
+                                  .arg(m_waitTimeouts)
                                   .arg(frame.timeSeconds, 0, 'f', 3)
                                   .arg(frame.frameIndex));
             emit frameStatsUpdated();
 
             windowFrames = 0;
             windowWorstMs = 0.0;
+            windowWaitUs = 0;
+            windowWaitWorstUs = 0;
             reportTimer.restart();
         }
 
@@ -717,6 +775,22 @@ void GraphicsRenderThread::run()
         QMutexLocker lock(&m_rendererMutex);
         if (m_sharedFrame)
             m_sharedFrame->clear();
+
+        // Fences belong to this context, so they go before it is released.
+        //
+        // Only this thread's own completion fences are deleted. The fences a consumer
+        // leaves behind belong to the consumer's context and are that side's to delete;
+        // reaching for them from here would be deleting an object this context does not
+        // own.
+        QOpenGLExtraFunctions* ex = m_context ? m_context->extraFunctions() : nullptr;
+        if (ex)
+        {
+            for (int i = 0; i < kTargetCount; ++i)
+            {
+                if (m_targetFence[i])  { ex->glDeleteSync(m_targetFence[i]);  m_targetFence[i] = nullptr; }
+                if (m_retiredFence[i]) { ex->glDeleteSync(m_retiredFence[i]); m_retiredFence[i] = nullptr; }
+            }
+        }
 
         for (int i = 0; i < kTargetCount; ++i)
             m_targets[i].reset();

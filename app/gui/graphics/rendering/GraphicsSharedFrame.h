@@ -45,28 +45,65 @@
 namespace SonicPi
 {
 
-// The render thread's current frame, published for the output window to display.
+// Two render targets, one fence each, and that is the whole handoff.
 //
-// Pure data, header-only and dependency-free, like GraphicsFrame: the render
-// thread produces it and the window consumes it, and neither needs to include the
-// other.
+// The rule is one sentence: the producer writes whichever target the consumer is not
+// reading, and before it writes it waits for the consumer to have finished with that
+// target last time. The wait is expressed as a GL fence the consumer leaves behind,
+// never as a flag, and that distinction is the entire reason this design works:
 //
-// Ownership rule, which is what makes this safe without a mutex: the render thread
-// is the ONLY writer, and the window only reads. There is no frame exchange and no
-// double buffering - the window shows whichever frame is current and repeats it if
-// it repaints faster than the renderer draws. That is what the design settled on,
-// and it is why the renderer must finish its frame before publishing: the texture
-// is not valid for reading while a frame is half-drawn into it.
+//   GL is ASYNCHRONOUS. When the consumer returns from its draw call, the commands
+//   have been SUBMITTED, not executed. A flag cleared there means "the CPU stopped
+//   talking about this texture", not "the GPU stopped reading it". A producer that
+//   trusts such a flag clears the texture and starts drawing into it while the
+//   consumer's reads are still queued ahead of it, and the screen shows a picture
+//   alternating between old and new contents.
 //
-// The window samples the texture directly rather than copying it, so the two
-// contexts must be in the same share group. That is set up in main.cpp and the
-// render thread; QOpenGLContext::globalShareContext() is what ties them together.
+// A fence answers the question that actually matters - has the GPU finished reading
+// this texture? - and the producer can afford to BLOCK on it, because by the time a
+// target comes round for reuse the fence on it was placed a whole frame earlier. The
+// wait is therefore near-zero in practice, and it is measured (see
+// GraphicsRenderThread's `waited` log field) rather than assumed.
+//
+// This replaces a version that used an "is the consumer reading?" flag plus a
+// non-blocking skip. It was more code and it was wrong: the flag could not be true
+// when it needed to be, so the producer never skipped and never waited, and nothing
+// noticed.
+// One render target's read fence, and nothing else.
+//
+// The producer's completion fence is NOT here. It travels in the published frame
+// (GraphicsSharedFrame::fence), because it describes a frame rather than a buffer and
+// is handed over together with the texture name it belongs to. Keeping a second copy
+// per target was pure duplication: nothing read it.
+//
+// So there is exactly one fence per target, written by one side and read by the other,
+// which is the whole reason this is easy to reason about.
+struct GraphicsTargetFence
+{
+    // The consumer's fence covering its most recent read of this target. Null when the
+    // consumer has not read it yet, which is the normal state for the first use.
+    //
+    // Written only by the consumer, waited on and deleted only by the producer. Both
+    // operations happen at moments the two sides cannot overlap: the producer only
+    // deletes after it has taken the handle and the fence has signalled, and the
+    // consumer only ever replaces it with one it has itself just created.
+    std::atomic<GLsync> consumerFence{nullptr};
+};
+
+// One frame as published by the render thread, for a consumer to display.
+//
+// Pure data, header-only and dependency-free, like GraphicsFrame: the render thread
+// produces it and the window consumes it, and neither needs to include the other.
 struct GraphicsSharedFrame
 {
     // GL texture name of the renderer's colour attachment. 0 means "nothing to
     // show yet" - before the first frame, or after the target was rebuilt - and
     // consumers must treat it as such rather than binding texture 0.
     GLuint texture = 0;
+
+    // Which of the producer's targets this is. The consumer needs it to find the
+    // fence it must leave behind after reading.
+    int targetIndex = -1;
 
     // Size of that texture, in pixels. Read together with the texture name so a
     // display can tell whether what it is about to sample matches what it sized
@@ -79,18 +116,8 @@ struct GraphicsSharedFrame
     // producer drew the picture.
     quint64 frameIndex = 0;
 
-    // The producer's completion fence for this frame, or nullptr if it did not place
-    // one.
-    //
-    // A consumer MUST wait on this before sampling, which is the access protection
-    // Spout describes. Without it a consumer can read a texture whose draw has been
-    // issued but not completed, and gets an unfinished image - in practice, frames
-    // alternating between the picture and a partial one, which reads as flicker.
-    //
-    // The fence belongs to the producer's context. Waiting on it from another context
-    // in the same share group is the supported operation; the consumer must not
-    // delete it, and the producer must not delete it while a consumer may still be
-    // waiting.
+    // The producer's completion fence for this frame. The consumer MUST wait on this
+    // before sampling, or it reads a half-drawn image.
     GLsync fence = nullptr;
 
     bool valid() const { return texture != 0 && !size.isEmpty(); }
@@ -98,41 +125,35 @@ struct GraphicsSharedFrame
 
 // The published frame, written by the render thread and read by the window.
 //
-// Modelled on how Spout actually does this, which is worth stating because the
-// first two attempts here got it wrong in the same way:
+// Modelled on how Spout describes its own handoff, which is worth quoting because the
+// first attempts here got it wrong in the same way:
 //
-//   "The sender will replace the shared texture handle in shared memory every
-//    frame. The receiver reads that handle from shared memory at its own frame rate
-//    and copies the shared texture. There is texture access protection but no
+//   "The sender will replace the shared texture handle in shared memory every frame.
+//    The receiver reads that handle from shared memory at its own frame rate and
+//    copies the shared texture. There is texture access protection but no
 //    synchronization. If the sender is faster, the receiver will simply miss frames.
 //    If the receiver is faster it will read duplicate frames. Access protection
 //    ensures that the texture can only be accessed by one process at a time."
 //      - Spout maintainer, on SetFrameSync/WaitFrameSync
 //
-// Two things follow, and both were missing here:
-//
-//   * "One writer, one reader" is NOT sufficient protection. It rules out two
-//     writers; it does not stop a reader sampling memory the writer currently owns.
-//     That is what caused a flickering window: frames alternating between a finished
-//     image and an unfinished one.
-//
-//   * What IS sufficient is an access barrier at the GPU level. A GL sync object
-//     placed after the producer's draw and waited on by the consumer before it
-//     samples. This is also what Chromium's GPU synchronisation design uses for the
-//     same reason - it orders the two sides without blocking either CPU thread.
-//
-// So the slot carries a fence as well as the texture name. The consumer must wait
-// for it; that wait is what makes "the last complete frame" actually complete.
-//
-// The atomic field ordering below is still needed, for the metadata itself.
+// Spout's "access protection" is exactly the per-target fence kept here. What this
+// design adds over Spout's is that the producer waits for it rather than overwriting
+// regardless, because a Sonic Pi shader output that tears is a visible defect whereas
+// a dropped frame is not.
 class GraphicsSharedFrameSlot
 {
 public:
-    void publish(GLuint texture, const QSize& size, quint64 frameIndex, GLsync fence)
+    // How many targets the render thread may publish. The fences are fixed size so
+    // that a consumer can index them without allocating anything.
+    static constexpr int kMaxTargets = 4;
+
+    void publish(GLuint texture, const QSize& size, quint64 frameIndex, GLsync fence,
+                 int targetIndex)
     {
         m_size = size;
         m_frameIndex.store(frameIndex, std::memory_order_relaxed);
         m_fence.store(fence, std::memory_order_relaxed);
+        m_targetIndex.store(targetIndex, std::memory_order_relaxed);
         // Release: everything above must be visible to a reader that observes this.
         m_texture.store(texture, std::memory_order_release);
     }
@@ -156,22 +177,35 @@ public:
             f.size = m_size;
             f.frameIndex = m_frameIndex.load(std::memory_order_relaxed);
             f.fence = m_fence.load(std::memory_order_relaxed);
+            f.targetIndex = m_targetIndex.load(std::memory_order_relaxed);
         }
         return f;
     }
 
+    // The fences for one target. Both sides use this; there is no other way to reach
+    // a target's fences, so there is nowhere for a second copy of that state to drift.
+    GraphicsTargetFence& targetFence(int targetIndex)
+    {
+        return m_fences[clampIndex(targetIndex)];
+    }
+
 private:
+    static int clampIndex(int i)
+    {
+        return (i >= 0 && i < kMaxTargets) ? i : 0;
+    }
+
     std::atomic<GLuint>  m_texture{0};
     std::atomic<quint64> m_frameIndex{0};
-    // The producer's completion fence for the published frame. Not atomic in the
-    // lock-free sense - it is an opaque pointer only the GL context touches - but
-    // published and read alongside the texture name so a consumer that sees a
-    // texture also sees the matching fence.
+    std::atomic<int>     m_targetIndex{-1};
     std::atomic<GLsync>  m_fence{nullptr};
     // Written before m_texture and only read when m_texture is non-zero, so it needs
     // no synchronisation of its own - the release/acquire pair on the texture name
     // orders it.
     QSize m_size;
+    // One per target, never reallocated, so a consumer can hold a reference to one
+    // across a call without worrying about it moving.
+    GraphicsTargetFence m_fences[kMaxTargets];
 };
 
 

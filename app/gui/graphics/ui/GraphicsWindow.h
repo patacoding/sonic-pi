@@ -139,6 +139,12 @@ private:
     // would be a second producer.
     bool drawSharedFrame(const QRect& destination);
 
+    // Sample `texture` into the current viewport. The caller sets the viewport.
+    //
+    // Separate from drawSharedFrame so a frame that is not ready yet can repeat the
+    // previous texture without redoing the readiness logic.
+    bool blitTexture(GLuint texture, const QRect& destination);
+
     // Build the display shader and its quad. Requires a current context.
     bool initDisplay();
 
@@ -155,9 +161,25 @@ private:
     // Time of the last "showing shared frame" report, so it appears once a second
     // instead of once a frame. See the note where it is used.
     qint64 m_lastFrameReportMs = 0;
-    // The texture currently bound for display, so the sampler's filter can be set
-    // once per texture rather than per frame. Zero means "nothing set up yet".
-    GLuint m_boundDisplayTexture = 0;
+
+    // The last texture that was successfully drawn.
+    //
+    // Kept because a target the producer is mid-way through, or a frame whose fence
+    // has not signalled, must repeat the previous picture rather than draw nothing:
+    // the caller has already cleared to the background colour, so "nothing" is a
+    // full-screen flash of background. That is one half of what the flicker was.
+    GLuint m_lastGoodTexture = 0;
+
+    // Count of frames whose producer fence had not signalled within the guard timeout,
+    // reported once a second.
+    //
+    // This exists because "the picture flickers" is not a measurement and neither is
+    // "it looks smooth now". When the handoff is working this stays at zero: the
+    // producer draws in a fraction of a millisecond, so a fence placed before the
+    // previous repaint has always signalled by the next one. A non-zero count says the
+    // producer has genuinely stalled, which is a different problem from a slow
+    // consumer and should not be confused with it.
+    quint64 m_staleFrames = 0;
 
     // Not owned, and not used to set the output size. See setRenderThread().
     GraphicsRenderThread* m_renderThread = nullptr;

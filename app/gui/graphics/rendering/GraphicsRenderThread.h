@@ -233,10 +233,20 @@ private:
     // but not completed, which shows up as flicker between a finished and a partial
     // image.
     //
-    // Owned by the producer's context and deleted by it. The old fence for a target
-    // is deleted only when that target is about to be drawn into again, by which time
-    // no consumer can still be waiting on it.
+    // Owned by the producer's context and deleted by it.
+    //
+    // Deletion is deferred by one frame, which is not tidiness but correctness: a
+    // consumer reads a fence handle from the slot and then waits on it, so deleting
+    // a fence it may still hold is undefined behaviour. m_retiredFence holds the
+    // previous frame's fence so it is only freed once a consumer cannot still be
+    // holding it.
     GLsync m_targetFence[kTargetCount] = { nullptr, nullptr };
+    GLsync m_retiredFence[kTargetCount] = { nullptr, nullptr };
+
+    // How many times waiting for the consumer to release a target hit its 500ms bound.
+    // Expected to stay at zero; a non-zero value means the consumer's context is not
+    // making progress at all, which is worth an error rather than a silent stall.
+    quint64 m_waitTimeouts = 0;
 
     bool    m_verbose   = true;
     bool    m_contextOk = false;

@@ -217,89 +217,102 @@ bool GraphicsWindow::drawSharedFrame(const QRect& destination)
     if (!shared.valid())
         return false;
 
-    if (!initDisplay())
+    QOpenGLContext* ctx = context();
+    QOpenGLExtraFunctions* extra = ctx ? ctx->extraFunctions() : nullptr;
+    if (!ctx || !ctx->functions())
         return false;
 
-    QOpenGLContext* ctx = context();
-    QOpenGLFunctions* f = ctx ? ctx->functions() : nullptr;
-    if (!f)
+    if (!initDisplay())
         return false;
 
     // Wait for the producer to finish this frame before sampling it.
     //
-    // This is the access protection the design was missing, and its absence is what
-    // made the window flicker: without it this code samples a texture whose draw has
-    // been issued but not necessarily completed, so consecutive frames alternate
-    // between a finished image and a partial one.
+    // The producer waits on a fence of ours before overwriting a target; this is the
+    // same idea in the other direction and both are needed, because they answer
+    // different questions. Ours answers "may the producer write here"; this one
+    // answers "is there a finished image here". Without this one the window samples a
+    // texture whose draw has been issued but not completed, and consecutive frames
+    // alternate between a finished image and a partial one.
     //
     // glClientWaitSync rather than glFinish: it waits for one fence, not for the whole
-    // pipeline, so it orders the two contexts without stalling everything. This is the
-    // same mechanism Chromium's GPU synchronisation uses for shared textures. Spout
-    // states the requirement plainly - "access protection ensures that the texture can
-    // only be accessed by one process at a time" - and a fence is that protection
-    // without a blocking CPU lock.
+    // pipeline, so it orders the two contexts without stalling everything. The same
+    // mechanism Chromium's GPU synchronisation uses for shared textures.
     //
-    // Zero timeout: if the producer has not finished, showing the previous frame once
-    // more is better than stalling the GUI thread. That is Spout's own policy for a
-    // fast consumer - "it will read duplicate frames".
-    if (shared.fence)
+    // A bounded wait, not zero. The zero-timeout version flickered: the producer draws
+    // in well under a millisecond, so a consumer arriving a moment early found the
+    // fence unsignalled nearly every frame and fell through to the background colour.
+    // The timeout is a guard, not the mechanism - if the producer has genuinely
+    // stalled, the consumer gives up rather than freezing the GUI thread.
+    if (shared.fence && extra)
     {
-        QOpenGLExtraFunctions* extra = ctx ? ctx->extraFunctions() : nullptr;
-        if (extra)
+        constexpr GLuint64 kWaitNs = 8 * 1000 * 1000;   // 8ms, half a frame at 60Hz
+        const GLenum r = extra->glClientWaitSync(shared.fence,
+                                                 GL_SYNC_FLUSH_COMMANDS_BIT, kWaitNs);
+        if (r == GL_TIMEOUT_EXPIRED || r == GL_WAIT_FAILED)
         {
-            const GLenum r = extra->glClientWaitSync(shared.fence,
-                                                     GL_SYNC_FLUSH_COMMANDS_BIT, 0);
-            if (r == GL_TIMEOUT_EXPIRED || r == GL_WAIT_FAILED)
-                return false;   // keep showing what we had; try again next frame
+            // Still not ready. Show the last one that WAS.
+            //
+            // Returning "nothing to draw" here flickers worst of all: the caller has
+            // already cleared to the background colour, so a skipped frame is a
+            // full-screen flash. Re-reading a texture that was completed a frame ago
+            // needs no wait and cannot be torn - the producer is not writing it, or the
+            // fence it waited on would not have signalled.
+            ++m_staleFrames;
+            if (m_lastGoodTexture != 0)
+                return blitTexture(m_lastGoodTexture, destination);
+            return false;
         }
     }
 
-    // The texture name belongs to the render thread's context. It is usable here
-    // only because the two contexts are in one share group - see the share-group
-    // logging in initializeGL, which exists to make a silent failure of that
-    // visible.
-    if (shared.texture != m_boundDisplayTexture)
-    {
-        m_boundDisplayTexture = shared.texture;
-        GraphicsLog::info(QStringLiteral("window: displaying shared texture %1 (%2x%3)")
-                              .arg(shared.texture)
-                              .arg(shared.size.width())
-                              .arg(shared.size.height()));
-    }
+    if (!blitTexture(shared.texture, destination))
+        return false;
 
-    // Report the frame number being shown, once a second.
+    // Leave a fence recording that this target's read commands have been submitted.
     //
-    // This is the acceptance check for the whole handover: the render thread logs
-    // its iFrame, and if the window is displaying that thread's output then the
-    // numbers must describe the same sequence. Before sharing they were two
-    // unrelated counters that both happened to advance, which is exactly the kind
-    // of thing that looks fine and proves nothing.
-    //
-    // Throttled by hand rather than through GraphicsLog::throttled(). That helper
-    // suppresses by message CONTENT, so a message carrying a frame number is
-    // different every frame and nothing is ever suppressed - it flooded the log
-    // with one line per frame the first time this ran. A time check is what this
-    // needs, not a content check.
-    const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    if (now - m_lastFrameReportMs >= 1000)
-    {
-        m_lastFrameReportMs = now;
-        GraphicsLog::info(QStringLiteral("window: showing shared frame %1").arg(shared.frameIndex));
-    }
+    // This is the whole of the consumer's side of the handoff, and it is deliberately
+    // not a flag. A flag cleared here would say "this thread has stopped issuing
+    // commands", which is not the same as "the GPU has stopped reading" - and a
+    // producer that trusted it would overwrite a texture still being read. Only a
+    // fence answers the question the producer actually has, and the producer is
+    // entitled to block on it because it is placed a whole frame before it is waited
+    // on.
+    GLsync finished = extra ? extra->glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0) : nullptr;
+    if (extra)
+        extra->glFlush();   // submit it, or the fence never signals
+
+    // Published to the producer. The consumer never touches this handle again - it does
+    // not wait on it and does not delete it. The producer waits, and deletes once it has
+    // signalled, which is the only moment at which deletion is safe.
+    if (finished)
+        m_sharedFrame->targetFence(shared.targetIndex).consumerFence.store(
+            finished, std::memory_order_release);
+
+    // Remembered so a later frame that is not ready yet can repeat this one instead
+    // of flashing the background. See the timeout branch above.
+    m_lastGoodTexture = shared.texture;
+    return true;
+}
+
+bool GraphicsWindow::blitTexture(GLuint texture, const QRect& destination)
+{
+    Q_UNUSED(destination);   // the viewport is already set by the caller
+
+    QOpenGLContext* ctx = context();
+    QOpenGLFunctions* f = ctx ? ctx->functions() : nullptr;
+    if (!f || texture == 0)
+        return false;
 
     // Filtering is set per texture rather than per frame: these are state on the
     // texture object, and re-setting them every frame would be noise. GL_NEAREST
-    // because the view is 1:1 - any filtering here would soften pixels that are
-    // meant to be shown exactly as rendered. Set while the texture is bound.
+    // because the view is 1:1 - any filtering here would soften pixels that are meant
+    // to be shown exactly as rendered.
     f->glActiveTexture(GL_TEXTURE0);
-    f->glBindTexture(GL_TEXTURE_2D, shared.texture);
+    f->glBindTexture(GL_TEXTURE_2D, texture);
     f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    // No diagnostic readback here. Whether the picture is correct is judged by
-    // looking at it - see docs/dev-discipline.md.
     m_displayProgram->bind();
     m_displayProgram->setUniformValue("u_texture", 0);
     m_displayVao->bind();
@@ -311,7 +324,6 @@ bool GraphicsWindow::drawSharedFrame(const QRect& destination)
     m_displayVbo->release();
     m_displayVao->release();
     m_displayProgram->release();
-
     return true;
 }
 
@@ -332,6 +344,14 @@ void GraphicsWindow::paintGL()
     // cannot drift.
     const qreal dpr = devicePixelRatio();
     const QSize surface(qMax(1, int(width() * dpr)), qMax(1, int(height() * dpr)));
+
+    // Forget the last good texture the moment the producer withdraws the slot.
+    //
+    // A rebuild or a shutdown destroys the target textures, and repeating one of
+    // those names afterwards would sample a deleted texture. Clearing here is what
+    // keeps "repeat the previous frame" from outliving the frame it repeats.
+    if (m_sharedFrame && !m_sharedFrame->read().valid())
+        m_lastGoodTexture = 0;
 
     // Clear the whole surface first, so the area outside the crop is the documented
     // background rather than whatever the previous frame left there. A window
@@ -359,25 +379,39 @@ void GraphicsWindow::paintGL()
 
     drawSharedFrame(destination);
 
-    // Report which frame is on screen, once a second.
+    // Report what is on screen, once a second.
     //
-    // The acceptance check for the whole handover: the render thread logs its
-    // iFrame, and if this window is showing that thread's output then the two must
-    // describe one sequence. Before sharing they were two unrelated counters that
-    // both happened to advance, which looks fine and proves nothing.
+    // The acceptance check for the whole handover: the render thread logs its iFrame,
+    // and if this window is showing that thread's output then the two must describe one
+    // sequence. Before sharing they were two unrelated counters that both happened to
+    // advance, which looks fine and proves nothing.
     //
-    // Timed by hand rather than through GraphicsLog::throttled(), which suppresses
-    // by message CONTENT - a message carrying a frame number differs every frame,
-    // so nothing is ever suppressed and the log gets one line per frame.
+    // The two failure counters are the other half of the check. "It looks smooth" is
+    // not a measurement; a target that was busy or a fence that had not signalled is,
+    // and each points at a different cause. Both being zero is what says the handoff
+    // is actually free rather than merely fast enough to be unnoticeable.
+    //
+    // Timed by hand rather than through GraphicsLog::throttled(), which suppresses by
+    // message CONTENT - a message carrying a frame number differs every frame, so
+    // nothing is ever suppressed and the log gets one line per frame.
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     if (now - m_lastFrameReportMs >= 1000)
     {
+        const qint64 elapsed = m_lastFrameReportMs == 0 ? 0 : (now - m_lastFrameReportMs);
         m_lastFrameReportMs = now;
         const GraphicsSharedFrame shared = m_sharedFrame ? m_sharedFrame->read()
                                                          : GraphicsSharedFrame();
         GraphicsLog::info(shared.valid()
-                              ? QStringLiteral("window: showing shared frame %1").arg(shared.frameIndex)
+                              ? QStringLiteral("window: showing shared frame %1 (texture %2, "
+                                               "%3x%4); %5 stale in the last %6ms")
+                                    .arg(shared.frameIndex)
+                                    .arg(shared.texture)
+                                    .arg(shared.size.width())
+                                    .arg(shared.size.height())
+                                    .arg(m_staleFrames)
+                                    .arg(elapsed)
                               : QStringLiteral("window: no frame published yet"));
+        m_staleFrames = 0;
     }
 }
 
