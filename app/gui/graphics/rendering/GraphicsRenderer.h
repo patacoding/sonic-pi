@@ -22,6 +22,7 @@
 #include <QOpenGLFramebufferObject>
 #include <QOpenGLShaderProgram>
 #include <QOpenGLVertexArrayObject>
+#include <QRect>
 #include <QSize>
 #include <QString>
 
@@ -78,9 +79,20 @@ public:
     // Draws one frame with the current shader into whichever framebuffer is
     // already bound, leaving the binding alone.
     //
-    // Sets the viewport to `viewportSize` and clears to the documented background
-    // colour first. Used by the output window to draw to its own surface.
-    bool renderToBoundFramebuffer(const QSize& viewportSize, const GraphicsFrame& frame);
+    // `passSize` is the coordinate space the shader draws in: the viewport is set
+    // to `destinationRect` inside it. They differ when only part of the output is
+    // being shown - the output window shows a crop of the render target, so the
+    // shader's geometry is sized for the whole target while the viewport covers
+    // just the visible part.
+    //
+    // Setting `destinationRect` smaller than `passSize` therefore crops rather
+    // than scales, which is the intent: the output is a fixed resolution and the
+    // window is a 1:1 viewer of it, so a window smaller than the output reveals
+    // less of the image rather than shrinking it.
+    //
+    // Clears to the documented background colour first.
+    bool renderToBoundFramebuffer(const QSize& passSize, const QRect& destinationRect,
+                                  const GraphicsFrame& frame);
 
     // Release the GL objects now, while the caller can still make the owning
     // context current. Calling this is optional - the destructor does the same -

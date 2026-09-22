@@ -108,11 +108,20 @@ protected:
     void closeEvent(QCloseEvent* e) override;
 
 private:
+    // Where the output image is placed on the window's surface, in device pixels
+    // with a top-left origin. 1:1 and centred, never scaled: the window is a
+    // viewport onto the output, not a scaling surface.
+    QRect cropRect() const;
+
     // Owns the shader program and the quad. Not a pointer: there is exactly one
     // for the window's whole life, and a pointer only added a null case.
     GraphicsRenderer m_renderer;
     // Not owned, and not used to set the output size. See setRenderThread().
     GraphicsRenderThread* m_renderThread = nullptr;
+    // The resolution being shown, in pixels. Seeded from the render thread's
+    // target at initializeGL(), and kept as a member so cropRect() does not have
+    // to reach across to the render thread on every frame.
+    QSize m_outputSize;
     bool m_shaderReady = false;
     bool m_fullscreen = false;
 

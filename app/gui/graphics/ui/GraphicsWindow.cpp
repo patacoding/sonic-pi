@@ -13,6 +13,7 @@
 
 #include "GraphicsWindow.h"
 #include "GraphicsLog.h"
+#include "GraphicsSettings.h"
 
 #include <QCloseEvent>
 #include <QGuiApplication>
@@ -83,17 +84,18 @@ void GraphicsWindow::initializeGL()
     }
 
     // The render target size is the user's configured output resolution, decided
-    // by the render thread from settings. Reported here so the log shows both
-    // numbers side by side: this window is a crop of that, and a mismatch between
-    // the two is what explains a window that looks clipped.
-    if (m_renderThread)
+    // by the render thread from settings. Captured here so the log shows both
+    // numbers side by side, and so cropRect() has the size without reaching across
+    // to the render thread on every frame: this window is a crop of that target,
+    // and a mismatch between the two is what explains a window that looks clipped.
+    m_outputSize = m_renderThread ? m_renderThread->renderTargetSize()
+                                  : GraphicsSettings::outputSize();
     {
-        const QSize target = m_renderThread->renderTargetSize();
         const qreal dpr = devicePixelRatio();
         const QSize surface(qMax(1, int(width() * dpr)), qMax(1, int(height() * dpr)));
-        GraphicsLog::info(QStringLiteral("window: showing a crop of the %1x%2 output; "
+        GraphicsLog::info(QStringLiteral("window: showing a 1:1 crop of the %1x%2 output; "
                                          "surface is %3x%4 device pixels (logical %5x%6 at dpr %7)")
-                              .arg(target.width()).arg(target.height())
+                              .arg(m_outputSize.width()).arg(m_outputSize.height())
                               .arg(surface.width()).arg(surface.height())
                               .arg(width()).arg(height())
                               .arg(dpr));
@@ -144,15 +146,12 @@ void GraphicsWindow::paintGL()
 
     // QOpenGLWindow::paintGL's contract is that the context and the framebuffer
     // are bound and the viewport is set before this is called, so the default
-    // framebuffer is already current here. The viewport is still passed
-    // explicitly: renderToBoundFramebuffer sets it from the device-pixel size,
-    // which is what keeps the output sharp on a HiDPI screen.
+    // framebuffer is already current here. renderToBoundFramebuffer sets the
+    // viewport itself, because the window shows only part of the output.
     //
     // Deliberately NO readback on this path. Reading the framebuffer back to the
     // CPU stalls on the GPU; an earlier revision did it every frame and held the
     // rate at ~50Hz instead of 60 with a 3.2 MB log.
-    const qreal dpr = devicePixelRatio();
-    const QSize pixelSize(qMax(1, int(width() * dpr)), qMax(1, int(height() * dpr)));
 
     // The window's own shader clock.
     //
@@ -160,10 +159,10 @@ void GraphicsWindow::paintGL()
     // accumulated - see GraphicsFrame::timeSeconds for why that matters.
     //
     // The window keeps its own clock rather than sharing the render thread's
-    // because the two draw different things from different contexts: this one
-    // draws to the window's surface, the thread draws to an offscreen target.
-    // When step 1.2 makes the window display the thread's texture instead of
-    // drawing for itself, this clock goes away with the renderer that uses it.
+    // because the two draw from different contexts: this one draws to the window's
+    // surface, the thread draws to an offscreen target. When the shared-texture
+    // step makes the window display the thread's target instead of drawing for
+    // itself, this clock goes away along with the renderer that uses it.
     if (!m_clockStarted)
     {
         m_clock.start();
@@ -171,17 +170,55 @@ void GraphicsWindow::paintGL()
         m_clockStarted = true;
     }
 
+    // The window shows a 1:1 crop of the fixed output resolution, centred, with no
+    // scaling and no aspect correction.
+    //
+    // No scaling is the point: the output is authored at a set resolution, and
+    // seeing it stretched to whatever shape the window happens to be would make it
+    // impossible to judge what an external consumer receives. Cropping means a
+    // window smaller than the output reveals less of the image rather than
+    // shrinking it, and a window larger than the output shows the whole thing with
+    // margin around it.
+    //
+    // The rectangle comes from a helper rather than being computed inline, because
+    // the shared-texture step needs exactly the same rectangle to blit into.
+    const QRect destination = cropRect();
+
     GraphicsFrame frame;
     frame.timeSeconds = double(m_clock.elapsed()) / 1000.0;
     frame.deltaSeconds = m_havePainted ? double(m_sinceLastPaint.elapsed()) / 1000.0 : 0.0;
     frame.frameIndex = m_frameIndex;
-    frame.resolution = pixelSize;
+    frame.resolution = m_outputSize;
 
-    m_renderer.renderToBoundFramebuffer(pixelSize, frame);
+    m_renderer.renderToBoundFramebuffer(m_outputSize, destination, frame);
 
     m_sinceLastPaint.restart();
     m_havePainted = true;
     ++m_frameIndex;
+}
+
+// Where the output image goes on the window's surface, in device pixels with a
+// top-left origin.
+//
+// 1:1 and centred. Never scaled, so a mismatch between the window's shape and the
+// output's shape shows as margin rather than as distortion.
+QRect GraphicsWindow::cropRect() const
+{
+    if (m_outputSize.isEmpty())
+        return QRect();
+
+    const qreal dpr = devicePixelRatio();
+    const int surfaceW = qMax(1, int(width() * dpr));
+    const int surfaceH = qMax(1, int(height() * dpr));
+
+    // The visible part is at most the surface and at most the output itself.
+    const int visibleW = qMin(surfaceW, m_outputSize.width());
+    const int visibleH = qMin(surfaceH, m_outputSize.height());
+
+    // Centred on the surface, so the window is a viewport onto the middle of the
+    // output. A window larger than the output therefore leaves even margin on all
+    // sides rather than pinning the image into a corner.
+    return QRect((surfaceW - visibleW) / 2, (surfaceH - visibleH) / 2, visibleW, visibleH);
 }
 
 bool GraphicsWindow::reloadShaders()

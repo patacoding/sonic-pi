@@ -411,19 +411,29 @@ bool GraphicsRenderer::render(const GraphicsFrame& frame)
     }
 
     m_fbo->bind();
-    const bool ok = renderToBoundFramebuffer(m_size, frame);
+    // The framebuffer is the whole pass, and the whole pass is what gets drawn.
+    const bool ok = renderToBoundFramebuffer(m_size, QRect(QPoint(0, 0), m_size), frame);
     m_fbo->release();
     return ok;
 }
 
-bool GraphicsRenderer::renderToBoundFramebuffer(const QSize& viewportSize, const GraphicsFrame& frame)
+bool GraphicsRenderer::renderToBoundFramebuffer(const QSize& passSize, const QRect& destinationRect,
+                                                const GraphicsFrame& frame)
 {
-    if (!viewportSize.isValid() || viewportSize.isEmpty())
+    if (!passSize.isValid() || passSize.isEmpty())
     {
-        GraphicsLog::error(QStringLiteral("renderer: refusing to draw into a %1x%2 viewport")
-                               .arg(viewportSize.width())
-                               .arg(viewportSize.height()));
+        GraphicsLog::error(QStringLiteral("renderer: refusing to draw into a %1x%2 pass")
+                               .arg(passSize.width())
+                               .arg(passSize.height()));
         return false;
+    }
+
+    if (destinationRect.isEmpty())
+    {
+        // Nothing visible - the window is smaller than a pixel, or the crop
+        // rectangle came out empty. Not an error worth reporting every frame, and
+        // drawing nothing is the correct response.
+        return true;
     }
 
     QOpenGLContext* ctx = QOpenGLContext::currentContext();
@@ -444,7 +454,25 @@ bool GraphicsRenderer::renderToBoundFramebuffer(const QSize& viewportSize, const
     // part landing inside the attachment survived, cropping the image to its
     // bottom-left third and compressing every interpolated varying into the same
     // third of its range.
-    f->glViewport(0, 0, viewportSize.width(), viewportSize.height());
+    //
+    // glViewport's arguments are in framebuffer pixels with the origin at the
+    // BOTTOM-left, matching GL's convention. The rectangle handed in is in
+    // top-left-origin surface coordinates, which is what Qt and every caller
+    // reason in, so the y is converted here - once, in the one place that talks to
+    // GL - rather than leaving each caller to remember it.
+    const int glY = passSize.height() - (destinationRect.y() + destinationRect.height());
+    f->glViewport(destinationRect.x(), glY, destinationRect.width(), destinationRect.height());
+
+    // Reported once per distinct viewport, so a crop that lands somewhere
+    // unexpected is visible in the log rather than only on screen. Throttled
+    // because this runs every frame and only the change is interesting.
+    GraphicsLog::throttled(GraphicsLog::Level::Info,
+                           QStringLiteral("draw: pass %1x%2, viewport %3,%4 %5x%6 (top-left y %7)")
+                               .arg(passSize.width()).arg(passSize.height())
+                               .arg(destinationRect.x()).arg(glY)
+                               .arg(destinationRect.width()).arg(destinationRect.height())
+                               .arg(destinationRect.y()),
+                           2000);
 
     // Clear first so anything the shader does not cover is a known colour rather
     // than whatever was in the buffer before.
