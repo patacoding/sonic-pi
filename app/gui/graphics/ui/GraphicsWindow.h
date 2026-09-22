@@ -105,9 +105,12 @@ public:
     // and for the status line.
     QString describeOutput() const;
 
-    // Re-read the shader from disk. Called on the GUI thread, where this window's
-    // context lives, so it can make that context current itself.
-    bool reloadShaders();
+    // There is no reloadShaders() here any more.
+    //
+    // This window displays the render thread's texture and owns no shader, so it had
+    // nothing to reload. It was also the wrong thread to do it on: the shader being
+    // reloaded belongs to the render thread's context. Reloading is requested through
+    // GraphicsRenderThread::requestShaderReload() and applied by that thread.
 
 signals:
     // Emitted when the user closes the window directly, so the menu action that

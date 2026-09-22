@@ -111,6 +111,10 @@ bool GraphicsRenderThread::requestShaderReload()
         return false;
     }
     m_reloadRequested.store(true, std::memory_order_relaxed);
+    // Timestamped on request, so the delay before the loop picks it up is
+    // measurable rather than a matter of impression. "Reload is unreliable and
+    // sometimes takes seconds" is only diagnosable if both ends are timed.
+    GraphicsLog::info(QStringLiteral("reload: requested"));
     return true;
 }
 
@@ -185,17 +189,29 @@ bool GraphicsRenderThread::applyRenderTargetSizeRequest()
 
 void GraphicsRenderThread::applyShaderReload()
 {
+    GraphicsLog::info(QStringLiteral("reload: applying on the render thread"));
+
+    // Held for the whole recompile, which is the point: the shader program is
+    // replaced while the loop cannot be drawing with it. This is also the only
+    // place a lock is taken for a long operation, so it is where a stall would
+    // show up - which is why it is timed.
+    QElapsedTimer t;
+    t.start();
+
     QMutexLocker lock(&m_rendererMutex);
     if (!m_gfxRenderer)
+    {
+        GraphicsLog::warn(QStringLiteral("reload: no renderer to reload"));
         return;
+    }
 
     // The loop's context is current by construction here, which is exactly what
-    // reloadShaders() requires and what a caller on another thread cannot
-    // provide.
-    if (m_gfxRenderer->reloadShaders())
-        GraphicsLog::info(QStringLiteral("render loop: shader reloaded"));
-    else
-        GraphicsLog::warn(QStringLiteral("render loop: shader reload failed; keeping the previous one"));
+    // reloadShaders() requires and what a caller on another thread cannot provide.
+    const bool ok = m_gfxRenderer->reloadShaders();
+
+    GraphicsLog::info(QStringLiteral("reload: %1 after %2ms")
+                          .arg(ok ? QStringLiteral("applied") : QStringLiteral("FAILED"))
+                          .arg(t.elapsed()));
 }
 
 void GraphicsRenderThread::installDebugLogger()

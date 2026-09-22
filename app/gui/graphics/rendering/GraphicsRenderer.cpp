@@ -16,12 +16,12 @@
 
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QOpenGLContext>
 #include <QOpenGLFramebufferObject>
 #include <QOpenGLFramebufferObjectFormat>
 #include <QOpenGLBuffer>
 #include <QOpenGLShaderProgram>
-#include <QSet>
 
 #include <cmath>
 
@@ -47,16 +47,12 @@ int toByte(float v)
 #define GRAPHICS_SHADER_DIR ""
 #endif
 
-// Live renderers, so a reload triggered from the GUI can reach them.
+// There is no registry of live renderers any more.
 //
-// A registry rather than a global shader object: GL shader programs belong to a
-// context, so there is nothing shareable between renderers, and an explicit
-// registry avoids introducing a singleton for the sake of one menu action.
-QSet<GraphicsRenderer*>& liveRenderers()
-{
-    static QSet<GraphicsRenderer*> set;
-    return set;
-}
+// One existed so a GUI-initiated reload could reach every renderer. That could not
+// work - a shader belongs to a context and a context belongs to a thread - so the
+// only consumer is gone and the registry with it. See the note further down where
+// reloadAll() used to be.
 } // namespace
 
 GraphicsRenderer::~GraphicsRenderer()
@@ -65,7 +61,6 @@ GraphicsRenderer::~GraphicsRenderer()
     // it to be current. The caller releases the context after this object is
     // gone, so by then it is safe. Contract, not an assertion:
     //   GraphicsRenderer must be destroyed while its context is current.
-    liveRenderers().remove(this);
     destroy();
 }
 
@@ -112,7 +107,6 @@ bool GraphicsRenderer::initialize(const QSize& size)
     }
 
     m_size = size;
-    liveRenderers().insert(this);
 
     if (!createQuadGeometry())
         return false;
@@ -268,7 +262,14 @@ bool GraphicsRenderer::loadShaders()
 
     auto program = buildProgram(vertexFile, fragmentFile);
     if (!program)
+    {
+        // Names the file and states that the previous program survives, so a compile
+        // failure cannot be mistaken for a reload that never arrived.
+        GraphicsLog::error(QStringLiteral("shader load FAILED; keeping the previous program. "
+                                          "fragment file was: %1")
+                               .arg(resolveShaderPath(fragmentFile)));
         return false;
+    }
 
     // Only replace the working program once the new one is proven good, so a
     // failed edit leaves the previous picture on screen.
@@ -276,8 +277,16 @@ bool GraphicsRenderer::loadShaders()
     m_vertexPath = resolveShaderPath(vertexFile);
     m_fragmentPath = resolveShaderPath(fragmentFile);
 
-    GraphicsLog::info(QStringLiteral("shader: loaded\n  vertex   : %1\n  fragment : %2")
-                          .arg(m_vertexPath, m_fragmentPath));
+    // The file's size and modification time.
+    //
+    // So a reload that read a stale copy is distinguishable from one that read the
+    // current bytes: compare these against the file on disk. Two rounds of
+    // explaining "editing has no effect" would have been settled by this line.
+    const QFileInfo fragInfo(m_fragmentPath);
+    GraphicsLog::info(QStringLiteral("shader: loaded  fragment=%1  bytes=%2  mtime=%3")
+                          .arg(m_fragmentPath)
+                          .arg(fragInfo.size())
+                          .arg(fragInfo.lastModified().toString(QStringLiteral("HH:mm:ss.zzz"))));
 
     cacheUniformLocations();
     return true;
@@ -370,34 +379,24 @@ bool GraphicsRenderer::reloadShaders()
     return loadShaders();
 }
 
-int GraphicsRenderer::reloadAll()
-{
-    // Copy first: reloadShaders() does not add or remove renderers, but iterating
-    // a container that a callee could in principle touch is a habit worth keeping.
-    const QList<GraphicsRenderer*> renderers = liveRenderers().values();
-
-    int ok = 0;
-    for (GraphicsRenderer* r : renderers)
-    {
-        QOpenGLContext* ctx = QOpenGLContext::currentContext();
-        QSurface* surface = ctx ? ctx->surface() : nullptr;
-        if (!surface)
-        {
-            GraphicsLog::warn(QStringLiteral("reload: a renderer has no current surface; skipped"));
-            continue;
-        }
-        if (ctx->makeCurrent(surface) && r->reloadShaders())
-            ++ok;
-        ctx->doneCurrent();
-    }
-
-    if (renderers.isEmpty())
-        GraphicsLog::info(QStringLiteral("reload: no live renderer to reload"));
-    else
-        GraphicsLog::info(QStringLiteral("reload: %1 of %2 renderer(s) reloaded")
-                              .arg(ok).arg(renderers.size()));
-    return ok;
-}
+// reloadAll() used to live here: it walked the registry of framebuffer-owning
+// renderers and recompiled each one, making each context current for the duration.
+//
+// It is gone deliberately, and the reason is worth keeping. It was called from the
+// GUI thread, where the only context it could make current was the window's - not
+// the render thread's, whose context belongs to another thread and must not be made
+// current here at all. It also reached into an object the render thread owned
+// without holding that thread's mutex, racing the 60 Hz loop.
+//
+// The result was a shader reload that worked unpredictably: it compiled against the
+// wrong context, and whether it took effect depended on timing, so a user could
+// click reload several times and see the picture change seconds later, or not at
+// all.
+//
+// A shader belongs to the context it is used with and to the thread that owns that
+// context, so the only correct place to compile it is that thread. The render
+// thread applies reloads itself - GraphicsRenderThread::requestShaderReload() - and
+// the GUI's menu action now only asks for one.
 
 bool GraphicsRenderer::render(const GraphicsFrame& frame)
 {

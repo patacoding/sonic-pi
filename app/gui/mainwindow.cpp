@@ -6281,23 +6281,31 @@ void MainWindow::createToolBar()
                               2000);
     });
 
-    // Re-read the shader from disk. Present so the shader can be edited and
-    // reloaded without rebuilding, which is what makes it possible to try things
-    // out. A failed compile keeps the previous picture (see GraphicsRenderer).
+    // Re-read the shader from disk, so it can be edited and tried out without
+    // rebuilding. A failed compile keeps the previous picture (see GraphicsRenderer).
     //
-    // The window is asked first and by name. It owns the renderer that actually
-    // draws the visible output, and its context lives on this thread, so it can
-    // make that context current itself. reloadAll() only knows about renderers
-    // that hold a framebuffer - the offscreen ones - so relying on it alone would
-    // reload the invisible copy and leave the window showing the old shader.
+    // This only REQUESTS the reload. It does not perform it, and that distinction is
+    // the whole design.
+    //
+    // An earlier version compiled shaders right here on the GUI thread, including
+    // reaching into the render thread's renderer through reloadAll(). That was wrong
+    // twice over: it compiled against whichever context happened to be current on
+    // this thread - the window's - rather than the context the shader is used with,
+    // and it touched an object owned by the render thread without holding that
+    // thread's mutex, so it raced the 60Hz loop. The symptom was a reload that
+    // worked unpredictably and sometimes appeared seconds and several clicks later,
+    // which is exactly what a race plus a few hundred milliseconds of shader
+    // compilation looks like.
+    //
+    // The render thread now applies the request on its own context at the top of a
+    // frame. Compiling a shader is not a GUI job and never was.
     graphicsReloadShaderAct = new QAction(tr("Reload Shader"), this);
     connect(graphicsReloadShaderAct, &QAction::triggered, this, [this]() {
-        const bool windowOk = graphicsWindow && graphicsWindow->reloadShaders();
-        const int offscreen = SonicPi::GraphicsRenderer::reloadAll();
+        const bool requested = graphicsRenderThread && graphicsRenderThread->requestShaderReload();
         SonicPi::GraphicsLog::info(
-            QStringLiteral("menu: reload shader -> window %1, %2 offscreen renderer(s)")
-                .arg(windowOk ? QStringLiteral("ok") : QStringLiteral("failed"))
-                .arg(offscreen));
+            QStringLiteral("menu: reload shader -> %1")
+                .arg(requested ? QStringLiteral("requested (the render thread will apply it)")
+                               : QStringLiteral("NOT requested: no running render loop")));
     });
 
     toolBar->addAction(scopeAct);

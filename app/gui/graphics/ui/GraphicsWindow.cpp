@@ -374,20 +374,6 @@ QRect GraphicsWindow::cropRect() const
     return QRect((surfaceW - visibleW) / 2, (surfaceH - visibleH) / 2, visibleW, visibleH);
 }
 
-bool GraphicsWindow::reloadShaders()
-{
-    // Nothing to reload here, and that is the point.
-    //
-    // This window displays the render thread's texture; it does not own a shader.
-    // Reloading is the producer's job, and the render thread applies it on its own
-    // context at the top of the next frame - see
-    // GraphicsRenderThread::requestShaderReload(). A consumer that also tried to
-    // compile shaders would be a second producer again, which is what this design
-    // removes.
-    update();
-    return true;
-}
-
 QScreen* GraphicsWindow::showOnNextScreen()
 {
     const QList<QScreen*> screens = QGuiApplication::screens();

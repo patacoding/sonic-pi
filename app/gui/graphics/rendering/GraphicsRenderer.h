@@ -113,25 +113,21 @@ public:
     // program is kept and the compiler log is reported, so a bad edit does not
     // take the picture away - design document principle 6.
     //
-    // The GL context must be current. Because a reload is triggered from the GUI
-    // while the context lives on the render thread, callers that cannot make it
-    // current should use reloadAll() instead.
+    // Must be called on the thread that owns the context, with that context current.
+    // That is not a formality: the shader program belongs to the context it is used
+    // with, so compiling it anywhere else either fails or produces a program this
+    // renderer cannot use. The render thread calls this from its own loop; the GUI
+    // asks the render thread instead of doing it itself.
     bool reloadShaders();
 
-    // Recompile the shaders of every live renderer, making each context current
-    // for the duration. Returns how many succeeded.
+    // There is deliberately no static "reload every renderer" entry point.
     //
-    // This reaches only renderers created by initialize(), which are the offscreen
-    // ones whose contexts belong to the render thread. A renderer created by
-    // initializeWithoutFramebuffer() is driven from the thread that owns its
-    // context and reloads itself, so it does not register here.
+    // One used to exist so a GUI action could recompile every live renderer. It
+    // could not work: a shader program belongs to a context, a context belongs to a
+    // thread, and the GUI thread can only make its own context current - so it
+    // compiled against the wrong one and raced the render loop. The GUI now only
+    // requests a reload and the render thread applies it, on its own context.
     //
-    // A registry rather than a global shader object: shaders are per-context, so
-    // there is nothing sensible to share, and keeping the reload explicit avoids
-    // a singleton. Renderers register themselves on construction and deregister
-    // on destruction.
-    static int reloadAll();
-
     // Reads the whole framebuffer back as RGBA8. Returns false on failure.
     //
     // Note: OpenGL's origin is bottom-left, so row 0 of the returned data is the
