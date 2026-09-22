@@ -44,8 +44,11 @@ cmake -A %CMAKE_ARCH% ^
       ..\
 
 if %ERRORLEVEL% neq 0 (
+    REM Capture before `cd` resets ERRORLEVEL to 0, or this returns success after
+    REM a failed configure. Same defect as win-build-all.bat's failure branch.
+    set "RC=%ERRORLEVEL%"
     cd %WORKING_DIR%
-    exit /b %ERRORLEVEL%
+    exit /b %RC%
 )
 
 cd %WORKING_DIR%

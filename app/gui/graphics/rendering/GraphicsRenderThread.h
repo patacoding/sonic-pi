@@ -119,6 +119,27 @@ public:
     // A snapshot of the loop's counters. Safe from any thread.
     GraphicsFrameStats frameStats() const;
 
+    // The size the render target should be, in pixels.
+    //
+    // Set once from the user's configured output resolution. It is not driven by
+    // the output window: the window crops this image rather than defining it, so
+    // resizing the window must not change what is rendered or what an external
+    // consumer receives.
+    //
+    // Kept as a request rather than a direct assignment because the framebuffer
+    // belongs to this thread's context and only this thread may make that context
+    // current. Nothing here allocates or touches GL, so it is safe to call from any
+    // thread at any time; the render thread applies it at the top of its next
+    // frame.
+    //
+    // A request that differs from the current size is not applied until that
+    // frame, so callers should not expect the change to have happened on return.
+    void setRenderTargetSize(const QSize& sizeInPixels);
+
+    // The size currently being rendered into. May differ from the last requested
+    // size until the render thread has applied it.
+    QSize renderTargetSize() const;
+
     // Ask for the shader files to be re-read. Applied at the top of the next
     // frame; returns immediately. Returns false if there is no running loop to
     // apply it, in which case nothing will happen.
@@ -151,6 +172,11 @@ private:
 
     // Re-read the shader files. Must be called with the context current.
     void applyShaderReload();
+
+    // Apply a pending setRenderTargetSize() request, rebuilding the framebuffer at
+    // the top of a frame. Returns true if the target was rebuilt. Must be called
+    // with the context current.
+    bool applyRenderTargetSizeRequest();
 
     std::unique_ptr<QOpenGLContext>   m_context;
     std::unique_ptr<QOffscreenSurface> m_surface;
@@ -189,6 +215,14 @@ private:
     // rather than because it was asked to. Distinct from "stopped", because the
     // two need different reporting.
     std::atomic<bool>      m_hung{false};
+
+    // The requested and the actual render target size. Kept as plain ints in
+    // atomics rather than a QSize because QSize is not lock-free to read
+    // concurrently; -1 means "nothing requested yet".
+    std::atomic<int>       m_requestedWidth{-1};
+    std::atomic<int>       m_requestedHeight{-1};
+    std::atomic<int>       m_actualWidth{0};
+    std::atomic<int>       m_actualHeight{0};
 
     // Used to sleep until the next frame deadline and to be woken immediately on
     // shutdown, so stopping never waits out a whole frame interval.

@@ -12,6 +12,7 @@
 //++
 
 #include "GraphicsSettings.h"
+#include "GraphicsLog.h"
 
 #include <QDir>
 #include <QFile>
@@ -116,6 +117,37 @@ QString filePath()
 int frameCapHz()
 {
     return open().value(QStringLiteral("frame-cap-hz"), 0).toInt();
+}
+
+QSize outputSize()
+{
+    QSettings s = open();
+
+    const int w = s.value(QStringLiteral("output-width"), kDefaultOutputWidth).toInt();
+    const int h = s.value(QStringLiteral("output-height"), kDefaultOutputHeight).toInt();
+
+    // Guard here rather than at every use: a size of zero or less would make the
+    // render target allocation fail, and a config file is easy to get wrong by
+    // hand. Falling back to the default keeps the feature usable after a typo
+    // instead of leaving a blank window.
+    if (w <= 0 || h <= 0)
+    {
+        GraphicsLog::warn(QStringLiteral("graphics.ini has an invalid output size %1x%2; using %3x%4")
+                              .arg(w).arg(h)
+                              .arg(kDefaultOutputWidth)
+                              .arg(kDefaultOutputHeight));
+        return QSize(kDefaultOutputWidth, kDefaultOutputHeight);
+    }
+
+    return QSize(w, h);
+}
+
+void setOutputSize(const QSize& size)
+{
+    QSettings s = open();
+    s.setValue(QStringLiteral("output-width"), size.width());
+    s.setValue(QStringLiteral("output-height"), size.height());
+    s.sync();
 }
 
 bool showOutput()

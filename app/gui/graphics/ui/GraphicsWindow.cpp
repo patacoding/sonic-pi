@@ -58,6 +58,14 @@ GraphicsWindow::~GraphicsWindow()
     }
 }
 
+void GraphicsWindow::setRenderThread(GraphicsRenderThread* thread)
+{
+    // Stored, not used to set a size: the window does not decide the output
+    // resolution. It is kept so the window can report which render target it is
+    // displaying, and so step 1.2 can read the shared texture from it.
+    m_renderThread = thread;
+}
+
 void GraphicsWindow::initializeGL()
 {
     if (!context() || !context()->isValid())
@@ -72,6 +80,23 @@ void GraphicsWindow::initializeGL()
         GraphicsLog::info(QStringLiteral("window GL context: %1")
                               .arg(QString::fromLatin1(
                                   reinterpret_cast<const char*>(f->glGetString(GL_VERSION)))));
+    }
+
+    // The render target size is the user's configured output resolution, decided
+    // by the render thread from settings. Reported here so the log shows both
+    // numbers side by side: this window is a crop of that, and a mismatch between
+    // the two is what explains a window that looks clipped.
+    if (m_renderThread)
+    {
+        const QSize target = m_renderThread->renderTargetSize();
+        const qreal dpr = devicePixelRatio();
+        const QSize surface(qMax(1, int(width() * dpr)), qMax(1, int(height() * dpr)));
+        GraphicsLog::info(QStringLiteral("window: showing a crop of the %1x%2 output; "
+                                         "surface is %3x%4 device pixels (logical %5x%6 at dpr %7)")
+                              .arg(target.width()).arg(target.height())
+                              .arg(surface.width()).arg(surface.height())
+                              .arg(width()).arg(height())
+                              .arg(dpr));
     }
 
     // No framebuffer: this renderer draws straight to the window's surface. See
@@ -90,9 +115,9 @@ void GraphicsWindow::initializeGL()
 
 void GraphicsWindow::resizeGL(int w, int h)
 {
-    // Nothing to rebuild - the shader covers whatever the surface is - but the
-    // window must be repainted at the new size. Qt does send an expose event on
-    // resize, so this is belt and braces rather than the only trigger.
+    // Nothing to rebuild: the render target is the fixed output resolution and the
+    // window only shows a crop of it, so a resize changes what is visible rather
+    // than what is rendered. The repaint is all that is needed.
     Q_UNUSED(w);
     Q_UNUSED(h);
     update();

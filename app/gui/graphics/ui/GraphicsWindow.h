@@ -18,6 +18,7 @@
 #include <QSize>
 
 #include "GraphicsRenderer.h"
+#include "GraphicsRenderThread.h"
 
 class QScreen;
 
@@ -65,6 +66,16 @@ public:
     explicit GraphicsWindow(QWindow* parent = nullptr);
     ~GraphicsWindow() override;
 
+    // The render thread whose output this window shows a crop of.
+    //
+    // The window does NOT dictate the render target size - that is the user's
+    // configured output resolution, and the window is a viewer of it. The handle is
+    // held so the window can report which target it is displaying, and so step 1.2
+    // can read the shared texture from it. Null is allowed.
+    //
+    // Not owned. Call before show().
+    void setRenderThread(GraphicsRenderThread* thread);
+
     // Move to the next screen in QGuiApplication::screens(), wrapping around.
     // Returns the screen it landed on, or nullptr if there is only one.
     QScreen* showOnNextScreen();
@@ -100,6 +111,8 @@ private:
     // Owns the shader program and the quad. Not a pointer: there is exactly one
     // for the window's whole life, and a pointer only added a null case.
     GraphicsRenderer m_renderer;
+    // Not owned, and not used to set the output size. See setRenderThread().
+    GraphicsRenderThread* m_renderThread = nullptr;
     bool m_shaderReady = false;
     bool m_fullscreen = false;
 

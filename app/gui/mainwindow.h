@@ -45,10 +45,11 @@ class QTimer;
 
 namespace SonicPi
 {
-// Defined in graphics/ui/GraphicsWindow.h, included by the .cpp. Only a pointer
-// is held here, so a forward declaration keeps the OpenGL headers out of this
-// one.
+// Defined in graphics/ui/GraphicsWindow.h and graphics/rendering/
+// GraphicsRenderThread.h, both included by the .cpp. Only pointers are held here,
+// so forward declarations keep the OpenGL headers out of this one.
 class GraphicsWindow;
+class GraphicsRenderThread;
 } // namespace SonicPi
 class QsciScintilla;
 class QProcess;
@@ -161,6 +162,11 @@ public:
     SonicPiLog* GetOutputPane() const;
     SonicPiLog* GetIncomingPane() const;
     SonicPiTheme* GetTheme() const;
+
+    // The Graphics render thread, handed over by main() once it has been started.
+    // Held so the output window, which is created lazily on first use, can be given
+    // the handle. Not owned.
+    void setGraphicsRenderThread(SonicPi::GraphicsRenderThread* thread);
 
     void addCuePath(QString path, QString val);
     // True when the job ran from an editor buffer (workspace_*), not the help
@@ -890,6 +896,9 @@ private:
     QAction *graphicsReloadShaderAct;
     // The output window, created lazily on first show and owned here.
     SonicPi::GraphicsWindow* graphicsWindow = nullptr;
+    // Not owned. Set by main() once the render thread is started; see
+    // setGraphicsRenderThread().
+    SonicPi::GraphicsRenderThread* graphicsRenderThread = nullptr;
     // Drives continuous repaint while the window is visible. Without it the
     // window would only redraw on expose, which is not a render loop.
     QTimer* graphicsRepaintTimer = nullptr;

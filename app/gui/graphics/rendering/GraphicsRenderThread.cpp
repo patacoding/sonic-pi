@@ -13,6 +13,7 @@
 
 #include "GraphicsRenderThread.h"
 #include "GraphicsLog.h"
+#include "GraphicsSettings.h"
 
 #include <QElapsedTimer>
 #include <QOffscreenSurface>
@@ -110,6 +111,69 @@ bool GraphicsRenderThread::requestShaderReload()
         return false;
     }
     m_reloadRequested.store(true, std::memory_order_relaxed);
+    return true;
+}
+
+void GraphicsRenderThread::setRenderTargetSize(const QSize& sizeInDevicePixels)
+{
+    // Reject nonsense where it enters, so the render loop never has to defend
+    // itself against a zero or negative size and cannot be made to allocate an
+    // invalid framebuffer by a caller that got its arithmetic wrong.
+    if (!sizeInDevicePixels.isValid() || sizeInDevicePixels.isEmpty())
+    {
+        GraphicsLog::warn(QStringLiteral("ignoring render target size request %1x%2")
+                              .arg(sizeInDevicePixels.width())
+                              .arg(sizeInDevicePixels.height()));
+        return;
+    }
+
+    // Written in an order that cannot be observed half-applied: the width doubles
+    // as the validity flag, so it is published last. A reader that sees the width
+    // is guaranteed to see the matching height.
+    m_requestedHeight.store(sizeInDevicePixels.height(), std::memory_order_relaxed);
+    m_requestedWidth.store(sizeInDevicePixels.width(), std::memory_order_release);
+}
+
+QSize GraphicsRenderThread::renderTargetSize() const
+{
+    return QSize(m_actualWidth.load(std::memory_order_relaxed),
+                 m_actualHeight.load(std::memory_order_relaxed));
+}
+
+bool GraphicsRenderThread::applyRenderTargetSizeRequest()
+{
+    const int w = m_requestedWidth.load(std::memory_order_acquire);
+    const int h = m_requestedHeight.load(std::memory_order_relaxed);
+    if (w < 0 || h <= 0)
+        return false; // nothing requested yet
+
+    if (w == m_actualWidth.load(std::memory_order_relaxed)
+        && h == m_actualHeight.load(std::memory_order_relaxed))
+        return false; // already the right size
+
+    // Rebuild here, on this thread, because the framebuffer belongs to this
+    // thread's context. This is also what makes the resize race a non-issue: the
+    // old framebuffer is destroyed and the new one created between frames, with
+    // the renderer mutex held, so no frame can be in flight against a
+    // half-replaced target. The window only ever publishes a number.
+    QMutexLocker lock(&m_rendererMutex);
+
+    m_gfxRenderer.reset();
+    m_gfxRenderer = std::make_unique<GraphicsRenderer>();
+
+    const QSize wanted(w, h);
+    if (!m_gfxRenderer->initialize(wanted))
+    {
+        GraphicsLog::error(QStringLiteral("render target: could not create a %1x%2 target; "
+                                          "frames will be skipped until the size changes again")
+                               .arg(w).arg(h));
+        m_gfxRenderer.reset();
+        return false;
+    }
+
+    m_actualWidth.store(w, std::memory_order_relaxed);
+    m_actualHeight.store(h, std::memory_order_relaxed);
+    GraphicsLog::info(QStringLiteral("render target: now %1x%2 (device pixels)").arg(w).arg(h));
     return true;
 }
 
@@ -242,25 +306,35 @@ void GraphicsRenderThread::run()
     // default shader happens to draw. The anchors and their expected colours are
     // documented in app/gui/graphics/shaders/anchors.frag.
     //
-    // The size is a placeholder: the real target size follows the output window
-    // once there is one, and a mismatched framebuffer is exactly what step 1.5
-    // is about.
+    // The render target is the user's configured output resolution, fixed for the
+    // life of the loop.
+    //
+    // Fixed rather than derived from the window, by design: the window is a viewer
+    // that crops this image, so its size and position affect only what part of the
+    // output is on screen. Nothing the user does to the window changes the
+    // resolution rendered, and therefore nothing changes what an external consumer
+    // such as Spout receives. It also means the loop does not have to wait for a
+    // window to exist before it can render.
+    //
+    // Applied through the same request path a resize would use, so there is one
+    // way for the target to change rather than two.
+    setRenderTargetSize(GraphicsSettings::outputSize());
+
+    if (!applyRenderTargetSizeRequest())
+    {
+        GraphicsLog::error(QStringLiteral("render target: could not allocate the configured output size"));
+    }
+
+    // Verify once, against the target that was just allocated, so the self-check
+    // exercises the same framebuffer the loop will draw into rather than some
+    // other size.
     {
         QMutexLocker lock(&m_rendererMutex);
-        m_gfxRenderer = std::make_unique<GraphicsRenderer>();
-        if (m_gfxRenderer->initialize(QSize(640, 360)))
-        {
+        if (m_gfxRenderer)
             m_renderVerified = m_gfxRenderer->verifyShaderOutput();
-        }
         else
-        {
-            GraphicsLog::error(QStringLiteral("framebuffer setup failed; skipping readback"));
-        }
+            GraphicsLog::warn(QStringLiteral("no render target; skipping the readback check"));
     }
-    // The renderer is deliberately NOT reset here any more. It used to be, because
-    // the thread returned immediately after verifying - which meant there was no
-    // render loop at all and nothing that displayed the result. It now stays
-    // alive for the loop below and is torn down before the context is released.
     // ---------------------------------------------------------------------
 
     // Tell any listener the context is usable. Emitted from this thread; a queued
@@ -366,6 +440,11 @@ void GraphicsRenderThread::run()
         if (m_reloadRequested.exchange(false, std::memory_order_relaxed))
             applyShaderReload();
 
+        // Applied at the top of the frame, before anything is drawn, so a resize
+        // can never land between the clear and the draw. This is the only place
+        // the target changes size.
+        applyRenderTargetSizeRequest();
+
         GraphicsFrame frame;
         frame.timeSeconds = double(frameStartNs - clockStartNs) / 1.0e9;
         // Zero on the first frame: there is no previous frame to measure against,
@@ -374,7 +453,6 @@ void GraphicsRenderThread::run()
                                  ? 0.0
                                  : double(frameStartNs - lastFrameStartNs) / 1.0e9;
         frame.frameIndex = totalFrames;
-        frame.resolution = QSize(640, 360);
         lastFrameStartNs = frameStartNs;
 
         {
@@ -382,8 +460,8 @@ void GraphicsRenderThread::run()
             if (m_gfxRenderer)
             {
                 // Report the size the shader will actually be given, not a second
-                // hard-coded copy of it, so iResolution cannot disagree with the
-                // target being drawn into.
+                // copy of it, so iResolution cannot disagree with the target being
+                // drawn into.
                 frame.resolution = m_gfxRenderer->size();
                 m_gfxRenderer->render(frame);
             }

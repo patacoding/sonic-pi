@@ -14,7 +14,14 @@ cd %WORKING_DIR%
 exit /b 0
 
 :build_failed
-echo.
-echo *** Build FAILED with errorlevel %errorlevel% ***
+REM Capture the failing code BEFORE anything else runs.
+REM
+REM Both `echo` and `cd` reset ERRORLEVEL to 0, so the original
+REM   echo ... %errorlevel% ... / cd %WORKING_DIR% / exit /b %errorlevel%
+REM reported the failure and then returned 0. Any caller relying on the exit code
+REM - CI, a wrapper script - saw success after a failed build, which is worse than
+REM no reporting at all: the failure resurfaces much later as a mystery.
+set "RC=%errorlevel%"
+echo *** Build FAILED with errorlevel %RC% ***
 cd %WORKING_DIR%
-exit /b %errorlevel%
+exit /b %RC%

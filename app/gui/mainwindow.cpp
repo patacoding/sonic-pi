@@ -4007,6 +4007,13 @@ void MainWindow::toggleScope()
 // Graphics output, on/off. `on` comes from the action rather than being
 // inverted here, so the action's checked state stays the single source of
 // truth. See the note where graphicsOutAct is created.
+// Called by main() once the Graphics render thread has been created and started.
+// The output window is made lazily, so the handle is parked here until then.
+void MainWindow::setGraphicsRenderThread(SonicPi::GraphicsRenderThread* thread)
+{
+    graphicsRenderThread = thread;
+}
+
 void MainWindow::showGraphicsOutput(bool on)
 {
     piSettings->show_graphics = on;
@@ -4022,6 +4029,11 @@ void MainWindow::showGraphicsOutput(bool on)
         if (!graphicsWindow)
         {
             graphicsWindow = new SonicPi::GraphicsWindow();
+
+            // Hand over the render thread so the window knows which output it is
+            // showing a crop of. It does not dictate that output's size - see
+            // GraphicsWindow::setRenderThread.
+            graphicsWindow->setRenderThread(graphicsRenderThread);
             SonicPi::GraphicsLog::info(QStringLiteral("menu: created output window"));
 
             // A window closed by the user must un-tick the action, or the tick

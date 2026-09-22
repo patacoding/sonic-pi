@@ -13,6 +13,7 @@
 
 #pragma once
 
+#include <QSize>
 #include <QString>
 
 namespace SonicPi
@@ -40,8 +41,27 @@ namespace SonicPi
 namespace GraphicsSettings
 {
 
+// Used when no output size is configured. Kept here rather than in the render
+// thread so the default is stated once, next to the key that overrides it.
+static constexpr int kDefaultOutputWidth = 1280;
+static constexpr int kDefaultOutputHeight = 720;
+
 // Absolute path of the settings file, whether or not it exists.
 QString filePath();
+
+// The resolution the shader is rendered at, in pixels, and the resolution any
+// external consumer (Spout, recording) receives.
+//
+// This is a property of the *output*, set by the user, and deliberately
+// independent of the output window: the window is a viewer that crops this image,
+// so resizing or moving the window changes neither what is rendered nor what an
+// external consumer is sent. An output whose resolution followed the window could
+// be changed by dragging a window, which is a strange way to change a broadcast
+// format.
+//
+// Defaults to 1280x720 when unset: large enough to show detail, small enough not
+// to waste memory, and not an invented guess at the user's display size.
+QSize outputSize();
 
 // Frame rate ceiling in Hz. Zero means "no explicit preference", which callers
 // interpret as their own default rather than as "unlimited" - an unlimited
@@ -51,6 +71,7 @@ int frameCapHz();
 // Whether the graphics output window should be open. Restored at startup.
 bool showOutput();
 
+void setOutputSize(const QSize& size);
 void setFrameCapHz(int hz);
 void setShowOutput(bool show);
 

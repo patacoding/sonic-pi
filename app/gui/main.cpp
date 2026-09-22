@@ -179,6 +179,11 @@ int main(int argc, char* argv[])
                          });
         gfxThread->start();
 
+        // Hand the thread to MainWindow so the output window can tell it what size
+        // to render at. The window is created lazily on first use, long after
+        // this, so the handle has to be stored rather than passed at construction.
+        mainWin.setGraphicsRenderThread(gfxThread);
+
         // Self-check for the logging itself. The warning and error paths only
         // fire when something has already gone wrong, which means they would
         // otherwise never be exercised - and a broken format discovered during a
