@@ -61,7 +61,11 @@ echo.
 
 REM win-build-gui.bat does the generated-docs freshness check and then builds,
 REM so this shares one code path with the normal build instead of copying it.
-call "%SCRIPT_DIR%win-build-gui.bat" %CONFIG%
+REM "sonic-pi" as the second argument builds the executable and its project
+REM references only - see the note in win-build-gui.bat. Measured here, that is
+REM ~12s instead of ~19s for a no-change build, and it is exactly the right
+REM scope for this mode: nothing else in the tree can have changed either.
+call "%SCRIPT_DIR%win-build-gui.bat" %CONFIG% sonic-pi
 set "RC=%ERRORLEVEL%"
 
 if not "%RC%"=="0" (

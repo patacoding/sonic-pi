@@ -18,7 +18,20 @@ cd build
 
 REM We need to pass in the make build type here when using Visual Studio 
 REM As passing in during the config step isn't honoured
-cmake --build . --config %CONFIG%
+REM
+REM %2 optionally names a single cmake target to build instead of everything.
+REM win-build-gui-only.bat passes "sonic-pi" - the executable. In that mode the
+REM audio engine and the Qt deploy step are already skipped, so the other ALL
+REM targets it would otherwise build cannot have changed either: api-tests,
+REM gui-tests and copy_supersonic. Measured in a fully built tree, they are the
+REM difference between an 18.6s and a 12.4s no-change build. The project
+REM references the executable does need (sonic-pi-api, QScintilla, the graphics
+REM sources) are still built through them.
+if "%2"=="" (
+    cmake --build . --config %CONFIG%
+) else (
+    cmake --build . --config %CONFIG% --target %2
+)
 
 if %ERRORLEVEL% neq 0 (
     cd %WORKING_DIR%
