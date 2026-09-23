@@ -98,8 +98,10 @@ const char* GlslLexer::keywords(int set) const
     return nullptr;
 }
 
-QFont GlslLexer::editorFont(SonicPiTheme* theme)
+QFont GlslLexer::editorFont(SonicPiTheme* theme, int zoom)
 {
+    QFont font;
+
     if (theme)
     {
         // Ask the CODE BUFFERS' OWN LEXER for the font, rather than restating its rule here.
@@ -110,11 +112,18 @@ QFont GlslLexer::editorFont(SonicPiTheme* theme)
         // question is cheap, has no side effects, and makes the two editors structurally unable to
         // disagree. Keyword is a non-italic style, i.e. the font ordinary text is read in.
         SonicPiLexer codeBuffers(theme);
-        return codeBuffers.defaultFont(QsciLexerRuby::Keyword);
+        font = codeBuffers.defaultFont(QsciLexerRuby::Keyword);
+    }
+    else
+    {
+        // No theme: the same face and size SonicPiLexer falls back to.
+        font = QFont(QStringLiteral("Hack"), 15);
     }
 
-    // No theme: the same face and size SonicPiLexer falls back to.
-    return QFont(QStringLiteral("Hack"), 15);
+    if (zoom != 0 && font.pointSize() > 0)
+        font.setPointSize(font.pointSize() + zoom);
+
+    return font;
 }
 
 void GlslLexer::applyTheme()

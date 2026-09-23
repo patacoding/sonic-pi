@@ -35,6 +35,8 @@
 #include <QStringList>
 #include <QTextStream>
 #include <QVBoxLayout>
+#include <QVariant>
+#include <QWheelEvent>
 
 namespace SonicPi
 {
@@ -120,6 +122,23 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     compileShortcut->setContext(Qt::WidgetWithChildrenShortcut);
     connect(compileShortcut, &QShortcut::activated, this, &ShaderBufferWindow::compile);
 
+    // The text-size keys the rest of Sonic Pi uses (View -> Code Size Up/Down). MainWindow's own
+    // actions cannot serve this window - their shortcuts belong to the main window, so they do not
+    // fire while this one has focus, which is exactly when someone wants to resize this text.
+    auto* zoomInShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Equal), this);
+    zoomInShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(zoomInShortcut, &QShortcut::activated, this, &ShaderBufferWindow::zoomIn);
+
+    auto* zoomOutShortcut =
+        new QShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Minus), this);
+    zoomOutShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(zoomOutShortcut, &QShortcut::activated, this, &ShaderBufferWindow::zoomOut);
+
+    // Start at the code buffers' default rather than Scintilla's 0, so the text is the size of the
+    // buffer beside it from the moment the window opens. MainWindow may override this with the
+    // current buffer's actual level (see showShaderBuffer).
+    setEditorZoom(SonicPiScintilla::kDefaultZoom);
+
     applyTheme();
     reloadFromDisk();
 }
@@ -152,9 +171,10 @@ void ShaderBufferWindow::applyTheme()
     if (m_lexer)
         m_lexer->applyTheme();
 
-    // The report pane is compiler output, shown in the same face and size as the code it is about.
+    // The report pane is compiler output, shown in the same face and size as the code it is about -
+    // at the current zoom, or a theme change would quietly put it back to the base size.
     if (m_report)
-        m_report->setFont(GlslLexer::editorFont(m_theme));
+        m_report->setFont(GlslLexer::editorFont(m_theme, editorZoom()));
 
     if (m_editor)
     {
@@ -163,6 +183,61 @@ void ShaderBufferWindow::applyTheme()
         m_editor->recolor();
         m_editor->setMarginsFont(GlslLexer::editorFont(m_theme));
     }
+}
+
+void ShaderBufferWindow::setEditorZoom(int zoom)
+{
+    if (!m_editor)
+        return;
+
+    m_editor->setProperty("zoom", QVariant(zoom));
+    m_editor->zoomTo(zoom);
+
+    // The compiler report is shown in the same face and size as the code it is about, so it follows
+    // the zoom. Scintilla adds the zoom to the style's point size; editorFont does the same.
+    if (m_report)
+        m_report->setFont(GlslLexer::editorFont(m_theme, zoom));
+}
+
+int ShaderBufferWindow::editorZoom() const
+{
+    return m_editor ? m_editor->currentZoom() : 0;
+}
+
+void ShaderBufferWindow::zoomIn()
+{
+    if (m_editor)
+        m_editor->zoomFontIn();
+
+    // zoomFontIn clamps and stores the level itself, so read it back rather than tracking a second
+    // copy that could disagree with the editor.
+    setEditorZoom(editorZoom());
+}
+
+void ShaderBufferWindow::zoomOut()
+{
+    if (m_editor)
+        m_editor->zoomFontOut();
+
+    setEditorZoom(editorZoom());
+}
+
+void ShaderBufferWindow::wheelEvent(QWheelEvent* event)
+{
+    // Ctrl+wheel, matching the code buffers on Windows. Handled here rather than letting the event
+    // reach MainWindow, whose handler zooms the current AUDIO buffer whichever window is under the
+    // pointer - so a wheel over this window would resize something the user is not looking at.
+    if (event->modifiers() & Qt::ControlModifier)
+    {
+        if (event->angleDelta().y() > 0)
+            zoomIn();
+        else
+            zoomOut();
+        event->accept();
+        return;
+    }
+
+    QWidget::wheelEvent(event);
 }
 
 QString ShaderBufferWindow::shaderFilePath() const

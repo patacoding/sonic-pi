@@ -61,7 +61,12 @@ public:
     //
     // It asks the code buffers' lexer (SonicPiLexer) for its font rather than restating the rule,
     // so a change there cannot leave this editor behind - see the definition.
-    static QFont editorFont(SonicPiTheme* theme);
+    //
+    // `zoom` is Scintilla's zoom level, which its documentation defines as a number of POINTS ADDED
+    // to the style's own size. The code buffers start at SonicPiScintilla::kDefaultZoom rather than
+    // 0, so a pane beside the editor has to apply the same offset to stay the same size as the text
+    // it belongs to.
+    static QFont editorFont(SonicPiTheme* theme, int zoom = 0);
 
     // Re-read every colour from the theme. Called when the user picks a different colour scheme,
     // so an open editor follows it instead of keeping the colours it was built with.

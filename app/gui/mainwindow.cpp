@@ -3862,6 +3862,11 @@ void MainWindow::zoomCurrentWorkspaceIn()
     statusBar()->showMessage(tr("Zooming In..."), 2000);
     SonicPiScintilla* ws = getCurrentWorkspace();
     ws->zoomFontIn();
+    // The shader editor is an editor too, and someone who has just enlarged their code is about to
+    // look at the shader they are writing. Kept in step here rather than by a second set of actions:
+    // one text-size control, both editors.
+    if (graphicsShaderWindow)
+        graphicsShaderWindow->zoomIn();
 }
 
 void MainWindow::zoomCurrentWorkspaceOut()
@@ -3869,6 +3874,8 @@ void MainWindow::zoomCurrentWorkspaceOut()
     statusBar()->showMessage(tr("Zooming Out..."), 2000);
     SonicPiScintilla* ws = getCurrentWorkspace();
     ws->zoomFontOut();
+    if (graphicsShaderWindow)
+        graphicsShaderWindow->zoomOut();
 }
 
 void MainWindow::updateErrorCardZoom()
@@ -4149,6 +4156,14 @@ void MainWindow::showShaderBuffer()
         // A QWidget with no parent is a top-level window, which is what this is. Sized generously
         // because it is an editor, not a panel.
         graphicsShaderWindow->resize(760, 620);
+        // Open at the text size the user is already reading the buffer beside it in.
+        //
+        // currentZoom() rather than the "zoom" PROPERTY: the property is only written when a set is
+        // restored, a zoom is reset or the user zooms, so on a fresh session it is unset and would
+        // read as 0 - i.e. this editor would open two points smaller than the code buffer, which is
+        // the very complaint this fixes.
+        if (SonicPiScintilla* ws = getCurrentWorkspace())
+            graphicsShaderWindow->setEditorZoom(ws->currentZoom());
         connect(graphicsShaderWindow, &SonicPi::ShaderBufferWindow::closedByUser,
                 this, [this]() {
                     // Hidden rather than destroyed, so the text survives closing the window. The same

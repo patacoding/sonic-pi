@@ -72,6 +72,18 @@ public:
     // this window is not a child of it, so it has to be told. Called on construction.
     void applyTheme();
 
+    // Text size, as a Scintilla zoom level in the code buffers' own units.
+    //
+    // Two reasons this exists rather than being left to the editor's own property. The code buffers
+    // START at SonicPiScintilla::kDefaultZoom (2), not 0, so an editor left at 0 is two points
+    // smaller than the buffer beside it. And the zoom is per-editor state that only MainWindow's
+    // Code Size actions and Ctrl+wheel touch - both of which act on the current audio buffer, so
+    // without this the shader editor's font never changed at all.
+    void setEditorZoom(int zoom);
+    int editorZoom() const;
+    void zoomIn();
+    void zoomOut();
+
     // Load the shader from disk into the editor. Called on creation and by Revert.
     void reloadFromDisk();
 
@@ -107,6 +119,10 @@ public slots:
 
 protected:
     void closeEvent(QCloseEvent* e) override;
+    // Ctrl+wheel, matching what the code buffers do on Windows. Handled here rather than letting the
+    // event reach MainWindow, whose handler zooms the current AUDIO buffer whichever window the
+    // pointer is over.
+    void wheelEvent(QWheelEvent* event) override;
 
 private:
     // Show the compiler's output. Empty text with ok true clears the report.
