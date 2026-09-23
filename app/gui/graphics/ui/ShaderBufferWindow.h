@@ -84,11 +84,11 @@ public:
     void zoomIn();
     void zoomOut();
 
-    // Load the shader from disk into the editor. Called on creation and by Revert.
-    void reloadFromDisk();
-
     // Write the editor's text to the shader file and ask the render thread to compile it. The reply
     // arrives at compileFinished().
+    //
+    // Bound to Alt+R as well as the Compile button, the same key Sonic Pi's own Run uses: the
+    // semantics are the same - take what is in the buffer and put it into effect.
     void compile();
 
     // Import a shader from an arbitrary file into the editor, and export the editor's text to one.
@@ -134,6 +134,9 @@ private:
     // The file this window edits, resolved through GraphicsSettings so it is the same file the
     // renderer reads. Empty when it could not be produced.
     QString shaderFilePath() const;
+    // Read the buffer's own file into the editor. Called once, on creation: the file is the
+    // renderer's source, so the window opens showing what is being rendered.
+    void reloadFromDisk();
 
     SonicPiTheme* m_theme = nullptr;
     GraphicsRenderThread* m_renderThread = nullptr;
@@ -150,10 +153,6 @@ private:
     QPushButton* m_jumpButton = nullptr;
     // The line the current report refers to, or 0 when the diagnostic named none.
     int m_errorLine = 0;
-
-    // Where the text last written to disk came from, so Revert has something to go back to and so a
-    // compile of unchanged text can say so instead of pretending to work.
-    QString m_lastWrittenText;
 };
 
 } // namespace SonicPi

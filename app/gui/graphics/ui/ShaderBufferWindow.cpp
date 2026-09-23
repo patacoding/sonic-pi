@@ -137,11 +137,14 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     restoreEditingKeys(m_editor);
 
     m_compileButton = new QPushButton(tr("Compile"), this);
-    QPushButton* revertButton = new QPushButton(tr("Revert"), this);
     m_jumpButton = new QPushButton(tr("Go to Error"), this);
     m_jumpButton->setEnabled(false);
     QPushButton* loadButton = new QPushButton(tr("Load File..."), this);
     QPushButton* saveButton = new QPushButton(tr("Save File..."), this);
+
+    // Named in the tooltip as well as bound, because a shortcut nobody is told about is not a
+    // feature. Alt+R is what Sonic Pi's own Run uses, so it needs no explaining.
+    m_compileButton->setToolTip(tr("Write the shader and compile it (Alt+R)"));
 
     m_status = new QLabel(this);
     m_status->setWordWrap(true);
@@ -160,7 +163,6 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     auto* buttonsLayout = new QHBoxLayout(buttons);
     buttonsLayout->setContentsMargins(0, 0, 0, 0);
     buttonsLayout->addWidget(m_compileButton);
-    buttonsLayout->addWidget(revertButton);
     buttonsLayout->addWidget(m_jumpButton);
     buttonsLayout->addWidget(loadButton);
     buttonsLayout->addWidget(saveButton);
@@ -177,7 +179,6 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     layout->addWidget(split, 1);
 
     connect(m_compileButton, &QPushButton::clicked, this, &ShaderBufferWindow::compile);
-    connect(revertButton, &QPushButton::clicked, this, &ShaderBufferWindow::reloadFromDisk);
     connect(m_jumpButton, &QPushButton::clicked, this, [this]() { jumpToLine(m_errorLine); });
     connect(loadButton, &QPushButton::clicked, this, &ShaderBufferWindow::loadFromFile);
     connect(saveButton, &QPushButton::clicked, this, &ShaderBufferWindow::saveToFile);
@@ -185,11 +186,26 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     // The render thread's verdict arrives here, queued from another thread.
     connect(m_renderThread, &GraphicsRenderThread::shaderCompileFinished,
             this, &ShaderBufferWindow::compileFinished);
-    // Ctrl+Return compiles, matching the audio editor's Run and the habit of every shader tool. Also
-    // available as a button, because a shortcut nobody knows about is not a feature.
+    // Compile keys. Ctrl+Return matches the audio editor's Run and the habit of every shader tool.
+    //
+    // Alt+R is Sonic Pi's own Run binding, and it is here because the semantics are the SAME as in an
+    // audio buffer: take what is in the buffer and put it into effect. Someone who has just been
+    // running code with Alt+R should not have to learn a second key for the shader beside it.
+    //
+    // "Meta" in Sonic Pi's shortcut table is the platform's command modifier, so the table's Meta+R
+    // is Alt+R on Windows and Linux and Command+R on macOS - spelled here the same way.
     auto* compileShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Return), this);
     compileShortcut->setContext(Qt::WidgetWithChildrenShortcut);
     connect(compileShortcut, &QShortcut::activated, this, &ShaderBufferWindow::compile);
+
+#if defined(Q_OS_MAC)
+    const int runKey = Qt::CTRL | Qt::Key_R;
+#else
+    const int runKey = Qt::ALT | Qt::Key_R;
+#endif
+    auto* runShortcut = new QShortcut(QKeySequence(runKey), this);
+    runShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(runShortcut, &QShortcut::activated, this, &ShaderBufferWindow::compile);
 
     // The text-size keys the rest of Sonic Pi uses (View -> Code Size Up/Down). MainWindow's own
     // actions cannot serve this window - their shortcuts belong to the main window, so they do not
@@ -331,22 +347,7 @@ void ShaderBufferWindow::reloadFromDisk()
     const QString text = in.readAll();
     file.close();
 
-    // Reloading what is already in the editor is a no-op, and reporting it as "Loaded" is
-    // indistinguishable from a button that does nothing - which is how it was read. It is NOT an
-    // edge case: Compile writes the file, so after any compile the file and the editor agree, and
-    // Revert then has nothing to go back to. (Undo is the tool for taking back an edit that has
-    // already been compiled; Revert only discards edits made since the last write.)
-    if (text == m_editor->text())
-    {
-        m_status->setText(tr("Nothing to revert: the editor already matches %1").arg(path));
-        GraphicsLog::info(QStringLiteral("shader buffer: revert was a no-op; the file already "
-                                         "matches the editor (%1, %2 bytes)")
-                              .arg(path).arg(text.size()));
-        return;
-    }
-
     m_editor->setText(text);
-    m_lastWrittenText = text;
     showCompileReport(true, QString());
     m_status->setText(tr("Loaded %1").arg(path));
     GraphicsLog::info(QStringLiteral("shader buffer: loaded %1 (%2 bytes)").arg(path).arg(text.size()));
@@ -372,7 +373,6 @@ void ShaderBufferWindow::compile()
         out << text;
     }
     file.close();
-    m_lastWrittenText = text;
 
     m_status->setText(tr("Compiling..."));
     GraphicsLog::info(QStringLiteral("shader buffer: wrote %1 (%2 bytes), asking the render thread to compile")
