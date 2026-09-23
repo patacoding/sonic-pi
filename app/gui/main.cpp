@@ -232,10 +232,12 @@ int main(int argc, char* argv[])
         // unit is the most expensive in the tree to recompile, and a graphics feature should not
         // have to pay it because it wanted a socket.
         //
-        // Nothing consumes the values yet (S3): they are decoded and reported, so that "the code
-        // reaches this process" and "the value reaches the shader" stay separately checkable.
-        // Parented to the application so it lives as long as the event loop that serves it.
-        auto* gfxOsc = new SonicPi::GraphicsOscReceiver(&app);
+        // Parented to the application so it lives as long as the event loop that serves it. The
+        // values it stores are shared with the render thread, which snapshots them per frame; the
+        // receiver itself never touches the renderer, so a message cannot reach a GL context.
+        static SonicPi::GraphicsUniformValues gfxUniformValues;
+        auto* gfxOsc = new SonicPi::GraphicsOscReceiver(&gfxUniformValues, &app);
+        gfxThread->setUniformValues(&gfxUniformValues);
         Q_UNUSED(gfxOsc);
 
         // Hand the thread to MainWindow so the output window can tell it what size

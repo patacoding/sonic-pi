@@ -315,9 +315,9 @@ enum class Verdict
 
 // Speculative convenience that must not exist: padding a short vec3 with zeros would give the user
 // a half-applied value whose picture still moves, which reads as "it works" while being wrong.
-inline bool allValuesIntegral(const Decoded& d)
+inline bool allValuesIntegral(const QVector<float>& values)
 {
-    for (float v : d.floats)
+    for (float v : values)
     {
         if (v != std::floor(v))
             return false;
@@ -325,21 +325,36 @@ inline bool allValuesIntegral(const Decoded& d)
     return true;
 }
 
-// Whether a decoded message may be given to a uniform of this target. Callers check d.ok() first;
-// a decode failure is not a verdict about the target.
-inline Verdict verdictFor(const Decoded& d, const Target& target)
+inline bool allValuesIntegral(const Decoded& d)
+{
+    return allValuesIntegral(d.floats);
+}
+
+// Whether a value may be given to a uniform of this target. Two callers, and the difference between
+// them is worth stating: a freshly decoded message knows whether each argument arrived as an
+// integer, while a value read back from the store has been through a float view and only knows
+// whether it is whole. Both are "an int where an int is wanted", so callers pass
+// `integral || allValuesIntegral(floats)` and get the same answer either way - a value sent as 1.0
+// drives an int uniform, a value sent as 1.5 does not.
+inline Verdict verdictFor(bool integral, int count, const Target& target)
 {
     if (!target.supported())
         return Verdict::UnsupportedTarget;
-    if (d.count() != target.count)
+    if (count != target.count)
         return Verdict::ArityMismatch;
 
     // Widening is allowed (an int where a float is wanted, as in "uGain", 1); narrowing is allowed
     // only when no precision is lost (1.0 for an int uniform, not 1.5).
-    if (target.kind == TargetKind::Int && !d.integral && !allValuesIntegral(d))
+    if (target.kind == TargetKind::Int && !integral)
         return Verdict::TypeMismatch;
 
     return Verdict::Accept;
+}
+
+// The same question for a decoded message.
+inline Verdict verdictFor(const Decoded& d, const Target& target)
+{
+    return verdictFor(d.integral || allValuesIntegral(d.floats), d.count(), target);
 }
 
 inline const char* describe(DecodeError error)

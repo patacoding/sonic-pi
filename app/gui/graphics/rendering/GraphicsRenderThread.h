@@ -176,6 +176,14 @@ public:
     // consumer, which is the case when no window will ever be shown.
     void setSharedFrameSlot(GraphicsSharedFrameSlot* slot) { m_sharedFrame = slot; }
 
+    // Where OSC-driven uniform values come from. Not owned; null means frames carry no dynamic
+    // values at all, which is also what a build without the graphics OSC feature would do.
+    //
+    // A snapshot is taken only when the store's version changes, and is held for the frame it is
+    // handed to - so the renderer reads a set of values that cannot change underneath it, and a
+    // message costs the GUI thread one hash write rather than anything per frame.
+    void setUniformValues(GraphicsUniformValues* values) { m_uniformValues = values; }
+
 
     // The size the render target should be, in pixels.
     //
@@ -343,6 +351,12 @@ private:
 
     // Not owned. See setSharedFrameSlot().
     GraphicsSharedFrameSlot* m_sharedFrame = nullptr;
+
+    // Not owned. See setUniformValues().
+    GraphicsUniformValues* m_uniformValues = nullptr;
+    // The last snapshot taken, kept alive because a frame holds a pointer to it.
+    GraphicsUniformSnapshot m_uniformSnapshot;
+    quint64 m_uniformVersion = 0;
     // The GL_RENDERER string. Distinct from m_gfxRenderer, which is the object
     // that draws.
     QString m_renderer;

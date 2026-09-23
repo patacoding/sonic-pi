@@ -689,6 +689,21 @@ void GraphicsRenderThread::run()
         frame.frameIndex = totalFrames;
         lastFrameStartNs = frameStartNs;
 
+        // OSC-driven values, refreshed only when something actually changed: one atomic load per
+        // frame against a hash copy per message. The snapshot is a member, so the pointer the frame
+        // carries stays valid for the whole frame even if the GUI thread stores a new value in the
+        // middle of it - the renderer can never see a half-updated set.
+        if (m_uniformValues)
+        {
+            const quint64 version = m_uniformValues->version();
+            if (version != m_uniformVersion)
+            {
+                m_uniformVersion = version;
+                m_uniformSnapshot = m_uniformValues->snapshot();
+            }
+            frame.dynamic = &m_uniformSnapshot;
+        }
+
         // Target selection and the one wait in the whole handoff.
         //
         // The rule is one sentence: write whichever target the consumer is not

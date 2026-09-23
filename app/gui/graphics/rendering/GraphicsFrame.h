@@ -15,6 +15,8 @@
 
 #include <QSize>
 
+#include "graphics/osc/GraphicsUniformValues.h"
+
 namespace SonicPi
 {
 
@@ -56,6 +58,18 @@ struct GraphicsFrame
     // should use for aspect correction; the logical window size would be wrong on
     // a HiDPI display.
     QSize resolution;
+
+    // The OSC-driven uniform values in force for this frame, or nullptr for none.
+    //
+    // Owned by whoever produces the frame, not by the renderer: the loop takes a snapshot from
+    // GraphicsUniformValues when the version changes and keeps it alive across the frame, so the
+    // renderer stays a pure consumer of what it is handed - the same rule as the clock above. A
+    // renderer that went and read the store itself would be reading state the frame does not
+    // describe, which is exactly what this struct exists to prevent.
+    //
+    // Values not named here are left alone; the ones that are get applied after the built-ins, so
+    // an OSC name can never take iTime/iTimeDelta/iFrame/iResolution away from the loop.
+    const GraphicsUniformSnapshot* dynamic = nullptr;
 };
 
 } // namespace SonicPi

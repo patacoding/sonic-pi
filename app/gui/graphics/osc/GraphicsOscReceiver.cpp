@@ -14,6 +14,7 @@
 #include "GraphicsOscReceiver.h"
 
 #include "GraphicsUniformMessage.h"
+#include "GraphicsUniformValues.h"
 
 #include "../rendering/GraphicsLog.h"
 
@@ -56,8 +57,9 @@ QString valueList(const GraphicsOsc::Decoded& decoded)
 
 } // namespace
 
-GraphicsOscReceiver::GraphicsOscReceiver(QObject* parent)
+GraphicsOscReceiver::GraphicsOscReceiver(GraphicsUniformValues* values, QObject* parent)
     : QObject(parent)
+    , m_values(values)
 {
     m_socket = new QUdpSocket(this);
 
@@ -122,9 +124,19 @@ void GraphicsOscReceiver::readPendingDatagrams()
 
         ++m_received;
 
-        // One line per name, the first time it arrives: it proves the link end to end and lists what
-        // the code is driving. Every later value for the same name is silent on purpose - these
-        // arrive at music rate, and a line per message would bury everything else in the log.
+        // The value is stored for the render thread, and the first one seen for a name is reported.
+        // Every later value for the same name is silent on purpose - these arrive at music rate,
+        // and a line per message would bury everything else in the log.
+        if (m_values)
+        {
+            GraphicsUniformValue stored;
+            stored.name = decoded.name;
+            stored.integral = decoded.integral;
+            stored.ints = decoded.ints;
+            stored.floats = decoded.floats;
+            m_values->set(stored);
+        }
+
         if (m_reportedNames.contains(decoded.name))
             continue;
 

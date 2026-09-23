@@ -98,6 +98,8 @@ set(GRAPHICS_SOURCES
     ${QTAPP_ROOT}/graphics/osc/GraphicsOscReceiver.cpp
     ${QTAPP_ROOT}/graphics/osc/GraphicsOscReceiver.h
     ${QTAPP_ROOT}/graphics/osc/GraphicsUniformMessage.h
+    ${QTAPP_ROOT}/graphics/osc/GraphicsUniformValues.cpp
+    ${QTAPP_ROOT}/graphics/osc/GraphicsUniformValues.h
     ${QTAPP_ROOT}/graphics/rendering/GraphicsFrame.h
     ${QTAPP_ROOT}/graphics/rendering/GraphicsLog.cpp
     ${QTAPP_ROOT}/graphics/rendering/GraphicsLog.h

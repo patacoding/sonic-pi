@@ -21,6 +21,9 @@
 #include <QOpenGLBuffer>
 #include <QOpenGLShaderProgram>
 #include <QOpenGLVertexArrayObject>
+#include <QElapsedTimer>
+#include <QHash>
+#include <QSet>
 #include <QSize>
 #include <QString>
 
@@ -28,6 +31,9 @@
 #include <atomic>
 
 #include "GraphicsFrame.h"
+// For GraphicsOsc::Target, the mapping from a GL type to what OSC may drive it with. Widget-free
+// and GL-free, and exercised on its own by tools/settings-probe/uniform-introspect.cpp.
+#include "graphics/osc/GraphicsUniformMessage.h"
 
 class QOpenGLFramebufferObject;
 
@@ -35,6 +41,11 @@ namespace SonicPi
 {
 
 class GraphicsTarget;
+
+// How often the "no matching uniform" set may be re-announced. An unmatched name is normal while
+// either side of the pair is still being written, so this is a discoverability aid, not an alarm -
+// and the interval is what keeps a five-times-a-second sender from filling the log.
+constexpr int kUnmatchedReportIntervalMs = 10000;
 
 // The outcome of one attempt to build the shader, with the compiler's own words.
 //
@@ -276,6 +287,44 @@ private:
     // Whether "this program declares no uniforms at all" has already been reported,
     // so the note appears once per program rather than once per frame.
     bool m_reportedNoUniforms = false;
+
+    // ---- OSC-driven uniforms -------------------------------------------------------------
+    //
+    // What this program actually declares, read from the driver after each successful link. This is
+    // the authority on whether a name exists: the linker removes uniforms that are declared but
+    // never used, so a shader's source is not a reliable answer and the driver is (measured in
+    // tools/settings-probe/uniform-introspect.cpp).
+    //
+    // Only the OSC-addressable ones are applied from here; the four built-ins above keep their own
+    // explicit path, which is also what stops an OSC message from taking iTime away from the loop.
+    struct DynamicUniform
+    {
+        int location = -1;
+        unsigned int glType = 0;
+        int size = 0;
+        GraphicsOsc::Target target;
+    };
+
+    void buildDynamicUniforms();
+    void applyDynamicUniforms(const GraphicsFrame& frame);
+    void applyUniformValue(QOpenGLFunctions* f, const DynamicUniform& uniform,
+                           const GraphicsUniformValue& value);
+    void reportUnmatchedNames();
+
+    QHash<QString, DynamicUniform> m_dynamicUniforms;
+
+    // One line per name for a message that arrived but could not be used, and one line for a name
+    // this program does not declare. Both are bounded by the number of names in play; neither is
+    // per-message, because these arrive at music rate.
+    QSet<QString> m_reportedMismatches;
+    QSet<QString> m_reportedBuiltins;
+
+    // Names that arrived with no matching uniform right now. Reported as a set, and at most once
+    // per kUnmatchedReportIntervalMs: a name being absent is NORMAL while the user is still writing
+    // either side of the pair, so this must not read as an error - but it must be discoverable,
+    // because "declared but unused" looks identical from the sender's side (docs 3.2.3).
+    QSet<QString> m_unmatchedNames;
+    QElapsedTimer m_unmatchedTimer;
 
     std::unique_ptr<QOpenGLShaderProgram>     m_program;
     // Holds the quad's attribute bindings. A core-profile draw call needs one bound

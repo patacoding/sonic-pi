@@ -23,6 +23,8 @@ class QUdpSocket;
 namespace SonicPi
 {
 
+class GraphicsUniformValues;
+
 // Receives the OSC messages that drive shader uniforms, and nothing else.
 //
 // The other end is user code running in Sonic Pi:
@@ -44,15 +46,20 @@ namespace SonicPi
 // casually during development (mainwindow.cpp includes it, and that one translation unit costs
 // about 96 seconds to compile).
 //
-// S3 scope: bind, decode, report. The values are logged and dropped - nothing is sent to the
-// renderer yet. That keeps "the link works" and "the value reached the shader" separable, which
-// matters because the second one can only be confirmed on screen.
+// The values are not consumed here. This class decodes a datagram and hands the value to
+// GraphicsUniformValues; what that value means for a shader is decided where the shader is - by the
+// renderer, which holds the registry of what the program actually declares. So the receiver never
+// needs a GL context, and it cannot report "the name matched" even if it wanted to: it does not
+// know, and guessing from the shader's source would be wrong (a declared-but-unused uniform is
+// removed by the linker).
 class GraphicsOscReceiver : public QObject
 {
     Q_OBJECT
 
 public:
-    explicit GraphicsOscReceiver(QObject* parent = nullptr);
+    // `values` is not owned and must outlive this object. The caller keeps it because the render
+    // thread needs the same object.
+    explicit GraphicsOscReceiver(GraphicsUniformValues* values, QObject* parent = nullptr);
     ~GraphicsOscReceiver() override;
 
     // The port user code must address. Fixed rather than discovered: a dynamic port would need a
@@ -73,6 +80,7 @@ private slots:
 private:
     void reportDecodeError(int errorCode, int datagramSize, const char* datagram);
 
+    GraphicsUniformValues* m_values = nullptr;
     QUdpSocket* m_socket = nullptr;
     bool m_listening = false;
 

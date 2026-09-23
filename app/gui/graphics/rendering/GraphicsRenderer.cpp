@@ -25,6 +25,9 @@
 #include <QOpenGLFramebufferObjectFormat>
 #include <QOpenGLBuffer>
 #include <QOpenGLShaderProgram>
+#include <QVector2D>
+#include <QVector3D>
+#include <QVector4D>
 
 #include <cmath>
 
@@ -457,6 +460,7 @@ bool GraphicsRenderer::installFallbackShader()
 void GraphicsRenderer::cacheUniformLocations()
 {
     m_uniforms = queryUniforms(m_program.get());
+    buildDynamicUniforms();
 
     m_reportedNoUniforms = false;
     const bool any = m_uniforms.time >= 0 || m_uniforms.timeDelta >= 0
@@ -469,6 +473,231 @@ void GraphicsRenderer::cacheUniformLocations()
                               .arg(m_uniforms.timeDelta)
                               .arg(m_uniforms.frame)
                               .arg(m_uniforms.resolution));
+    }
+}
+
+// Ask the driver what this program declares, and keep the answers OSC can address.
+//
+// Built fresh on every successful link, because uniform locations belong to the program that was
+// current when they were queried and a reload replaces the program. Also cleared here: a name that
+// the new program no longer declares must not be applied to a stale location.
+void GraphicsRenderer::buildDynamicUniforms()
+{
+    m_dynamicUniforms.clear();
+    m_unmatchedNames.clear();
+    m_reportedMismatches.clear();
+    m_reportedBuiltins.clear();
+
+    if (!m_program || !m_program->isLinked())
+        return;
+
+    QOpenGLContext* ctx = QOpenGLContext::currentContext();
+    QOpenGLFunctions* f = ctx ? ctx->functions() : nullptr;
+    if (!f)
+        return;
+
+    m_program->bind();
+
+    GLint active = 0;
+    GLint maxLength = 0;
+    f->glGetProgramiv(m_program->programId(), GL_ACTIVE_UNIFORMS, &active);
+    f->glGetProgramiv(m_program->programId(), GL_ACTIVE_UNIFORM_MAX_LENGTH, &maxLength);
+    if (active <= 0 || maxLength <= 0)
+    {
+        m_program->release();
+        return;
+    }
+
+    QVector<char> name(int(maxLength) + 1, '\0');
+    QStringList addressable;
+
+    for (GLint i = 0; i < active; ++i)
+    {
+        GLsizei written = 0;
+        GLint size = 0;
+        GLenum type = 0;
+        f->glGetActiveUniform(m_program->programId(), GLuint(i), maxLength, &written, &size, &type,
+                              name.data());
+
+        const QString uniformName = QString::fromLatin1(name.constData(), written);
+
+        DynamicUniform entry;
+        entry.location = m_program->uniformLocation(uniformName);
+        entry.glType = unsigned(type);
+        entry.size = int(size);
+        entry.target = GraphicsOsc::targetFromGlUniform(unsigned(type), int(size), uniformName);
+
+        m_dynamicUniforms.insert(uniformName, entry);
+
+        if (entry.target.supported())
+        {
+            addressable << QStringLiteral("%1 (%2 x%3)")
+                               .arg(uniformName,
+                                    QLatin1String(GraphicsOsc::describe(entry.target.kind)))
+                               .arg(entry.target.count);
+        }
+    }
+
+    m_program->release();
+
+    // One line per link. This is the list a user needs when a name "does not work": it is the
+    // driver's answer to what the shader actually declares, which is not the same as what its
+    // source says (declared-but-unused uniforms are absent).
+    if (addressable.isEmpty())
+    {
+        GraphicsLog::info(QStringLiteral("shader declares no OSC-addressable uniforms "
+                                         "(%1 active in total); osc \"/graphics/uniform\" values "
+                                         "will have nowhere to go")
+                              .arg(active));
+    }
+    else
+    {
+        GraphicsLog::info(QStringLiteral("shader uniforms addressable by OSC (%1 of %2 active): %3")
+                              .arg(addressable.size())
+                              .arg(active)
+                              .arg(addressable.join(QStringLiteral(", "))));
+    }
+}
+
+void GraphicsRenderer::applyDynamicUniforms(const GraphicsFrame& frame)
+{
+    if (!frame.dynamic || frame.dynamic->isEmpty() || m_dynamicUniforms.isEmpty())
+        return;
+
+    QOpenGLContext* ctx = QOpenGLContext::currentContext();
+    QOpenGLFunctions* f = ctx ? ctx->functions() : nullptr;
+    if (!f)
+        return;
+
+    QSet<QString> stillUnmatched;
+
+    for (const GraphicsUniformValue& value : *frame.dynamic)
+    {
+        // The four built-ins are the loop's to set. Refused rather than allowed, because a value
+        // overwritten every frame by the renderer would look like "my OSC control does nothing" -
+        // and allowed would also mean a race between the two writers, frame by frame.
+        if (value.name == QLatin1String("iTime") || value.name == QLatin1String("iTimeDelta")
+            || value.name == QLatin1String("iFrame") || value.name == QLatin1String("iResolution"))
+        {
+            if (!m_reportedBuiltins.contains(value.name))
+            {
+                m_reportedBuiltins.insert(value.name);
+                GraphicsLog::info(QStringLiteral("graphics osc: %1 is set by the frame loop, not by "
+                                                 "OSC; the value is ignored")
+                                      .arg(value.name));
+            }
+            continue;
+        }
+
+        const auto it = m_dynamicUniforms.constFind(value.name);
+        if (it == m_dynamicUniforms.constEnd())
+        {
+            // Not declared, or declared and optimised away. Normal while the user is still writing
+            // one side of the pair, so it is collected and summarised rather than reported here.
+            stillUnmatched.insert(value.name);
+            continue;
+        }
+
+        const DynamicUniform& uniform = it.value();
+
+        // The store keeps the values as they arrived; whether they suit this uniform is the same
+        // question the probe answers for a decoded message, so it is the same function - one copy
+        // of the rule, already exercised with real bytes.
+        //
+        // "integral" has two sources because a value that has been through the store has been
+        // through a float view: it says whether the arguments arrived as integers, so a whole float
+        // (1.0) is added back here as an integer-valued argument. Without this, a value the decoder
+        // accepts for an int uniform would be refused on the way to the shader.
+        const bool integral = value.integral || GraphicsOsc::allValuesIntegral(value.floats);
+
+        const GraphicsOsc::Verdict verdict =
+            GraphicsOsc::verdictFor(integral, value.count(), uniform.target);
+
+        if (verdict != GraphicsOsc::Verdict::Accept)
+        {
+            if (!m_reportedMismatches.contains(value.name))
+            {
+                m_reportedMismatches.insert(value.name);
+                GraphicsLog::info(QStringLiteral("graphics osc: %1 takes %2 x%3, but %4 value(s) "
+                                                 "arrived - %5; the message is ignored")
+                                      .arg(value.name,
+                                           QLatin1String(GraphicsOsc::describe(uniform.target.kind)))
+                                      .arg(uniform.target.count)
+                                      .arg(value.count())
+                                      .arg(QLatin1String(GraphicsOsc::describe(verdict))));
+            }
+            continue;
+        }
+
+        applyUniformValue(f, uniform, value);
+    }
+
+    // The summary. Printed only when the set of unmatched names is non-empty, at most once per
+    // interval, and never as a warning: an unmatched name is not a fault.
+    if (stillUnmatched != m_unmatchedNames)
+    {
+        m_unmatchedNames = stillUnmatched;
+        m_unmatchedTimer.restart();
+        if (!stillUnmatched.isEmpty())
+            reportUnmatchedNames();
+    }
+    else if (!stillUnmatched.isEmpty() && m_unmatchedTimer.elapsed() >= kUnmatchedReportIntervalMs)
+    {
+        m_unmatchedTimer.restart();
+        reportUnmatchedNames();
+    }
+}
+
+void GraphicsRenderer::reportUnmatchedNames()
+{
+    QStringList names = m_unmatchedNames.values();
+    names.sort();
+
+    QStringList declared = m_dynamicUniforms.keys();
+    declared.sort();
+
+    GraphicsLog::info(QStringLiteral("graphics osc: %1 name(s) have no matching uniform (%2). "
+                                     "This shader declares: %3")
+                          .arg(names.size())
+                          .arg(names.join(QStringLiteral(", ")),
+                               declared.isEmpty() ? QStringLiteral("nothing OSC-addressable")
+                                                  : declared.join(QStringLiteral(", "))));
+}
+
+void GraphicsRenderer::applyUniformValue(QOpenGLFunctions* f, const DynamicUniform& uniform,
+                                         const GraphicsUniformValue& value)
+{
+    if (uniform.location < 0)
+        return;
+
+    // Floats go through Qt's wrappers; integer vectors have no Qt equivalent and go straight to GL.
+    // Both are the same call underneath, and this keeps the conversions in one place rather than
+    // scattered through the loop above.
+    if (uniform.target.kind == GraphicsOsc::TargetKind::Float)
+    {
+        switch (uniform.target.count)
+        {
+        case 1: m_program->setUniformValue(uniform.location, value.floats.value(0)); break;
+        case 2: m_program->setUniformValue(uniform.location,
+                                           QVector2D(value.floats.value(0), value.floats.value(1))); break;
+        case 3: m_program->setUniformValue(uniform.location,
+                                           QVector3D(value.floats.value(0), value.floats.value(1),
+                                                     value.floats.value(2))); break;
+        case 4: m_program->setUniformValue(uniform.location,
+                                           QVector4D(value.floats.value(0), value.floats.value(1),
+                                                     value.floats.value(2), value.floats.value(3))); break;
+        default: break;
+        }
+        return;
+    }
+
+    switch (uniform.target.count)
+    {
+    case 1: f->glUniform1i(uniform.location, value.ints.value(0)); break;
+    case 2: f->glUniform2iv(uniform.location, 1, value.ints.constData()); break;
+    case 3: f->glUniform3iv(uniform.location, 1, value.ints.constData()); break;
+    case 4: f->glUniform4iv(uniform.location, 1, value.ints.constData()); break;
+    default: break;
     }
 }
 
@@ -500,16 +729,14 @@ void GraphicsRenderer::applyUniforms(const GraphicsFrame& frame)
     // and not repeated every frame. It is worth saying out loud because "my
     // uniform has no effect" is otherwise indistinguishable from "my shader
     // declared it but nothing is setting it".
-    if (m_uniforms.time < 0 && m_uniforms.timeDelta < 0 && m_uniforms.frame < 0
-        && m_uniforms.resolution < 0)
+    const bool anyBuiltin = m_uniforms.time >= 0 || m_uniforms.timeDelta >= 0
+                            || m_uniforms.frame >= 0 || m_uniforms.resolution >= 0;
+
+    if (!anyBuiltin && !m_reportedNoUniforms)
     {
-        if (!m_reportedNoUniforms)
-        {
-            m_reportedNoUniforms = true;
-            GraphicsLog::info(QStringLiteral("shader declares none of iTime/iTimeDelta/iFrame/iResolution; "
-                                             "the frame values are not being used"));
-        }
-        return;
+        m_reportedNoUniforms = true;
+        GraphicsLog::info(QStringLiteral("shader declares none of iTime/iTimeDelta/iFrame/iResolution; "
+                                         "the frame values are not being used"));
     }
 
     // Uniform1f takes a float, and the shader's uniform is a float, so the
@@ -527,6 +754,11 @@ void GraphicsRenderer::applyUniforms(const GraphicsFrame& frame)
         m_program->setUniformValue(m_uniforms.resolution,
                                    QVector2D(float(frame.resolution.width()),
                                              float(frame.resolution.height())));
+
+    // After the built-ins, so an OSC name can never take one of them away - and outside the
+    // "no built-ins declared" case above, which is a perfectly ordinary shader for the OSC path:
+    // a shader driven only by OSC declares none of the four.
+    applyDynamicUniforms(frame);
 }
 
 bool GraphicsRenderer::reloadShaders()
