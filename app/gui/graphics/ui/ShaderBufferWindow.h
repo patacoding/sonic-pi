@@ -79,6 +79,10 @@ protected:
 private:
     // Show the compiler's output. Empty text with ok true clears the report.
     void showCompileReport(bool ok, const QString& compilerLog);
+    // Put the cursor on `line` (1-based) and make sure it is visible. No-op for a line number that is
+    // not in the document, because a diagnostic referring to a line the editor does not have would
+    // otherwise move the cursor somewhere arbitrary and look like a bug.
+    void jumpToLine(int line);
     // The file this window edits, resolved through GraphicsSettings so it is the same file the
     // renderer reads. Empty when it could not be produced.
     QString shaderFilePath() const;
@@ -90,6 +94,10 @@ private:
     QPlainTextEdit* m_report = nullptr;
     QLabel* m_status = nullptr;
     QPushButton* m_compileButton = nullptr;
+    // Enabled only when a line number was found, so a button that cannot work is not offered.
+    QPushButton* m_jumpButton = nullptr;
+    // The line the current report refers to, or 0 when the diagnostic named none.
+    int m_errorLine = 0;
 
     // Where the text last written to disk came from, so Revert has something to go back to and so a
     // compile of unchanged text can say so instead of pretending to work.

@@ -25,8 +25,10 @@
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QShortcut>
 #include <QSplitter>
+#include <QStringList>
 #include <QTextStream>
 #include <QVBoxLayout>
 
@@ -38,7 +40,13 @@ namespace
 // The fragment shader is the one this feature renders, and it is the file the renderer reads. Named
 // here as a constant so the window and the renderer cannot ask for different files.
 const char* kFragmentShaderFile = "default.frag";
+
 } // namespace
+
+// Declared before use in showCompileReport(), defined below with its reasoning. Free-standing rather
+// than a member so the parsing rule can be tested without a window - see the comment on the
+// definition, and tools/settings-probe/shader-log-check.cpp.
+int shaderLogFirstErrorLine(const QString& compilerLog);
 
 ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread* renderThread,
                                        QWidget* parent)
@@ -55,6 +63,8 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
 
     m_compileButton = new QPushButton(tr("Compile"), this);
     QPushButton* revertButton = new QPushButton(tr("Revert"), this);
+    m_jumpButton = new QPushButton(tr("Go to Error"), this);
+    m_jumpButton->setEnabled(false);
 
     m_status = new QLabel(this);
     m_status->setWordWrap(true);
@@ -74,6 +84,7 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     buttonsLayout->setContentsMargins(0, 0, 0, 0);
     buttonsLayout->addWidget(m_compileButton);
     buttonsLayout->addWidget(revertButton);
+    buttonsLayout->addWidget(m_jumpButton);
     buttonsLayout->addWidget(m_status, 1);
 
     auto* split = new QSplitter(Qt::Vertical, this);
@@ -88,6 +99,7 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
 
     connect(m_compileButton, &QPushButton::clicked, this, &ShaderBufferWindow::compile);
     connect(revertButton, &QPushButton::clicked, this, &ShaderBufferWindow::reloadFromDisk);
+    connect(m_jumpButton, &QPushButton::clicked, this, [this]() { jumpToLine(m_errorLine); });
 
     // The render thread's verdict arrives here, queued from another thread.
     connect(m_renderThread, &GraphicsRenderThread::shaderCompileFinished,
@@ -179,6 +191,8 @@ void ShaderBufferWindow::showCompileReport(bool ok, const QString& compilerLog)
     if (ok && compilerLog.isEmpty())
     {
         m_report->clear();
+        m_errorLine = 0;
+        m_jumpButton->setEnabled(false);
         m_status->setText(tr("Compiled. The output is showing this shader."));
         return;
     }
@@ -187,9 +201,92 @@ void ShaderBufferWindow::showCompileReport(bool ok, const QString& compilerLog)
     // translated: a driver's diagnostic with a line number is the single most useful thing in this
     // window, and paraphrasing it would lose the part that matters.
     m_report->setPlainText(compilerLog);
-    m_status->setText(ok ? tr("Compiled with warnings.")
-                         : tr("Compile FAILED. The previous shader is still rendering - fix the "
-                              "error below and compile again."));
+
+    // A line number is offered when one can be recognised, and its absence is not an error: some
+    // diagnostics name none, and inventing one would put the cursor somewhere arbitrary and look like
+    // a bug in the editor rather than a limitation of the message.
+    m_errorLine = shaderLogFirstErrorLine(compilerLog);
+    m_jumpButton->setEnabled(m_errorLine > 0);
+
+    if (m_errorLine > 0)
+    {
+        m_status->setText(ok ? tr("Compiled with warnings. First at line %1.").arg(m_errorLine)
+                             : tr("Compile FAILED at line %1. The previous shader is still rendering - "
+                                  "fix the error below and compile again.").arg(m_errorLine));
+        // Jumped to immediately rather than only on request: the user asked for a compile, and the
+        // first thing they want is to see the offending line. The button remains for going back after
+        // scrolling away.
+        jumpToLine(m_errorLine);
+    }
+    else
+    {
+        m_status->setText(ok ? tr("Compiled with warnings.")
+                             : tr("Compile FAILED. The previous shader is still rendering - fix the "
+                                  "error below and compile again."));
+    }
+}
+
+// The first line number mentioned in a compiler diagnostic, or 0 when none is recognisable.
+//
+// Deliberately loose, and tested separately (tools/settings-probe/shader-log-check.cpp) because the
+// formats differ per driver and this is the part most likely to be wrong:
+//
+//   Mesa    0:12(5): error: ...
+//   NVIDIA  0(12) : error C0000: ...
+//   Apple   ERROR: 0:12: ...
+//
+// They agree only that a line number appears among the first tokens, so this looks for a number in
+// that position rather than trying to match one vendor. Returning 0 means "no jump offered", which is
+// the honest answer: a wrong guess moves the cursor to an unrelated line and reads as a bug in the
+// editor rather than a limitation of the message.
+int shaderLogFirstErrorLine(const QString& compilerLog)
+{
+    // The longest line a shader is going to have. Also stops a large number in a driver's internal
+    // code being read as a line number.
+    constexpr int kMaxPlausibleLine = 100000;
+
+    const QStringList lines = compilerLog.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    for (const QString& raw : lines)
+    {
+        const QString line = raw.trimmed();
+
+        // "0:12(5): error" and "0:12: error" - the commonest shape, column second.
+        static const QRegularExpression colonForm(QStringLiteral("^\\d+\\s*:\\s*(\\d+)"));
+        // "0(12) : error C0000" - line in parentheses.
+        static const QRegularExpression parenForm(QStringLiteral("^\\d+\\s*\\(\\s*(\\d+)\\s*\\)"));
+        // "ERROR: 0:12:" and "WARNING: 12:" - a level prefix first.
+        static const QRegularExpression prefixedForm(
+            QStringLiteral("^(?:ERROR|WARNING)\\s*:\\s*\\d*\\s*:?\\s*(\\d+)\\s*[:(]"));
+
+        const QRegularExpression* forms[] = { &colonForm, &parenForm, &prefixedForm };
+        for (const QRegularExpression* re : forms)
+        {
+            if (const QRegularExpressionMatch m = re->match(line); m.hasMatch())
+            {
+                const int n = m.captured(1).toInt();
+                if (n > 0 && n <= kMaxPlausibleLine)
+                    return n;
+            }
+        }
+    }
+    return 0;
+}
+
+void ShaderBufferWindow::jumpToLine(int line)
+{
+    if (line <= 0)
+        return;
+
+    // 1-based from the compiler, 0-based here. Checked against the document rather than trusted: a
+    // diagnostic naming a line past the end would put the cursor at the end of the file, which reads
+    // as the editor having jumped somewhere wrong.
+    const int index = line - 1;
+    if (index < 0 || index >= m_editor->lines())
+        return;
+
+    m_editor->setCursorPosition(index, 0);
+    m_editor->ensureLineVisible(index);
+    m_editor->setFocus();
 }
 
 void ShaderBufferWindow::closeEvent(QCloseEvent* e)
