@@ -15,6 +15,7 @@
 
 #include "GraphicsLog.h"
 #include "GraphicsSettings.h"
+#include "GlslLexer.h"
 #include "../ShaderText.h"
 #include "sonicpiscintilla.h"
 #include "sonicpitheme.h"
@@ -23,7 +24,6 @@
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
-#include <QFontDatabase>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPlainTextEdit>
@@ -58,9 +58,12 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     setWindowTitle(tr("Sonic Pi - Shader Buffer"));
     setObjectName(QStringLiteral("ShaderBufferWindow"));
 
-    // A null lexer, deliberately: see the class comment. SonicPiScintilla guards every use of lexer()
-    // with a null check, so this yields the plain-text behaviour rather than a crash.
+    // GLSL highlighting, and - just as importantly - the editor's text font, which in Sonic Pi is
+    // supplied by the lexer rather than by the widget. See GlslLexer.h: the font rule is the same
+    // one the code buffers use.
+    m_lexer = new GlslLexer(m_theme, this);
     m_editor = new SonicPiScintilla(nullptr, m_theme, QStringLiteral("shader_buffer"), false);
+    m_editor->setLexer(m_lexer);
 
     m_compileButton = new QPushButton(tr("Compile"), this);
     QPushButton* revertButton = new QPushButton(tr("Revert"), this);
@@ -78,7 +81,7 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     m_report = new QPlainTextEdit(this);
     m_report->setReadOnly(true);
     m_report->setLineWrapMode(QPlainTextEdit::NoWrap);
-    m_report->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    m_report->setFont(GlslLexer::editorFont(m_theme));
     m_report->setPlaceholderText(tr("The compiler's output appears here. Build problems are shown "
                                     "exactly as the driver reported them, including line numbers."));
 
@@ -111,17 +114,56 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     // The render thread's verdict arrives here, queued from another thread.
     connect(m_renderThread, &GraphicsRenderThread::shaderCompileFinished,
             this, &ShaderBufferWindow::compileFinished);
-
     // Ctrl+Return compiles, matching the audio editor's Run and the habit of every shader tool. Also
     // available as a button, because a shortcut nobody knows about is not a feature.
     auto* compileShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Return), this);
     compileShortcut->setContext(Qt::WidgetWithChildrenShortcut);
     connect(compileShortcut, &QShortcut::activated, this, &ShaderBufferWindow::compile);
 
+    applyTheme();
     reloadFromDisk();
 }
 
 ShaderBufferWindow::~ShaderBufferWindow() = default;
+
+// The window's share of the application's look.
+//
+// Two separate mechanisms, and which one applies where is the whole point of this method:
+//
+//   * The STYLESHEET is the same string MainWindow applies to itself, so this window's buttons,
+//     labels, splitter and status line look like the rest of Sonic Pi rather than like a bare Qt
+//     window. MainWindow applies it to itself only (mainwindow.cpp, "appStyling"), which is why a
+//     top-level window needs its own copy of this call.
+//
+//   * The EDITOR'S colours and font come from the theme through the lexer, because in Sonic Pi an
+//     editor's text font is supplied by its lexer, not by the widget.
+//
+// WHAT IS DELIBERATELY NOT HERE: the GUI transparency setting. That is
+// MainWindow::changeGUITransparency(), which calls setWindowOpacity() on the main window - it is a
+// property of that window, not of the application or of its theme, so it neither reaches nor
+// should reach this one. A see-through shader editor would make a shader harder to read, and this
+// window exists for reading one. Nothing needs to be added to keep transparency out; adding it
+// would take a deliberate setWindowOpacity() call, and there must not be one.
+void ShaderBufferWindow::applyTheme()
+{
+    if (m_theme)
+        setStyleSheet(m_theme->getAppStylesheet());
+
+    if (m_lexer)
+        m_lexer->applyTheme();
+
+    // The report pane is compiler output, shown in the same face and size as the code it is about.
+    if (m_report)
+        m_report->setFont(GlslLexer::editorFont(m_theme));
+
+    if (m_editor)
+    {
+        // A lexer colour change only takes effect on the text already on screen when the styles are
+        // re-applied to it; without this the editor keeps the old colours until it is reloaded.
+        m_editor->recolor();
+        m_editor->setMarginsFont(GlslLexer::editorFont(m_theme));
+    }
+}
 
 QString ShaderBufferWindow::shaderFilePath() const
 {

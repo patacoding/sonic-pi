@@ -31,6 +31,8 @@ class SonicPiTheme;
 namespace SonicPi
 {
 
+class GlslLexer;
+
 // The shader editor: a text pane, a Compile action, and the compiler's own answer.
 //
 // SAVING AND COMPILING ARE ONE ACTION, deliberately. There is no useful state in which the file on
@@ -45,10 +47,11 @@ namespace SonicPi
 // on the GUI thread, so the request goes one way and the verdict comes back through
 // shaderCompileFinished.
 //
-// Text editing is deliberately plain: no GLSL lexer, because QScintilla has none and a lexer for
-// another language highlighting GLSL wrongly would be worse than no highlighting. The editor is the
-// audio editor's own widget class so that theme, zoom, key bindings and accessibility come for free,
-// and so that adding a real GLSL lexer later is a one-line change rather than a rewrite.
+// Text editing is deliberately plain in behaviour - no autocompletion, no API docs - but it IS
+// highlighted: GLSL through GlslLexer, which subclasses the QScintilla C++ lexer already in the
+// tree rather than adding a lexer to the vendored fork (see GlslLexer.h for why that matters). The
+// editor is the audio editor's own widget class, so key bindings, zoom and accessibility come for
+// free, and the text font arrives through the lexer exactly as it does for the code buffers.
 class ShaderBufferWindow : public QWidget
 {
     Q_OBJECT
@@ -63,6 +66,11 @@ public:
     ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread* renderThread, QSettings* settings,
                        QWidget* parent = nullptr);
     ~ShaderBufferWindow() override;
+
+    // Re-read the look from the theme: the application stylesheet, the editor's syntax colours and
+    // the text fonts. Public because MainWindow applies a new theme to the whole application and
+    // this window is not a child of it, so it has to be told. Called on construction.
+    void applyTheme();
 
     // Load the shader from disk into the editor. Called on creation and by Revert.
     void reloadFromDisk();
@@ -117,6 +125,8 @@ private:
     QSettings* m_settings = nullptr;
 
     SonicPiScintilla* m_editor = nullptr;
+    // Owned by the editor (set on it), and held here so applyTheme() can re-colour it.
+    GlslLexer* m_lexer = nullptr;
     QPlainTextEdit* m_report = nullptr;
     QLabel* m_status = nullptr;
     QPushButton* m_compileButton = nullptr;

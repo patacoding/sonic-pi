@@ -5052,6 +5052,12 @@ void MainWindow::updateColourTheme()
         tutorialPane->applyTheme();
     if (quickstartPane)
         quickstartPane->applyTheme();
+    // The shader editor is a top-level window rather than a child of this one, so it does not
+    // inherit the stylesheet set below: it gets the same string, and its syntax colours and text
+    // font, through its own applyTheme(). Transparency is deliberately not part of this - it is a
+    // property of the main window (see changeGUITransparency), not of the theme.
+    if (graphicsShaderWindow)
+        graphicsShaderWindow->applyTheme();
     if (southTabs)
         applySouthTabIcons();
 
