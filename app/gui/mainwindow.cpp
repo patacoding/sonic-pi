@@ -90,6 +90,7 @@
 #include "graphics/rendering/GraphicsRenderer.h"
 #include "graphics/ui/GraphicsWindow.h"
 #include "graphics/ui/GraphicsPreviewWindow.h"
+#include "graphics/ui/ShaderBufferWindow.h"
 #include "widgets/sonicpitooltip.h"
 #include <QFileOpenEvent>
 
@@ -2733,6 +2734,12 @@ void MainWindow::honourPrefs()
     if (graphicsRenderThread)
         applyGraphicsConfig();
 
+    // Make sure the editable shader exists before anything asks to open or compile it. Done once at
+    // boot rather than on first use, so the file the editor writes and the renderer reads exists
+    // before either has a chance to disagree about which one that is.
+    if (graphicsRenderThread)
+        SonicPi::GraphicsSettings::ensureShaderFile(QStringLiteral("default.frag"));
+
     changeShowAutoCompletion();
     changeShowCompletionHelp();
     changeShowContext();
@@ -4108,6 +4115,53 @@ void MainWindow::askForCustomFrameRate()
     SonicPi::GraphicsLog::info(QStringLiteral("menu: frame rate -> %1Hz").arg(hz));
     SonicPi::GraphicsSettings::setFrameCapHz(hz);
     applyGraphicsConfig();
+}
+
+// Open the shader editor.
+//
+// Created lazily and kept: the editor holds whatever the user has typed, and rebuilding it on every
+// open would throw that away - which for a text editor is indistinguishable from losing work.
+//
+// The file is seeded before the window is constructed, so the editor always has something real to
+// open. Seeding on demand inside the window would make the first open behave differently from the
+// second, and a missing file would look like a bug in the editor rather than a first run.
+void MainWindow::showShaderBuffer()
+{
+    if (!graphicsShaderWindow)
+    {
+        // Both must exist first: the editor needs the theme and the render thread, and the render
+        // thread needs the context that produces it. Reported rather than silently doing nothing,
+        // because a menu item that does nothing is worse than a menu item that is disabled.
+        if (!theme || !graphicsRenderThread)
+        {
+            SonicPi::GraphicsLog::warn(QStringLiteral("shader buffer: cannot open yet - theme or render "
+                                                      "thread is not ready"));
+            showStatusAndAnnounce(tr("The graphics renderer is not ready yet."), 3000);
+            return;
+        }
+
+        const QString seeded = SonicPi::GraphicsSettings::ensureShaderFile(QStringLiteral("default.frag"));
+        if (seeded.isEmpty())
+            SonicPi::GraphicsLog::warn(QStringLiteral("shader buffer: no shader file could be produced; "
+                                                      "the editor will show whatever it can read"));
+
+        graphicsShaderWindow = new SonicPi::ShaderBufferWindow(theme, graphicsRenderThread);
+        // A QWidget with no parent is a top-level window, which is what this is. Sized generously
+        // because it is an editor, not a panel.
+        graphicsShaderWindow->resize(760, 620);
+        connect(graphicsShaderWindow, &SonicPi::ShaderBufferWindow::closedByUser,
+                this, [this]() {
+                    // Hidden rather than destroyed, so the text survives closing the window. The same
+                    // reasoning as above: a closed editor that loses its contents is a data loss
+                    // dressed up as window management.
+                    graphicsShaderWindow->hide();
+                });
+        SonicPi::GraphicsLog::info(QStringLiteral("menu: created shader buffer window"));
+    }
+
+    graphicsShaderWindow->show();
+    graphicsShaderWindow->raise();
+    graphicsShaderWindow->activateWindow();
 }
 
 void MainWindow::setGraphicsSharedFrame(SonicPi::GraphicsSharedFrameSlot* slot)
@@ -5751,6 +5805,7 @@ const QList<ShortcutDef>& MainWindow::shortcutDefs()
     { "GraphicsFullscreen", QT_TR_NOOP("Toggle fullscreen for the graphics output"), "Ctrl+Shift+F", "Ctrl+Shift+F", "Ctrl+Shift+F", "Graphics", &MainWindow::graphicsFullscreenAct },
     { "GraphicsReloadShader", QT_TR_NOOP("Re-read the graphics shader from disk"), "Ctrl+Shift+R", "Ctrl+Shift+R", "Ctrl+Shift+R", "Graphics", &MainWindow::graphicsReloadShaderAct },
     { "GraphicsPreview", QT_TR_NOOP("Show or hide the graphics debug preview"), "Ctrl+Shift+P", "Ctrl+Shift+P", "Ctrl+Shift+P", "Graphics", &MainWindow::graphicsPreviewAct },
+    { "GraphicsShaderBuffer", QT_TR_NOOP("Open the shader editor"), "Ctrl+Shift+E", "Ctrl+Shift+E", "Ctrl+Shift+E", "Graphics", &MainWindow::graphicsShaderAct },
     { "CycleThemes", QT_TR_NOOP("Cycle through the available colour themes"), "ShiftMeta+M", "ShiftMeta+M", "ShiftMeta+M", "Visuals", &MainWindow::cycleThemesAct },
     { "Info", QT_TR_NOOP("Toggle information about Sonic Pi"), "Meta+n", "Meta+1", "Meta+1", "View", &MainWindow::infoAct },
 #if defined(Q_OS_MAC)
@@ -6605,6 +6660,9 @@ void MainWindow::createToolBar()
         showGraphicsPreview(on);
     });
 
+    graphicsShaderAct = new QAction(tr("Shader Buffer..."), this);
+    connect(graphicsShaderAct, &QAction::triggered, this, [this]() { showShaderBuffer(); });
+
     toolBar->addAction(scopeAct);
     toolBar->addAction(graphicsOutAct);
     toolBar->addAction(infoAct);
@@ -6815,6 +6873,7 @@ void MainWindow::createToolBar()
     graphicsMenu = menuBar()->addMenu(tr("Graphics"));
     graphicsMenu->addAction(graphicsOutAct);
     graphicsMenu->addAction(graphicsPreviewAct);
+    graphicsMenu->addAction(graphicsShaderAct);
     graphicsMenu->addAction(graphicsFullscreenAct);
     graphicsMenu->addSeparator();
 

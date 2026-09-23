@@ -19,6 +19,13 @@
 #include <QRegularExpression>
 #include <QSettings>
 
+// Where the shader files live in the source tree. Set by CMake to the source-tree copy; the user copy
+// takes priority so the shipped files are never edited in place. Defined here rather than in
+// GraphicsRenderer because this module now owns the shader paths - see shaderPath().
+#ifndef GRAPHICS_SHADER_DIR
+#define GRAPHICS_SHADER_DIR ""
+#endif
+
 namespace SonicPi
 {
 namespace GraphicsSettings
@@ -245,6 +252,70 @@ bool parseFrameRateHz(const QString& text, int* hzOut)
     if (hzOut)
         *hzOut = hz;
     return true;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Shader files
+// ---------------------------------------------------------------------------------------------
+
+QString shaderDirectoryPath()
+{
+    QString home = qEnvironmentVariable("SONIC_PI_HOME");
+    if (home.isEmpty())
+        home = qEnvironmentVariable("USERPROFILE");
+    if (home.isEmpty())
+        home = QDir::homePath();
+
+    return home + QStringLiteral("/.sonic-pi/graphics/shaders");
+}
+
+QString writableShaderPath(const QString& fileName)
+{
+    return shaderDirectoryPath() + QLatin1Char('/') + fileName;
+}
+
+QString shaderPath(const QString& fileName)
+{
+    // User copy first: this is the one to edit, and editing it cannot dirty the source tree.
+    const QString userPath = writableShaderPath(fileName);
+    if (QFile::exists(userPath))
+        return userPath;
+
+    // Then the copy shipped with the source, so a fresh checkout works without a copying step.
+    const QString shipped = QStringLiteral(GRAPHICS_SHADER_DIR) + QLatin1Char('/') + fileName;
+    if (QFile::exists(shipped))
+        return shipped;
+
+    return QString();
+}
+
+QString ensureShaderFile(const QString& fileName)
+{
+    const QString target = writableShaderPath(fileName);
+    if (QFile::exists(target))
+        return target;   // already the user's, and left exactly as they left it
+
+    const QString shipped = QStringLiteral(GRAPHICS_SHADER_DIR) + QLatin1Char('/') + fileName;
+    if (!QFile::exists(shipped))
+    {
+        GraphicsLog::warn(QStringLiteral("shader: no shipped copy of %1 to seed from (looked in %2)")
+                              .arg(fileName, shipped));
+        return QString();
+    }
+
+    QDir().mkpath(shaderDirectoryPath());
+    if (!QFile::copy(shipped, target))
+    {
+        GraphicsLog::warn(QStringLiteral("shader: could not copy %1 to %2; the editor will open the "
+                                         "shipped copy instead")
+                              .arg(shipped, target));
+        return QString();
+    }
+
+    // Reported because this is the moment the file the user edits comes into existence, and knowing
+    // which directory that is saves looking it up.
+    GraphicsLog::info(QStringLiteral("shader: seeded %1 from the shipped copy").arg(target));
+    return target;
 }
 
 } // namespace GraphicsSettings

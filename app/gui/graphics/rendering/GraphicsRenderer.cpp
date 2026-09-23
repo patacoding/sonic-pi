@@ -13,6 +13,7 @@
 
 #include "GraphicsRenderer.h"
 #include "GraphicsLog.h"
+#include "GraphicsSettings.h"
 #include "GraphicsTarget.h"
 
 #include <QDir>
@@ -42,9 +43,9 @@ int toByte(float v)
     return int(std::lround(double(v) * 255.0));
 }
 
-// Where the shader files live. GRAPHICS_SHADER_DIR is set by CMake to the
-// source-tree copy; the user copy takes priority so the shipped files are never
-// edited in place.
+// GRAPHICS_SHADER_DIR is defined by CMake for every target in this directory, so the same fallback
+// definition is repeated here only for the case where this file is compiled without it. The shader
+// PATHS themselves are owned by GraphicsSettings, which is what resolveShaderPath() delegates to.
 #ifndef GRAPHICS_SHADER_DIR
 #define GRAPHICS_SHADER_DIR ""
 #endif
@@ -253,28 +254,21 @@ bool GraphicsRenderer::createQuadGeometry()
 
 QString GraphicsRenderer::resolveShaderPath(const QString& fileName) const
 {
-    QString home = qEnvironmentVariable("SONIC_PI_HOME");
-    if (home.isEmpty())
-        home = qEnvironmentVariable("USERPROFILE");
-    if (home.isEmpty())
-        home = QDir::homePath();
-
-    // User copy first: this is the one to edit, and editing it cannot dirty the
-    // source tree.
-    const QString userDir = home + QStringLiteral("/.sonic-pi/graphics/shaders");
-    const QString userPath = userDir + QLatin1Char('/') + fileName;
-    if (QFile::exists(userPath))
-        return userPath;
-
-    // Fall back to the copy shipped with the source, so a fresh checkout works
-    // without a copying step.
-    const QString shipped = QStringLiteral(GRAPHICS_SHADER_DIR) + QLatin1Char('/') + fileName;
-    if (QFile::exists(shipped))
-        return shipped;
-
-    GraphicsLog::error(QStringLiteral("renderer: shader '%1' not found. Looked in:\n  %2\n  %3")
-                           .arg(fileName, userPath, shipped));
-    return QString();
+    // Delegated, not implemented here.
+    //
+    // The resolution rule - user copy first, shipped copy second - is shared with the shader editor,
+    // which writes the file this reads. Two implementations would eventually disagree, and the
+    // symptom would be an editor editing a file that is not the one being rendered: indistinguishable
+    // from "my changes do nothing". One owner, in GraphicsSettings.
+    const QString path = GraphicsSettings::shaderPath(fileName);
+    if (path.isEmpty())
+    {
+        GraphicsLog::error(QStringLiteral("renderer: shader '%1' not found. Looked in:\n  %2\n  %3")
+                               .arg(fileName,
+                                    GraphicsSettings::writableShaderPath(fileName),
+                                    QStringLiteral(GRAPHICS_SHADER_DIR) + QLatin1Char('/') + fileName));
+    }
+    return path;
 }
 
 GraphicsCompileResult GraphicsRenderer::buildProgram(const QString& vertexFile,

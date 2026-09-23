@@ -99,5 +99,30 @@ bool parseOutputSize(const QString& text, QSize* sizeOut);
 // Parse a frame rate as a single positive integer, at most kMaxFrameRateHz.
 bool parseFrameRateHz(const QString& text, int* hzOut);
 
+// Where the editable shaders live, and how a missing one is produced.
+//
+// These were private to GraphicsRenderer, which was fine while only the renderer cared. A shader
+// editor makes the path a SHARED fact: the editor writes the file and the renderer reads it, and if
+// the two ever resolved it differently the editor would be editing a file nobody renders - which
+// would look exactly like "my changes do nothing". So the path has one owner, here, beside the
+// settings that already belong to this feature.
+QString shaderDirectoryPath();
+
+// The file to READ for a given role. The user's copy when it exists, otherwise the shipped copy, and
+// an empty string when neither is present.
+QString shaderPath(const QString& fileName);
+
+// The path the EDITOR should write to, whether or not the file exists yet: always the user's copy,
+// never the shipped one. Writing into the source tree is not something this feature does.
+QString writableShaderPath(const QString& fileName);
+
+// Make sure the editor has something to open: when the user's copy is missing, copy the shipped one
+// into place. Returns the writable path, or an empty string when there is no shipped copy to seed
+// from.
+//
+// Called at startup rather than on first use, so that "the file I am editing" exists before anything
+// asks for it and cannot be raced into existence twice.
+QString ensureShaderFile(const QString& fileName);
+
 } // namespace GraphicsSettings
 } // namespace SonicPi

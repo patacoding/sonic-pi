@@ -112,6 +112,8 @@ set(GRAPHICS_SOURCES
     ${QTAPP_ROOT}/graphics/ui/GraphicsTextureView.h
     ${QTAPP_ROOT}/graphics/ui/GraphicsPreviewWindow.cpp
     ${QTAPP_ROOT}/graphics/ui/GraphicsPreviewWindow.h
+    ${QTAPP_ROOT}/graphics/ui/ShaderBufferWindow.cpp
+    ${QTAPP_ROOT}/graphics/ui/ShaderBufferWindow.h
     )
 
 set(EDITOR_SOURCES

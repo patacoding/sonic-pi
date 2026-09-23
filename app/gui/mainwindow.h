@@ -50,6 +50,7 @@ namespace SonicPi
 // held here, so forward declarations keep the OpenGL headers out of this one.
 class GraphicsWindow;
 class GraphicsPreviewWindow;
+class ShaderBufferWindow;
 class GraphicsRenderThread;
 class GraphicsSharedFrameSlot;
 } // namespace SonicPi
@@ -908,6 +909,14 @@ private:
     // numbers over it. A separate window rather than a pane here, so that nothing about
     // rendering lives in this class - see showGraphicsPreview().
     QAction *graphicsPreviewAct;
+    // Open the shader editor. Not a checkable show/hide toggle like the output windows: it is a
+    // development tool opened when the shader is to be changed, and a tick mark on it would be one more
+    // piece of state to keep in step with reality for no benefit.
+    QAction *graphicsShaderAct = nullptr;
+    // The shader editor, created lazily and owned here. Null until first opened.
+    SonicPi::ShaderBufferWindow* graphicsShaderWindow = nullptr;
+    // Open, or bring forward, the shader editor.
+    void showShaderBuffer();
     // Output resolution and frame rate, as submenus of the Graphics menu.
     //
     // A submenu in the menu that already exists, rather than a settings pane or a
