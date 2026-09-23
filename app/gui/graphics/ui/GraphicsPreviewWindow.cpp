@@ -16,8 +16,10 @@
 
 #include <QCloseEvent>
 #include <QDateTime>
+#include <QFontMetrics>
 #include <QKeyEvent>
 #include <QOpenGLContext>
+#include <QPainter>
 #include <QSurfaceFormat>
 
 namespace SonicPi
@@ -25,10 +27,18 @@ namespace SonicPi
 
 namespace
 {
-// How often the numbers are written to the log. Not per frame: a figure that changes 60
-// times a second cannot be read, and it would bury everything else in the file. Five
-// times a second is fast enough to watch a number settle and slow enough to read.
-constexpr qint64 kStatsIntervalMs = 200;
+// How often the overlay image is rebuilt.
+//
+// The frame rate is the number the user watches, so it has to move fast enough to look live,
+// but the statistics behind it only update once a second, and redrawing the image is a
+// QPainter pass plus a texture upload. A quarter of a second reads as live without doing
+// that work sixty times a second for a number that has not changed.
+constexpr qint64 kOverlayIntervalMs = 250;
+
+// The overlay's own scale, in device pixels so the glyphs stay sharp on a high-DPI screen
+// without any scaling arithmetic.
+constexpr int kPadding = 6;
+constexpr int kFontPx = 15;
 } // namespace
 
 GraphicsPreviewWindow::GraphicsPreviewWindow(QWindow* parent)
@@ -84,19 +94,26 @@ void GraphicsPreviewWindow::initializeGL()
                        : (context()->shareGroup() == group->shareGroup()
                               ? QStringLiteral("matches Qt's global group")
                               : QStringLiteral("DIFFERENT from Qt's global group"))));
-    GraphicsLog::info(QStringLiteral("preview: ready, consumer slot %1 of %2; "
-                                     "stats are written to this log, not drawn in the window")
+
+    // One line at startup and then quiet. The frame rate is shown IN the window, so there is
+    // nothing left to say per second: this window's own statistics are detail about a viewer,
+    // and detail that repeats is what made the log unreadable. See reportStats()'s absence -
+    // it was removed rather than slowed down.
+    GraphicsLog::info(QStringLiteral("preview: ready, consumer slot %1 of %2, %3x%4; "
+                                     "live fps is drawn in the window")
                           .arg(int(GraphicsConsumer::Preview))
-                          .arg(int(GraphicsConsumer::Count)));
+                          .arg(int(GraphicsConsumer::Count))
+                          .arg(width())
+                          .arg(height()));
 }
 
 void GraphicsPreviewWindow::resizeGL(int w, int h)
 {
-    Q_UNUSED(w);
-    Q_UNUSED(h);
-    // Nothing to rebuild: the render target is the user's fixed output resolution, and a
-    // resize only changes how large the fitted copy of it is. The repaint is all that is
-    // needed.
+    // Unlike the frame rate, a size change IS worth a log entry: it changes what is being
+    // displayed and when something looks wrong on screen this is the first thing worth
+    // knowing. Also written by the output window, for the same reason.
+    GraphicsLog::info(QStringLiteral("preview: resized to %1x%2 (logical)").arg(w).arg(h));
+    QOpenGLWindow::resizeGL(w, h);
     update();
 }
 
@@ -133,52 +150,62 @@ QRect GraphicsPreviewWindow::fittedRect(const QSize& frame, const QSize& surface
     return QRect((surface.width() - w) / 2, (surface.height() - h) / 2, w, h);
 }
 
-void GraphicsPreviewWindow::reportStats()
+// Build the overlay image from the render thread's figures.
+//
+// Everything shown comes from the producer's snapshot; this window measures nothing itself.
+// The one comparison made here is equality against the target, and it is made only to choose
+// a colour - the render thread has already decided whether the target is being met and
+// publishes that as belowTarget, so the two cannot disagree about it.
+void GraphicsPreviewWindow::refreshFpsOverlay()
 {
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    if (m_lastReportMs == 0)
-        m_lastReportMs = now;
-    if (now - m_lastReportMs < kStatsIntervalMs)
+    if (now - m_lastOverlayMs < kOverlayIntervalMs)
         return;
-
-    const qint64 elapsed = now - m_lastReportMs;
-    m_lastReportMs = now;
+    m_lastOverlayMs = now;
 
     if (!m_renderThread)
         return;
 
     const GraphicsFrameStats s = m_renderThread->frameStats();
-    ++m_statsReportCount;
+    if (s.frameCapHz <= 0)
+        return;   // no target to show against
 
-    // Written once in full, then the paints-per-report field alone, so the steady state
-    // does not bury the file. The full form is repeated every 5th report (once a second)
-    // so a reader joining late always catches up quickly.
-    // "Below target" is the only condition worth acting on, so it is called out.
-    const bool below = s.frameCapHz > 0 && s.fps > 0.0 && s.fps < double(s.frameCapHz) * 0.97;
+    const QString fpsText = QStringLiteral("%1").arg(s.fps, 0, 'f', 1);
+    const QString targetText = QStringLiteral("/ %1 fps").arg(s.frameCapHz);
 
-    GraphicsLog::info(QStringLiteral("preview: %1 | target %2 fps, actual %3 fps%4 | "
-                                     "frame ms last %5 worst %6 | "
-                                     "wait us avg %7 worst %8 | "
-                                     "readers %9 | slow %10 fail %11 | "
-                                     "paints %12 in %13ms | frames %14%15")
-                          .arg(m_statsReportCount)
-                          .arg(s.frameCapHz > 0 ? QString::number(s.frameCapHz)
-                                                : QStringLiteral("auto"))
-                          .arg(s.fps, 0, 'f', 1)
-                          .arg(below ? QStringLiteral("  BELOW TARGET") : QString())
-                          .arg(s.lastFrameMs, 0, 'f', 2)
-                          .arg(s.worstFrameMs, 0, 'f', 2)
-                          .arg(s.consumerWaitAvgUs, 0, 'f', 1)
-                          .arg(s.consumerWaitWorstUs, 0, 'f', 1)
-                          .arg(s.targetCount)
-                          .arg(s.slowReaderCount)
-                          .arg(s.waitFailedCount)
-                          .arg(m_paintsSinceReport)
-                          .arg(elapsed)
-                          .arg(s.frames)
-                          .arg(s.hung ? QStringLiteral("  STOPPED (watchdog)")
-                                      : (s.loopRunning ? QString() : QStringLiteral("  STOPPED"))));
-    m_paintsSinceReport = 0;
+    // Rebuilt only when the text changes, so the common case costs a string comparison
+    // rather than a painter pass and a texture upload.
+    static const int kFpsDecimals = 1;
+    Q_UNUSED(kFpsDecimals);
+    if (fpsText == m_lastFpsText)
+        return;
+    m_lastFpsText = fpsText;
+
+    QFont font(QStringLiteral("Consolas"));
+    font.setPixelSize(kFontPx);
+    font.setStyleHint(QFont::Monospace);
+    font.setBold(true);
+
+    const QFontMetrics fm(font);
+    const int textW = qMax(fm.horizontalAdvance(fpsText), fm.horizontalAdvance(targetText));
+    const int lineH = fm.height();
+
+    QImage img(textW + kPadding * 2, lineH * 2 + kPadding * 2, QImage::Format_ARGB32);
+    img.fill(QColor(0, 0, 0, 170));
+
+    QPainter p(&img);
+    p.setFont(font);
+
+    // Green while the target is being met, amber when it is not. The threshold is the
+    // producer's, not this window's - see GraphicsFrameStats::belowTarget.
+    p.setPen(s.belowTarget ? QColor(255, 190, 70) : QColor(120, 255, 140));
+    p.drawText(kPadding, kPadding + fm.ascent(), fpsText);
+
+    p.setPen(QColor(210, 210, 210));
+    p.drawText(kPadding, kPadding + lineH + fm.ascent(), targetText);
+    p.end();
+
+    m_view.setOverlay(img);
 }
 
 void GraphicsPreviewWindow::paintGL()
@@ -187,8 +214,6 @@ void GraphicsPreviewWindow::paintGL()
     if (!f)
         return;
 
-    ++m_paintsSinceReport;
-
     // This window is a CONSUMER. It displays the render thread's frame and never draws a
     // shader of its own - a second thing able to draw the picture would be a second
     // producer, with its own clock and its own copy of every uniform.
@@ -196,15 +221,15 @@ void GraphicsPreviewWindow::paintGL()
     const QSize surface(qMax(1, int(width() * dpr)), qMax(1, int(height() * dpr)));
 
     // The whole surface first, so the letterbox margin is BLACK rather than whatever the
-    // previous frame left there. The margin has to be painted by someone, and black is
-    // what makes the fitted frame read as the whole picture.
+    // previous frame left there. The margin has to be painted by someone, and black is what
+    // makes the fitted frame read as the whole picture.
     f->glViewport(0, 0, surface.width(), surface.height());
     f->glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     f->glClear(GL_COLOR_BUFFER_BIT);
 
     // Fit the frame to the window. Until a frame has been seen there is nothing to fit to,
-    // so the target size is used - it is the same size, and it means the picture is
-    // correctly placed from the very first paint rather than jumping on the second.
+    // so the target size is used - it is the same size, and it means the picture is correctly
+    // placed from the very first paint rather than jumping on the second.
     QSize frame = m_view.lastFrameSize();
     if (frame.isEmpty() && m_renderThread)
         frame = m_renderThread->renderTargetSize();
@@ -219,26 +244,20 @@ void GraphicsPreviewWindow::paintGL()
         m_view.drawSharedFrame();
     }
 
-    reportStats();
+    refreshFpsOverlay();
 
     // Ask for the next repaint, ALWAYS.
     //
     // This was briefly gated on the frame index changing, to stop the window repainting
     // faster than the producer draws. That was a serious bug, and it presented as the exact
-    // opposite of waste: the picture FROZE.
+    // opposite of waste: the picture FROZE, because drawSharedFrame() updates the view's frame
+    // index on every paint, so on the second paint of a frame the condition was already false
+    // and no further update was requested.
     //
-    // Why: drawSharedFrame() updates the view's frame index on every paint, so on the
-    // second paint of the same frame the index was already equal to the one recorded when
-    // the previous update was requested. The condition was false, no further update was
-    // requested, and the loop stopped dead after one frame.
-    //
-    // The general rule it broke: requesting the next frame must never be conditional on
-    // state that drawing the current frame changes.
-    //
-    // requestUpdate() is the right call here precisely BECAUSE it coalesces. Asking every
-    // time is how it is meant to be used; the platform decides how many of those become
-    // paints. Being asked too often means a frame delivered too often; being asked
-    // conditionally means a stopped window.
+    // The general rule it broke: requesting the next frame must never be conditional on state
+    // that drawing the current frame changes. requestUpdate() is right precisely BECAUSE it
+    // coalesces - asking every time is how it is meant to be used, and the platform decides
+    // how many requests become paints.
     requestUpdate();
 }
 

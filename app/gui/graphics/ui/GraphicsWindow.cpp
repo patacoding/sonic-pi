@@ -44,6 +44,11 @@ GraphicsWindow::GraphicsWindow(QWindow* parent)
     fmt.setStencilBufferSize(0);
     fmt.setSwapInterval(1);
     setFormat(fmt);
+
+    // A screen change is the other way the display's refresh rate can change, and Qt reports
+    // it directly. Connected here rather than relied on via the move/fullscreen paths, which
+    // only cover the changes this class causes itself.
+    connect(this, &QWindow::screenChanged, this, [this](QScreen*) { reportDisplayRefresh(); });
 }
 
 GraphicsWindow::~GraphicsWindow()
@@ -64,8 +69,40 @@ void GraphicsWindow::setRenderThread(GraphicsRenderThread* thread)
 {
     // Stored, not used to set a size: the window does not decide the output
     // resolution. It is kept so the window can report which render target it is
-    // displaying.
+    // displaying, and so it can tell the render thread what this display can show.
     m_renderThread = thread;
+    reportDisplayRefresh();
+}
+
+// Tell the render thread what this window's display can actually show.
+//
+// The render thread cannot work this out for itself: it renders offscreen, so nothing
+// throttles its loop to a display, and the screen is a GUI-thread object that does not exist
+// when the thread starts. This window is the only thing that knows.
+//
+// Reported on every placement as well as at startup, because QScreen::refreshRate() belongs
+// to the screen the window is on and moving the window is the normal way to change it.
+//
+// Why it matters: without it, a request for 240Hz was met exactly - 240.3 fps, logged as
+// healthy - on a 165Hz panel. The frames were really produced and the screen really could
+// not show them, so the honest answer to "what rate am I getting" is bounded by the display.
+void GraphicsWindow::reportDisplayRefresh()
+{
+    if (!m_renderThread)
+        return;
+
+    QScreen* s = screen();
+    if (!s)
+        return;
+
+    const qreal hz = s->refreshRate();
+    if (hz <= 0.0)
+        return;
+
+    m_renderThread->setDisplayRefreshHz(int(qRound(hz)));
+    GraphicsLog::info(QStringLiteral("window: display on %1 reports %2Hz")
+                          .arg(s->name())
+                          .arg(int(qRound(hz))));
 }
 
 void GraphicsWindow::initializeGL()
@@ -122,8 +159,12 @@ void GraphicsWindow::resizeGL(int w, int h)
     // Nothing to rebuild: the render target is the fixed output resolution and the
     // window only shows a crop of it, so a resize changes what is visible rather
     // than what is rendered. The repaint is all that is needed.
-    Q_UNUSED(w);
-    Q_UNUSED(h);
+    //
+    // Logged, because a size change IS worth an entry: it changes what is on screen and it is
+    // the first thing worth knowing when the picture does not look right. This is the kind of
+    // entry the log is for - a fact that changed - as opposed to the once-a-second figures
+    // that were removed.
+    GraphicsLog::info(QStringLiteral("window: resized to %1x%2 (logical)").arg(w).arg(h));
     update();
 }
 
@@ -199,8 +240,19 @@ void GraphicsWindow::paintGL()
     // Timed by hand rather than through GraphicsLog::throttled(), which suppresses by
     // message CONTENT - a message carrying a frame number differs every frame, so
     // nothing is ever suppressed and the log gets one line per frame.
+    //
+    // Once a minute, reduced from once a second and then from once per five seconds.
+    //
+    // This line is diagnostic detail about a VIEWER: how often it repainted, which buffers it
+    // saw. It is not as important as whether the requested frame rate is being met, which is
+    // now drawn in the debug window's corner, and detail that repeats is what made the log
+    // unreadable - three lines a second of figures that had not changed.
+    //
+    // What it still catches is the failure nothing else would: a window that has STOPPED
+    // repainting stops advancing the frame number, and this is where that shows up.
+    constexpr qint64 kReportIntervalMs = 60000;
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    if (now - m_lastFrameReportMs >= 1000)
+    if (now - m_lastFrameReportMs >= kReportIntervalMs)
     {
         const qint64 elapsed = m_lastFrameReportMs == 0 ? 0 : (now - m_lastFrameReportMs);
         m_lastFrameReportMs = now;
@@ -308,6 +360,7 @@ QScreen* GraphicsWindow::showOnNextScreen()
     }
 
     GraphicsLog::info(QStringLiteral("window moved to screen: %1").arg(describeOutput()));
+    reportDisplayRefresh();
     return next;
 }
 
@@ -334,6 +387,7 @@ bool GraphicsWindow::enterFullscreen(QScreen* target)
 
     m_fullscreen = true;
     GraphicsLog::info(QStringLiteral("window fullscreen on: %1").arg(describeOutput()));
+    reportDisplayRefresh();
     return m_fullscreen;
 }
 
@@ -380,6 +434,7 @@ void GraphicsWindow::leaveFullscreen()
                           .arg(height())
                           .arg(x())
                           .arg(y()));
+    reportDisplayRefresh();
 }
 
 QString GraphicsWindow::describeOutput() const

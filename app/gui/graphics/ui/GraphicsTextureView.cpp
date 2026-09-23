@@ -198,6 +198,21 @@ bool GraphicsTextureView::drawSharedFrame()
     m_lastFrameSize = shared.size;
     m_lastFrameIndex = shared.frameIndex;
     m_lastTargetIndex = shared.targetIndex;
+
+    // UNCONDITIONAL, and that is a fix rather than a style choice.
+    //
+    // This used to read `if (m_overlayTexture != 0) drawOverlay();`, which can never succeed
+    // the first time: the texture is created INSIDE drawOverlay(), so gating the call on the
+    // texture existing means the overlay is never built, never uploaded and never drawn. The
+    // symptom was "the numbers never appear" while the log reported the overlay image being
+    // constructed correctly - the code path ran and nothing reached the screen.
+    //
+    // The general lesson, which is why it is written here rather than only in a commit:
+    // "the object was built" and "it was presented" are different assertions, and only the
+    // second one is settled by looking. drawOverlay() decides for itself whether there is
+    // anything to draw.
+    drawOverlay();
+
     return true;
 }
 
@@ -238,6 +253,128 @@ bool GraphicsTextureView::blitTexture(GLuint texture)
     m_vao->release();
     m_program->release();
     return true;
+}
+
+void GraphicsTextureView::setOverlay(const QImage& image)
+{
+    if (image.isNull())
+    {
+        if (m_overlayTexture != 0)
+        {
+            QOpenGLContext* ctx = QOpenGLContext::currentContext();
+            QOpenGLFunctions* f = ctx ? ctx->functions() : nullptr;
+            if (f)
+            {
+                f->glDeleteTextures(1, &m_overlayTexture);
+                m_overlayTexture = 0;
+            }
+        }
+        m_overlayImage = QImage();
+        m_overlayDirty = false;
+        return;
+    }
+
+    m_overlayImage = image;
+    m_overlayDirty = true;
+}
+
+void GraphicsTextureView::drawOverlay()
+{
+    if (m_overlayImage.isNull())
+        return;
+
+    QOpenGLContext* ctx = QOpenGLContext::currentContext();
+    QOpenGLFunctions* f = ctx ? ctx->functions() : nullptr;
+    if (!f || !m_program || !m_vao || !m_vbo)
+        return;
+
+    if (m_overlayDirty || m_overlayTexture == 0)
+    {
+        if (m_overlayTexture == 0)
+            f->glGenTextures(1, &m_overlayTexture);
+        if (m_overlayTexture == 0)
+            return;
+
+        // ARGB32 on a little-endian machine is BGRA byte order, which is what GL_BGRA wants.
+        QImage src = (m_overlayImage.format() == QImage::Format_ARGB32)
+                         ? m_overlayImage
+                         : m_overlayImage.convertToFormat(QImage::Format_ARGB32);
+
+        // Flipped vertically, and this is not optional.
+        //
+        // A QImage's row 0 is its TOP row; a GL texture's row 0 is its BOTTOM row, because v=0
+        // is the bottom in GL's convention. Uploading the image as-is therefore presents it
+        // upside down, which for text reads as mirrored glyphs stacked in the wrong order -
+        // reported exactly that way the first time this overlay was seen.
+        //
+        // Done here rather than with flipped texture coordinates in the shader so that one
+        // convention (GL's) holds everywhere: the shader, whether it is sampling the frame or
+        // this image, is the same shader doing the same thing, and the difference between a
+        // QImage and a GL texture is resolved where the QImage is.
+        src = src.mirrored(false, true);
+
+        f->glBindTexture(GL_TEXTURE_2D, m_overlayTexture);
+        if (src.bytesPerLine() == src.width() * 4)
+        {
+            f->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, src.width(), src.height(), 0,
+                            GL_BGRA, GL_UNSIGNED_BYTE, src.constBits());
+        }
+        else
+        {
+            // Allocate first, then fill row by row honouring the stride, so a padded QImage
+            // cannot ship its padding as pixels.
+            f->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, src.width(), src.height(), 0,
+                            GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
+            for (int y = 0; y < src.height(); ++y)
+            {
+                f->glTexSubImage2D(GL_TEXTURE_2D, 0, 0, y, src.width(), 1,
+                                   GL_BGRA, GL_UNSIGNED_BYTE, src.constScanLine(y));
+            }
+        }
+        // 1:1 with itself, so nearest keeps the glyph edges exact rather than blurring them.
+        f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        m_overlayDirty = false;
+    }
+
+    // Positioned in the viewport's top-left corner, and clamped so it cannot be pushed
+    // off-screen by a viewport shorter than the image - a top edge calculated as
+    // vp[1] + vp[3] - imgH goes below the viewport's bottom when the image is taller than
+    // it, and every pixel is then discarded, which looks exactly like "never drawn".
+    GLint vp[4] = { 0, 0, 0, 0 };
+    f->glGetIntegerv(GL_VIEWPORT, vp);
+
+    const int imgW = m_overlayImage.width();
+    const int imgH = m_overlayImage.height();
+    constexpr int kInset = 8;
+    const int x = qBound(vp[0], vp[0] + kInset, vp[0] + qMax(0, vp[2] - imgW));
+    const int yTop = qBound(vp[1], vp[1] + vp[3] - kInset - imgH, vp[1] + vp[3]);
+
+    f->glEnable(GL_BLEND);
+    f->glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    f->glViewport(x, yTop, imgW, imgH);
+    f->glActiveTexture(GL_TEXTURE0);
+    f->glBindTexture(GL_TEXTURE_2D, m_overlayTexture);
+    m_program->bind();
+    m_program->setUniformValue("u_texture", 0);
+    m_vao->bind();
+    m_vbo->bind();
+    m_program->enableAttributeArray(0);
+    m_program->setAttributeBuffer(0, GL_FLOAT, 0, 2, 2 * sizeof(float));
+    f->glDrawArrays(GL_TRIANGLES, 0, 6);
+    m_program->disableAttributeArray(0);
+    m_vbo->release();
+    m_vao->release();
+    m_program->release();
+
+    f->glDisable(GL_BLEND);
+
+    // Restore, so the caller is not left with the overlay's little rectangle as its drawing
+    // area.
+    f->glViewport(vp[0], vp[1], vp[2], vp[3]);
 }
 
 } // namespace SonicPi

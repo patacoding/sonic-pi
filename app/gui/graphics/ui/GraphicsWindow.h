@@ -143,6 +143,10 @@ private:
     // viewport onto the output, not a scaling surface.
     QRect cropRect() const;
 
+    // Tell the render thread what this window's screen can show, in Hz. Called whenever this
+    // window's placement changes, because that is when the answer can change.
+    void reportDisplayRefresh();
+
     // The sampling and the handoff, shared with every other consumer. See
     // GraphicsTextureView: this window owns only what makes it a window - its surface,
     // its size, and where it sits - while the view owns the display shader, the fence

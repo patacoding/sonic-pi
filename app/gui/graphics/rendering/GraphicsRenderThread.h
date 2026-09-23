@@ -61,6 +61,15 @@ struct GraphicsFrameStats
     quint64 waitFailedCount     = 0;    // glClientWaitSync refused the fence
     int     targetCount         = 0;    // how many targets are published
     int     frameCapHz          = 0;    // the user's ceiling, 0 when unset
+
+    // Whether the real rate has fallen short of the user's ceiling.
+    //
+    // The ceiling is how the user states an EXPECTATION; a rate above it is not news, so
+    // only the shortfall is reported. Decided by the render thread because it is the side
+    // that measures both numbers, so every surface that reports it reads one answer
+    // instead of each comparing the two and possibly disagreeing. Carries hysteresis -
+    // see where it is set, and why a rate sitting on the threshold must not flicker it.
+    bool    belowTarget         = false;
 };
 
 // The Graphics renderer's own thread, its own OpenGL context, and its frame loop.
@@ -122,6 +131,24 @@ public:
     // Set before start(); changing it later would need the loop to re-read it, and
     // nothing needs that yet.
     void setTargetFps(int fps) { m_targetFps = fps; }
+
+    // What the display the output window is on can actually show, in Hz. Zero means
+    // unknown.
+    //
+    // Reported by the output window, because this thread cannot know it: the window is
+    // created long after this thread starts, it can be moved between screens, and its screen
+    // is a GUI-thread object. The window is therefore the only thing that can answer.
+    //
+    // Why it matters at all: this thread renders OFFSCREEN, so its frame rate is its own
+    // loop's rate and nothing throttles it to a display. Measured here, a 240Hz cap was met
+    // exactly - 240.3 fps, reported as healthy - on a 165Hz panel, because the loop really
+    // was producing 240 frames a second; the screen simply could not show them. Reporting
+    // "on target" there is a false good-news message, and a user asking what rate they are
+    // getting was told a number they cannot see.
+    //
+    // Safe to call while the loop is running: the loop re-reads it once a second, at the
+    // same point it reports.
+    void setDisplayRefreshHz(int hz) { m_displayRefreshHz.store(hz, std::memory_order_relaxed); }
 
     bool contextIsValid() const { return m_contextOk; }
     QString rendererName() const { return m_renderer; }
@@ -300,6 +327,11 @@ private:
     std::atomic<double>    m_consumerWaitWorstUs{0.0};
     std::atomic<int>       m_targetCount{0};
     std::atomic<int>       m_frameCapHz{0};
+    // Latched, not recomputed by readers: see GraphicsFrameStats::belowTarget.
+    std::atomic<bool>      m_belowTarget{false};
+    // What the output window's display can show, or 0 when unknown. See
+    // setDisplayRefreshHz() for why an offscreen renderer cannot work this out itself.
+    std::atomic<int>       m_displayRefreshHz{0};
 
     // The requested and the actual render target size. Kept as plain ints in
     // atomics rather than a QSize because QSize is not lock-free to read

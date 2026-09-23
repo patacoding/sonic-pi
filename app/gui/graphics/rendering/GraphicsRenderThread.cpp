@@ -108,6 +108,7 @@ GraphicsFrameStats GraphicsRenderThread::frameStats() const
     s.waitFailedCount     = m_waitFailures;
     s.targetCount         = m_targetCount.load(std::memory_order_relaxed);
     s.frameCapHz          = m_frameCapHz.load(std::memory_order_relaxed);
+    s.belowTarget         = m_belowTarget.load(std::memory_order_relaxed);
     return s;
 }
 
@@ -502,12 +503,27 @@ void GraphicsRenderThread::run()
 
     // The frame interval to pace to, from the user's configured cap.
     //
-    // A cap rather than a fixed rate: the loop aims at this and no faster. The
-    // cap exists so that the renderer cannot monopolise the machine, because this
-    // is an optional feature running alongside an audio engine that must not
-    // stutter - see the priority note in the constructor.
-    const int capHz = m_targetFps > 0 ? m_targetFps : kDefaultFrameCapHz;
-    const qint64 intervalNs = 1000000000LL / capHz;
+    // The rate the loop paces to, which is NOT simply what the user asked for.
+    //
+    // It is also capped by what the display can show, once the output window has reported
+    // that. This thread renders offscreen, so nothing else throttles it to a display, and
+    // pacing above the refresh rate produces frames nobody can see while reporting a rate
+    // the user cannot observe. Measured before this cap existed: a 240Hz request was met -
+    // 240.3 fps, logged as healthy - on a 165Hz panel.
+    //
+    // Re-evaluated once a second inside the loop (the window may be moved to another
+    // screen, and it does not exist yet when this thread starts), so these are the initial
+    // values.
+    int capHz = m_targetFps > 0 ? m_targetFps : kDefaultFrameCapHz;
+    const int requestedHz = capHz;
+    qint64 intervalNs = 1000000000LL / capHz;
+
+    {
+        const int displayHz = m_displayRefreshHz.load(std::memory_order_relaxed);
+        if (displayHz > 0 && displayHz < capHz)
+            capHz = displayHz;
+        intervalNs = 1000000000LL / capHz;
+    }
     m_frameCapHz.store(capHz, std::memory_order_relaxed);
 
     // The spin window scales with the interval rather than being a fixed 2ms.
@@ -517,11 +533,14 @@ void GraphicsRenderThread::run()
     // the last part of the wait is spun. That part has to stay a small fraction of
     // the interval - a fixed 2ms against a 6.9ms interval (144Hz) throws away most
     // of the frame, and the spin would dominate.
-    const qint64 spinWindowNs = qMin(qint64(2000000), intervalNs / 8);
+    qint64 spinWindowNs = qMin(qint64(2000000), intervalNs / 8);
 
-    GraphicsLog::info(QStringLiteral("render loop: started, cap %1Hz, interval %2ns, spin %3us, "
+    GraphicsLog::info(QStringLiteral("render loop: started, cap %1Hz%2, interval %3ns, spin %4us, "
                                      "priority=lowest")
                           .arg(capHz)
+                          .arg(capHz != requestedHz
+                                   ? QStringLiteral(" (display limit; %1Hz was asked for)").arg(requestedHz)
+                                   : QString())
                           .arg(intervalNs)
                           .arg(spinWindowNs / 1000));
 
@@ -722,6 +741,32 @@ void GraphicsRenderThread::run()
             const double secs = double(reportTimer.elapsed()) / 1000.0;
             const double fps = double(windowFrames) / secs;
             const double waitAvgUs = windowFrames ? double(windowWaitUs) / double(windowFrames) : 0.0;
+
+            // Re-derive the pace from what the display can show.
+            //
+            // Once a second, and here, because both inputs can change while the loop runs:
+            // the output window reports its screen's refresh rate when it opens and when it
+            // is moved, and the loop must not keep aiming above what that screen can display.
+            // Reported when the effective pace changes so a move between screens is visible
+            // rather than silent.
+            {
+                const int displayHz = m_displayRefreshHz.load(std::memory_order_relaxed);
+                const int wanted = (displayHz > 0 && displayHz < requestedHz) ? displayHz : requestedHz;
+                if (wanted != capHz)
+                {
+                    capHz = wanted;
+                    intervalNs = 1000000000LL / capHz;
+                    spinWindowNs = qMin(qint64(2000000), intervalNs / 8);
+                    m_frameCapHz.store(capHz, std::memory_order_relaxed);
+                    GraphicsLog::info(QStringLiteral("render loop: pace changed to %1Hz (asked for %2, "
+                                                     "display %3)")
+                                          .arg(capHz)
+                                          .arg(requestedHz)
+                                          .arg(displayHz > 0 ? QString::number(displayHz)
+                                                             : QStringLiteral("unknown")));
+                }
+            }
+
             m_fps.store(fps, std::memory_order_relaxed);
             m_worstFrameMs.store(windowWorstMs, std::memory_order_relaxed);
 
@@ -732,20 +777,59 @@ void GraphicsRenderThread::run()
             m_consumerWaitAvgUs.store(waitAvgUs, std::memory_order_relaxed);
             m_consumerWaitWorstUs.store(double(windowWaitWorstUs), std::memory_order_relaxed);
 
-            GraphicsLog::info(QStringLiteral("render loop: %1 frames in %2s = %3 fps, last %4ms, worst %5ms, "
-                                             "consumer wait avg %6us worst %7us, slow-reader %8, wait-failed %9, "
-                                             "iTime %10s, iFrame %11")
-                                  .arg(windowFrames)
-                                  .arg(secs, 0, 'f', 2)
-                                  .arg(fps, 0, 'f', 1)
-                                  .arg(frameMs, 0, 'f', 2)
-                                  .arg(windowWorstMs, 0, 'f', 2)
-                                  .arg(waitAvgUs, 0, 'f', 1)
-                                  .arg(windowWaitWorstUs)
-                                  .arg(m_waitTimeouts)
-                                  .arg(m_waitFailures)
-                                  .arg(frame.timeSeconds, 0, 'f', 3)
-                                  .arg(frame.frameIndex));
+            // Whether the renderer is keeping up with the rate the user asked for.
+            //
+            // Decided here, once, by the side that measures both numbers. The rate setting is
+            // a SCHEDULING constraint - this is a realtime audio application and an offscreen
+            // renderer must not take the machine - and it is simultaneously the expectation
+            // the user wants reported on. Pacing to it does not weaken that report: a pacer
+            // that cannot keep up simply does not, the measured rate falls below the target,
+            // and this notices.
+            //
+            // STRICTLY below, at the user's request, with no tolerance band and no minimum
+            // duration.
+            //
+            // An earlier version required three consecutive seconds below 95%, and both of
+            // those numbers were my choice rather than the user's. The effect was to stay
+            // silent through a real shortfall for several seconds while deciding on the user's
+            // behalf that a one-second dip was not worth mentioning. Whether a dip is jitter
+            // or a genuine limit is a judgement about that user's own machine and shader, so
+            // the job here is to report the fact rather than to grade it.
+            //
+            // The cost is that a rate landing exactly on the target can oscillate across it
+            // and report repeatedly. That is accepted. It is bounded by being reported on the
+            // TRANSITION only: a sustained shortfall produces one entry, not one a second.
+            //
+            // A missing cap (0) means no expectation to measure against, so nothing is
+            // reported: "unlimited" is not a target that can be missed.
+            bool belowTarget = false;
+            if (capHz > 0 && fps > 0.0)
+            {
+                const bool wasBelow = m_belowTarget.load(std::memory_order_relaxed);
+                const bool isBelow = fps < double(capHz);
+                if (isBelow != wasBelow)
+                    m_belowTarget.store(isBelow, std::memory_order_relaxed);
+                belowTarget = isBelow;
+            }
+
+            // Nothing is logged per second, on purpose.
+            //
+            // There used to be a full statistics line here every second, and before that a
+            // WARN entry whenever the rate fell below the target. Both are gone:
+            //
+            //   * The figures are on SCREEN, in the debug window's top-left corner, coloured
+            //     green or amber against the target. A rate is something to watch while
+            //     working, not to read afterwards, and the colour carries "am I getting what
+            //     I asked for" without a line of text per second.
+            //   * An entry a second, plus the two windows' own entries, made the log mostly
+            //     a record of the frame rate - harder to read than the thing it reported on,
+            //     which defeats the purpose of a log.
+            //
+            // What remains in the log is what a log is for: what was set up, what changed, and
+            // anything that went wrong. m_fps, m_belowTarget and the rest are still published
+            // to GraphicsFrameStats every second - that is how the overlay gets them - so the
+            // information is produced exactly as before; only the writing of it per second
+            // has stopped.
             emit frameStatsUpdated();
 
             windowFrames = 0;

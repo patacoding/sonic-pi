@@ -74,6 +74,11 @@ public:
     // filtering or it aliases badly.
     void setSmoothScaling(bool on) { m_smoothScaling = on; }
 
+    // Draw a software-rendered image over the frame, in the current viewport's top-left.
+    // A null image clears it. The image is uploaded to the GPU only when it actually
+    // changes, so calling this every frame with the same content costs nothing.
+    void setOverlay(const QImage& image);
+
     bool isReady() const { return m_ready; }
     // The size of the frame last shown, so a caller can report or crop by it.
     QSize lastFrameSize() const { return m_lastFrameSize; }
@@ -92,6 +97,8 @@ public:
 
 private:
     bool blitTexture(GLuint texture);
+    // Upload the overlay image if it has changed, and draw it at the viewport's top-left.
+    void drawOverlay();
 
     GraphicsConsumer::Id m_identity;
     GraphicsSharedFrameSlot* m_sharedFrame = nullptr;
@@ -110,6 +117,12 @@ private:
     quint64 m_lastFrameIndex = 0;
     int     m_lastTargetIndex = -1;
     bool    m_smoothScaling = false;
+
+    // The overlay, and the GL object holding it. Uploaded only when the image changes,
+    // because the text changes a few times a second while the frame changes sixty times.
+    QImage m_overlayImage;
+    GLuint m_overlayTexture = 0;
+    bool   m_overlayDirty = false;
 
     // Frames shown as a repeat of the previous one because the producer's fence had not
     // signalled. Taken by the caller, which is the only thing that reports it.

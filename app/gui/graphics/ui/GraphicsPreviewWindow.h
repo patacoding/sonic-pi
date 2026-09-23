@@ -17,43 +17,53 @@
 #include "GraphicsSharedFrame.h"
 #include "GraphicsTextureView.h"
 
+#include <QImage>
 #include <QOpenGLWindow>
+#include <QString>
 
 namespace SonicPi
 {
 
-// The graphics debug window: the whole output picture, fitted into a small window, plus
-// the render thread's numbers in the log.
+// The graphics debug window: the whole output picture, fitted into a small window, with the
+// live frame rate drawn in its top-left corner.
 //
-// A separate window rather than a pane in the main window, on purpose. The graphics
-// feature is an addition to this application, not part of it, and the evidence for that
-// principle is in the architecture review: every time a piece of graphics state has been
-// allowed to live in MainWindow it has drifted from the copy the render thread holds.
-// Numbers about rendering belong beside the rendering, not in the log pane of a window
-// that does not render.
+// A separate window rather than a pane in the main window, on purpose. The graphics feature
+// is an addition to this application, not part of it, and the evidence for that principle is
+// in the architecture review: every time a piece of graphics state has been allowed to live
+// in MainWindow it has drifted from the copy the render thread holds.
 //
-// It is a real consumer, not a viewer: it waits on the same fences as the output window
-// and leaves its own, so with this window open the producer's `consumer wait` figure
-// covers both readers.
+// It is a real consumer, not a viewer: it waits on the same fences as the output window and
+// leaves its own, so with this window open the producer's `consumer wait` figure covers both
+// readers.
 //
-// WHERE THE NUMBERS GO: the log, not drawn into the picture.
+// WHERE THE FRAME RATE IS SHOWN, AND WHY IT MOVED
 //
-// The first attempt drew them over the frame with GL and never appeared. That is a
-// solvable problem, but it is not worth solving here: this window's job is to show the
-// picture, and the numbers are already wanted somewhere they can be read, copied and kept
-// - GraphicsLog, which the main window mirrors into its log pane and which is also written
-// to graphics.log. So the picture stays clean and the numbers go where text belongs.
+// It is drawn in this window, not written to the log. That is a reversal, and the reasoning
+// behind it is worth keeping:
 //
-// Scale: the whole frame, fitted, never cropped. The window's shape is the user's
-// business; the frame is shown complete, with the leftover margin black so it reads as
-// letterboxing rather than as part of the picture.
+//   * The rate is something the user WATCHES. A number in a log file is read after the fact;
+//     a number in the corner of the preview is seen while working.
+//   * Logging it once a second made the log mostly this one figure, and the detail lines from
+//     the two windows made up the rest. The log became harder to read than the thing it was
+//     reporting on, which defeats the point of a log.
+//   * A shortfall is therefore shown by COLOUR here - green at or above the target, amber
+//     below it - so "am I getting what I asked for" is answerable at a glance, without a
+//     warning appearing in a file nobody is watching.
+//
+// The comparison is the render thread's, not this window's: it measures both numbers and
+// publishes belowTarget (see GraphicsFrameStats), and this only chooses a colour from it, so
+// the two cannot disagree about whether the target is being met.
+//
+// This window logs its INITIALISATION and its SIZE CHANGES and nothing else. A size change is
+// worth an entry because it changes what is on screen and is the first thing worth knowing
+// when something looks wrong; the frame rate is not, because it is already on screen.
 class GraphicsPreviewWindow : public QOpenGLWindow
 {
     Q_OBJECT
 
 public:
-    // Small by default. This is a debug view that sits beside the real output; a preview
-    // that competes with it for screen space is the wrong default.
+    // Small by default. This is a debug view that sits beside the real output; a preview that
+    // competes with it for screen space is the wrong default.
     static constexpr int kDefaultWidth = 320;
     static constexpr int kDefaultHeight = 240;
 
@@ -64,8 +74,8 @@ public:
     void setRenderThread(GraphicsRenderThread* thread);
 
     // The slot the render thread publishes into. Not owned. Required: this window has no
-    // fallback that draws the shader itself, because a second thing able to draw the
-    // picture would be a second producer.
+    // fallback that draws the shader itself, because a second thing able to draw the picture
+    // would be a second producer.
     void setSharedFrameSlot(GraphicsSharedFrameSlot* slot) { m_view.setSharedFrameSlot(slot); }
 
 signals:
@@ -83,20 +93,19 @@ private:
     // centred, in device pixels with a bottom-left origin as GL wants. Never crops.
     QRect fittedRect(const QSize& frame, const QSize& surface) const;
 
-    // Write the render thread's numbers to the log, at most a few times a second.
-    void reportStats();
+    // Rebuild the fps overlay from the render thread's figures, at most a few times a second
+    // and only when the text actually changes.
+    void refreshFpsOverlay();
 
     GraphicsTextureView m_view{GraphicsConsumer::Preview};
 
     // Not owned. See setRenderThread().
     GraphicsRenderThread* m_renderThread = nullptr;
 
-    // Statistics reporting, timed by hand. Not GraphicsLog::throttled(), which suppresses
-    // by message CONTENT - this message carries changing numbers, so nothing would ever
-    // be suppressed.
-    qint64  m_lastReportMs = 0;
-    quint64 m_paintsSinceReport = 0;
-    quint64 m_statsReportCount = 0;
+    // Overlay state. The last text is kept so an unchanged figure costs a string comparison
+    // instead of a painter pass and a texture upload.
+    qint64  m_lastOverlayMs = 0;
+    QString m_lastFpsText;
 };
 
 } // namespace SonicPi
