@@ -108,6 +108,10 @@ set(GRAPHICS_SOURCES
     ${QTAPP_ROOT}/graphics/rendering/GraphicsSettings.h
     ${QTAPP_ROOT}/graphics/ui/GraphicsWindow.cpp
     ${QTAPP_ROOT}/graphics/ui/GraphicsWindow.h
+    ${QTAPP_ROOT}/graphics/ui/GraphicsTextureView.cpp
+    ${QTAPP_ROOT}/graphics/ui/GraphicsTextureView.h
+    ${QTAPP_ROOT}/graphics/ui/GraphicsPreviewWindow.cpp
+    ${QTAPP_ROOT}/graphics/ui/GraphicsPreviewWindow.h
     )
 
 set(EDITOR_SOURCES

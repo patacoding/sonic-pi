@@ -45,10 +45,11 @@ class QTimer;
 
 namespace SonicPi
 {
-// Defined in graphics/ui/GraphicsWindow.h and graphics/rendering/
-// GraphicsRenderThread.h, both included by the .cpp. Only pointers are held here,
-// so forward declarations keep the OpenGL headers out of this one.
+// Defined in graphics/ui/GraphicsWindow.h, graphics/ui/GraphicsPreviewWindow.h and
+// graphics/rendering/GraphicsRenderThread.h, all included by the .cpp. Only pointers are
+// held here, so forward declarations keep the OpenGL headers out of this one.
 class GraphicsWindow;
+class GraphicsPreviewWindow;
 class GraphicsRenderThread;
 class GraphicsSharedFrameSlot;
 } // namespace SonicPi
@@ -406,6 +407,9 @@ private slots:
     // and is deliberately independent of the GUI; these are only the controls
     // that surface it.
     void showGraphicsOutput(bool on);
+    // Show or hide the graphics debug preview. Not a pane in this window: see the
+    // definition for why that distinction is load-bearing rather than cosmetic.
+    void showGraphicsPreview(bool on);
     void graphicsVisibilityChanged();
 
     // Mirrors one Graphics log entry into the log pane. Invoked on the GUI
@@ -900,8 +904,15 @@ private:
     // Re-reads the shader files from disk. They live outside the binary so they
     // can be edited and reloaded without a rebuild.
     QAction *graphicsReloadShaderAct;
+    // The graphics debug preview: the same picture smaller, with the render thread's
+    // numbers over it. A separate window rather than a pane here, so that nothing about
+    // rendering lives in this class - see showGraphicsPreview().
+    QAction *graphicsPreviewAct;
     // The output window, created lazily on first show and owned here.
     SonicPi::GraphicsWindow* graphicsWindow = nullptr;
+    // The debug preview window, likewise. It is a real consumer of the same handoff, not
+    // a viewer of the output window.
+    SonicPi::GraphicsPreviewWindow* graphicsPreviewWindow = nullptr;
     // Not owned. Set by main() once the render thread is started; see
     // setGraphicsRenderThread().
     SonicPi::GraphicsRenderThread* graphicsRenderThread = nullptr;

@@ -23,6 +23,7 @@
 #include "GraphicsRenderer.h"
 #include "GraphicsRenderThread.h"
 #include "GraphicsSharedFrame.h"
+#include "GraphicsTextureView.h"
 
 #include <memory>
 
@@ -89,7 +90,11 @@ public:
     //
     // Null is legal and falls back to the window drawing for itself, which is the
     // pre-sharing behaviour.
-    void setSharedFrameSlot(GraphicsSharedFrameSlot* slot) { m_sharedFrame = slot; }
+    void setSharedFrameSlot(GraphicsSharedFrameSlot* slot)
+    {
+        m_sharedFrame = slot;
+        m_view.setSharedFrameSlot(slot);
+    }
 
     // Move to the next screen in QGuiApplication::screens(), wrapping around.
     // Returns the screen it landed on, or nullptr if there is only one.
@@ -138,44 +143,22 @@ private:
     // viewport onto the output, not a scaling surface.
     QRect cropRect() const;
 
-    // Draw the texture the render thread published, filling `destination`.
+    // The sampling and the handoff, shared with every other consumer. See
+    // GraphicsTextureView: this window owns only what makes it a window - its surface,
+    // its size, and where it sits - while the view owns the display shader, the fence
+    // protocol and the repeat-the-last-frame behaviour.
     //
-    // Returns false when there is nothing published yet, which leaves the
-    // background showing. There is deliberately no fallback that draws the shader
-    // here: this window is a consumer, and a second thing able to draw the picture
-    // would be a second producer.
-    bool drawSharedFrame(const QRect& destination);
-
-    // Sample `texture` into the current viewport. The caller sets the viewport.
-    //
-    // Separate from drawSharedFrame so a frame that is not ready yet can repeat the
-    // previous texture without redoing the readiness logic.
-    bool blitTexture(GLuint texture, const QRect& destination);
-
-    // Build the display shader and its quad. Requires a current context.
-    bool initDisplay();
-
-    // Samples another context's texture and shows it. Only the pieces the window
-    // needs; deliberately not a GraphicsRenderer, because this draws no shader of
-    // the user's - it shows one.
-    std::unique_ptr<QOpenGLShaderProgram>     m_displayProgram;
-    std::unique_ptr<QOpenGLVertexArrayObject> m_displayVao;
-    std::unique_ptr<QOpenGLBuffer>            m_displayVbo;
-    bool m_displayReady = false;
+    // Deliberately not a copy of that logic. There are now two consumers, and the one
+    // lesson this feature has taught repeatedly is that a rule implemented twice drifts:
+    // the last time a single rule had two implementations it took three attempts and a
+    // visible flicker to find out.
+    GraphicsTextureView m_view{GraphicsConsumer::OutputWindow};
 
     // Not owned. See setSharedFrameSlot().
     GraphicsSharedFrameSlot* m_sharedFrame = nullptr;
     // Time of the last "showing shared frame" report, so it appears once a second
     // instead of once a frame. See the note where it is used.
     qint64 m_lastFrameReportMs = 0;
-
-    // The last texture that was successfully drawn.
-    //
-    // Kept because a target the producer is mid-way through, or a frame whose fence
-    // has not signalled, must repeat the previous picture rather than draw nothing:
-    // the caller has already cleared to the background colour, so "nothing" is a
-    // full-screen flash of background. That is one half of what the flicker was.
-    GLuint m_lastGoodTexture = 0;
 
     // Count of frames whose producer fence had not signalled within the guard timeout,
     // reported once a second.
@@ -188,11 +171,17 @@ private:
     // consumer and should not be confused with it.
     quint64 m_staleFrames = 0;
 
+    // Paints since the last report, so "how often is this window actually repainting" is
+    // observable. The window paces itself with requestUpdate() now, and a self-paced loop
+    // that runs faster than the display is indistinguishable from a correct one in every
+    // other log line.
+    quint64 m_paintCount = 0;
+
     // Not owned, and not used to set the output size. See setRenderThread().
     GraphicsRenderThread* m_renderThread = nullptr;
-    // The resolution being shown, in pixels. Taken from the published frame so the
-    // crop matches what was actually rendered rather than a second copy of the
-    // setting that could disagree with it.
+    // The resolution being shown, in pixels. Taken from the render thread so the crop
+    // matches what was actually allocated rather than a second copy of the setting that
+    // could disagree with it.
     QSize m_outputSize;
     bool m_fullscreen = false;
 

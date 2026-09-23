@@ -48,16 +48,15 @@ GraphicsWindow::GraphicsWindow(QWindow* parent)
 
 GraphicsWindow::~GraphicsWindow()
 {
-    // Release the display objects while the context can still be made current.
-    // Their destructors need it, and a window whose surface is already gone cannot
-    // provide one - in that case they leak rather than crash, and Qt is tearing the
-    // context down with the window anyway.
-    if (m_displayReady && context() && context()->makeCurrent(this))
+    // The view's GL objects are Qt RAII types and their destructors need the owning
+    // context current. A window whose surface is already gone cannot provide one, in
+    // which case Qt warns and leaks rather than crashing - which is the better failure.
+    if (context() && context()->makeCurrent(this))
     {
-        m_displayVbo.reset();
-        m_displayVao.reset();
-        m_displayProgram.reset();
-        context()->doneCurrent();
+        // m_view is a value member and is destroyed after this body runs, while the
+        // context is still current. Nothing to do but make it current; the doneCurrent()
+        // is deliberately NOT called, because the member destruction happens after it
+        // would have.
     }
 }
 
@@ -128,237 +127,32 @@ void GraphicsWindow::resizeGL(int w, int h)
     update();
 }
 
-// The display shader: show a texture, flipped vertically.
-//
-// The flip is not optional and not a preference. GL's texture origin is its
-// bottom-left, so sampling with v increasing upward shows the renderer's
-// framebuffer the same way up as it was drawn; the D3D interop path needs the
-// opposite for the same reason. Which way round it goes is a property of the two
-// coordinate systems, so it is pinned here once rather than left to each caller.
-static const char* kDisplayVertexShader = R"(
-#version 330 core
-layout(location = 0) in vec2 a_pos;
-out vec2 v_uv;
-void main() {
-    // a_pos is already in clip space (-1..1); derive uv from it rather than
-    // carrying a second attribute, since the quad is exactly the whole viewport.
-    v_uv = a_pos * 0.5 + 0.5;
-    gl_Position = vec4(a_pos, 0.0, 1.0);
-}
-)";
-
-static const char* kDisplayFragmentShader = R"(
-#version 330 core
-uniform sampler2D u_texture;
-in vec2 v_uv;
-layout(location = 0) out vec4 FragColor;
-void main() {
-    FragColor = texture(u_texture, v_uv);
-}
-)";
-
-bool GraphicsWindow::initDisplay()
-{
-    if (m_displayReady)
-        return true;
-
-    auto program = std::make_unique<QOpenGLShaderProgram>();
-    if (!program->addShaderFromSourceCode(QOpenGLShader::Vertex, kDisplayVertexShader)
-        || !program->addShaderFromSourceCode(QOpenGLShader::Fragment, kDisplayFragmentShader)
-        || !program->link())
-    {
-        GraphicsLog::error(QStringLiteral("window: the display shader failed\n%1").arg(program->log()));
-        return false;
-    }
-
-    m_displayVao = std::make_unique<QOpenGLVertexArrayObject>();
-    if (!m_displayVao->create())
-    {
-        GraphicsLog::error(QStringLiteral("window: could not create a VAO for the display"));
-        m_displayVao.reset();
-        return false;
-    }
-    m_displayVao->bind();
-
-    // A quad covering clip space, in the two triangles a core profile needs.
-    static const float kQuad[] = {
-        -1.0f, -1.0f,
-         1.0f, -1.0f,
-         1.0f,  1.0f,
-        -1.0f, -1.0f,
-         1.0f,  1.0f,
-        -1.0f,  1.0f,
-    };
-    m_displayVbo = std::make_unique<QOpenGLBuffer>(QOpenGLBuffer::VertexBuffer);
-    if (!m_displayVbo->create() || !m_displayVbo->bind())
-    {
-        GraphicsLog::error(QStringLiteral("window: could not create a VBO for the display"));
-        m_displayVbo.reset();
-        m_displayVao.reset();
-        return false;
-    }
-    m_displayVbo->setUsagePattern(QOpenGLBuffer::StaticDraw);
-    m_displayVbo->allocate(kQuad, int(sizeof(kQuad)));
-    m_displayVao->release();
-    m_displayVbo->release();
-
-    m_displayProgram = std::move(program);
-    m_displayReady = true;
-    GraphicsLog::info(QStringLiteral("window: display shader ready (samples the shared texture)"));
-    return true;
-}
-
-bool GraphicsWindow::drawSharedFrame(const QRect& destination)
-{
-    if (!m_sharedFrame || destination.isEmpty())
-        return false;
-
-    const GraphicsSharedFrame shared = m_sharedFrame->read();
-    if (!shared.valid())
-        return false;
-
-    QOpenGLContext* ctx = context();
-    QOpenGLExtraFunctions* extra = ctx ? ctx->extraFunctions() : nullptr;
-    if (!ctx || !ctx->functions())
-        return false;
-
-    if (!initDisplay())
-        return false;
-
-    // Wait for the producer to finish this frame before sampling it.
-    //
-    // The producer waits on a fence of ours before overwriting a target; this is the
-    // same idea in the other direction and both are needed, because they answer
-    // different questions. Ours answers "may the producer write here"; this one
-    // answers "is there a finished image here". Without this one the window samples a
-    // texture whose draw has been issued but not completed, and consecutive frames
-    // alternate between a finished image and a partial one.
-    //
-    // glClientWaitSync rather than glFinish: it waits for one fence, not for the whole
-    // pipeline, so it orders the two contexts without stalling everything. The same
-    // mechanism Chromium's GPU synchronisation uses for shared textures.
-    //
-    // A bounded wait, not zero. The zero-timeout version flickered: the producer draws
-    // in well under a millisecond, so a consumer arriving a moment early found the
-    // fence unsignalled nearly every frame and fell through to the background colour.
-    // The timeout is a guard, not the mechanism - if the producer has genuinely
-    // stalled, the consumer gives up rather than freezing the GUI thread.
-    if (shared.fence && extra)
-    {
-        constexpr GLuint64 kWaitNs = 8 * 1000 * 1000;   // 8ms, half a frame at 60Hz
-        const GLenum r = extra->glClientWaitSync(shared.fence,
-                                                 GL_SYNC_FLUSH_COMMANDS_BIT, kWaitNs);
-        if (r == GL_TIMEOUT_EXPIRED || r == GL_WAIT_FAILED)
-        {
-            // Still not ready. Show the last one that WAS.
-            //
-            // Returning "nothing to draw" here flickers worst of all: the caller has
-            // already cleared to the background colour, so a skipped frame is a
-            // full-screen flash. Re-reading a texture that was completed a frame ago
-            // needs no wait and cannot be torn - the producer is not writing it, or the
-            // fence it waited on would not have signalled.
-            ++m_staleFrames;
-            if (m_lastGoodTexture != 0)
-                return blitTexture(m_lastGoodTexture, destination);
-            return false;
-        }
-    }
-
-    if (!blitTexture(shared.texture, destination))
-        return false;
-
-    // Leave a fence recording that this target's read commands have been submitted.
-    //
-    // This is the whole of the consumer's side of the handoff, and it is deliberately
-    // not a flag. A flag cleared here would say "this thread has stopped issuing
-    // commands", which is not the same as "the GPU has stopped reading" - and a
-    // producer that trusted it would overwrite a texture still being read. Only a
-    // fence answers the question the producer actually has, and the producer is
-    // entitled to block on it because it is placed a whole frame before it is waited
-    // on.
-    GLsync finished = extra ? extra->glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0) : nullptr;
-    if (extra)
-        extra->glFlush();   // submit it, or the fence never signals
-
-    // Published to the producer, into this consumer's own slot. The consumer never
-    // touches this handle again - it does not wait on it and does not delete it. The
-    // producer waits, and deletes once it has signalled, which is the only moment at
-    // which deletion is safe.
-    //
-    // The slot is chosen by this consumer's IDENTITY, not by any turn-taking. Several
-    // consumers reading the same texture is fine because reading is non-destructive;
-    // each one simply records its own completion in its own slot, and they never
-    // interact. See GraphicsTargetFence.
-    if (finished)
-        m_sharedFrame->targetFence(shared.targetIndex)
-            .consumerFence[GraphicsConsumer::OutputWindow]
-            .store(finished, std::memory_order_release);
-
-    // Remembered so a later frame that is not ready yet can repeat this one instead
-    // of flashing the background. See the timeout branch above.
-    m_lastGoodTexture = shared.texture;
-    return true;
-}
-
-bool GraphicsWindow::blitTexture(GLuint texture, const QRect& destination)
-{
-    Q_UNUSED(destination);   // the viewport is already set by the caller
-
-    QOpenGLContext* ctx = context();
-    QOpenGLFunctions* f = ctx ? ctx->functions() : nullptr;
-    if (!f || texture == 0)
-        return false;
-
-    // Filtering is set per texture rather than per frame: these are state on the
-    // texture object, and re-setting them every frame would be noise. GL_NEAREST
-    // because the view is 1:1 - any filtering here would soften pixels that are meant
-    // to be shown exactly as rendered.
-    f->glActiveTexture(GL_TEXTURE0);
-    f->glBindTexture(GL_TEXTURE_2D, texture);
-    f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    m_displayProgram->bind();
-    m_displayProgram->setUniformValue("u_texture", 0);
-    m_displayVao->bind();
-    m_displayVbo->bind();
-    m_displayProgram->enableAttributeArray(0);
-    m_displayProgram->setAttributeBuffer(0, GL_FLOAT, 0, 2, 2 * sizeof(float));
-    f->glDrawArrays(GL_TRIANGLES, 0, 6);
-    m_displayProgram->disableAttributeArray(0);
-    m_displayVbo->release();
-    m_displayVao->release();
-    m_displayProgram->release();
-    return true;
-}
-
 void GraphicsWindow::paintGL()
 {
     QOpenGLFunctions* f = context() ? context()->functions() : nullptr;
     if (!f)
         return;
 
-    // This window is a CONSUMER. It displays the frame the render thread produced
-    // and never draws a shader of its own.
+    ++m_paintCount;
+
+    // This window is a CONSUMER. It displays the frame the render thread produced and
+    // never draws a shader of its own.
     //
-    // The earlier "fall back to drawing it here" branch is deliberately gone. It
-    // existed so the window would show something before the first frame arrived,
-    // but a second thing that can draw the picture is a second producer: two
-    // renderers, two clocks, and a uniform that has to be set in two places. A
-    // consumer that cannot get a frame shows the background, which is honest and
-    // cannot drift.
+    // What it deliberately does not own any more is the sampling itself: the display
+    // shader, the quad, the fence protocol and the repeat-the-last-frame behaviour all
+    // live in GraphicsTextureView, because the debug preview needs exactly the same
+    // behaviour. Two copies of the access rules would be two chances to get them wrong,
+    // and this feature has already spent three attempts learning that.
+    //
+    // What is left here is what makes this a window: its surface, the crop, the clear, and
+    // the cadence. The view draws into whatever viewport it is given.
+    //
+    // There is still no fallback that draws the shader here. A consumer that cannot get a
+    // frame shows the background, which is honest; a second thing able to draw the picture
+    // would be a second producer, with two renderers, two clocks, and a uniform that has
+    // to be set in two places.
     const qreal dpr = devicePixelRatio();
     const QSize surface(qMax(1, int(width() * dpr)), qMax(1, int(height() * dpr)));
-
-    // Forget the last good texture the moment the producer withdraws the slot.
-    //
-    // A rebuild or a shutdown destroys the target textures, and repeating one of
-    // those names afterwards would sample a deleted texture. Clearing here is what
-    // keeps "repeat the previous frame" from outliving the frame it repeats.
-    if (m_sharedFrame && !m_sharedFrame->read().valid())
-        m_lastGoodTexture = 0;
 
     // Clear the whole surface first, so the area outside the crop is the documented
     // background rather than whatever the previous frame left there. A window
@@ -378,13 +172,17 @@ void GraphicsWindow::paintGL()
 
     // glViewport takes framebuffer pixels with the origin at the BOTTOM-left, while
     // the crop rectangle is in Qt's top-left coordinates - hence the y conversion.
-    // Done here because this is where the two conventions meet.
+    // Done here because this is where the two conventions meet. The view draws into
+    // whatever viewport it is given, which is the whole of what it needs to know about
+    // geometry.
     f->glViewport(destination.x(),
                   surface.height() - (destination.y() + destination.height()),
                   destination.width(),
                   destination.height());
 
-    drawSharedFrame(destination);
+    // Sampling, the fence handoff and "repeat the last frame if the producer has not
+    // finished" all happen in here. The window deliberately does not know how.
+    m_view.drawSharedFrame();
 
     // Report what is on screen, once a second.
     //
@@ -406,19 +204,29 @@ void GraphicsWindow::paintGL()
     {
         const qint64 elapsed = m_lastFrameReportMs == 0 ? 0 : (now - m_lastFrameReportMs);
         m_lastFrameReportMs = now;
+        m_staleFrames += m_view.takeStaleCount();
         const GraphicsSharedFrame shared = m_sharedFrame ? m_sharedFrame->read()
                                                          : GraphicsSharedFrame();
+        // The paint count is reported because the window paces ITSELF now, and "how often
+        // is it actually repainting" is the only way to tell whether that pacing is the
+        // display's or a busy loop's. It is not decoration: a preview window that
+        // repainted 139 times a second while the display runs at 60 was found by exactly
+        // this number.
         GraphicsLog::info(shared.valid()
                               ? QStringLiteral("window: showing shared frame %1 (texture %2, "
-                                               "%3x%4); %5 stale in the last %6ms")
+                                               "%3x%4); %5 stale, %6 paints in %7ms")
                                     .arg(shared.frameIndex)
                                     .arg(shared.texture)
                                     .arg(shared.size.width())
                                     .arg(shared.size.height())
                                     .arg(m_staleFrames)
+                                    .arg(m_paintCount)
                                     .arg(elapsed)
-                              : QStringLiteral("window: no frame published yet"));
+                              : QStringLiteral("window: no frame published yet (%1 paints in %2ms)")
+                                    .arg(m_paintCount)
+                                    .arg(elapsed));
         m_staleFrames = 0;
+        m_paintCount = 0;
     }
 
     // Ask for the next frame. This is what keeps the window repainting, and it is why

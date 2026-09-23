@@ -49,6 +49,18 @@ struct GraphicsFrameStats
     double  worstFrameMs  = 0.0; // largest frame time in the current window
     bool    loopRunning   = false;
     bool    hung          = false; // stopped by the driver-watchdog guard
+
+    // The handoff, measured on the producer's side because that is where it happens.
+    //
+    // These are here rather than re-derived by whoever displays them: a surface that
+    // measured its own idea of the handoff would be a second implementation of a figure
+    // the render thread already knows, and the two would eventually disagree.
+    double  consumerWaitAvgUs   = 0.0;  // mean time blocked waiting for readers
+    double  consumerWaitWorstUs = 0.0;  // worst single wait in the last window
+    quint64 slowReaderCount     = 0;    // waits that hit the 500ms guard
+    quint64 waitFailedCount     = 0;    // glClientWaitSync refused the fence
+    int     targetCount         = 0;    // how many targets are published
+    int     frameCapHz          = 0;    // the user's ceiling, 0 when unset
 };
 
 // The Graphics renderer's own thread, its own OpenGL context, and its frame loop.
@@ -280,6 +292,14 @@ private:
     // rather than because it was asked to. Distinct from "stopped", because the
     // two need different reporting.
     std::atomic<bool>      m_hung{false};
+
+    // The handoff figures, published once per reporting window rather than per frame.
+    // A per-frame store would be pointless churn: nobody can read a number that changes
+    // 60 times a second, and it would put an atomic write in the hot path for nothing.
+    std::atomic<double>    m_consumerWaitAvgUs{0.0};
+    std::atomic<double>    m_consumerWaitWorstUs{0.0};
+    std::atomic<int>       m_targetCount{0};
+    std::atomic<int>       m_frameCapHz{0};
 
     // The requested and the actual render target size. Kept as plain ints in
     // atomics rather than a QSize because QSize is not lock-free to read

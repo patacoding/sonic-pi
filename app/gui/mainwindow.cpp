@@ -87,6 +87,7 @@
 #include "graphics/rendering/GraphicsSettings.h"
 #include "graphics/rendering/GraphicsRenderer.h"
 #include "graphics/ui/GraphicsWindow.h"
+#include "graphics/ui/GraphicsPreviewWindow.h"
 #include "widgets/sonicpitooltip.h"
 #include <QFileOpenEvent>
 
@@ -4090,6 +4091,55 @@ void MainWindow::showGraphicsOutput(bool on)
     }
 }
 
+// The graphics debug window: the same picture, smaller, with the render thread's numbers
+// over it.
+//
+// Deliberately NOT part of the main window's layout, and deliberately not a pane in it.
+// The graphics feature is an addition to this application rather than part of it, and
+// every previous attempt to let a piece of it live in MainWindow has drifted from what
+// the render thread actually holds. Numbers about rendering belong beside the rendering.
+//
+// It is a real consumer, not a viewer: it waits on the same fences and leaves its own, so
+// with this window open the producer's `consumer wait` figure covers both readers.
+void MainWindow::showGraphicsPreview(bool on)
+{
+    SonicPi::GraphicsLog::info(QStringLiteral("menu: show graphics preview = %1")
+                                   .arg(on ? QStringLiteral("on") : QStringLiteral("off")));
+
+    if (on)
+    {
+        if (!graphicsPreviewWindow)
+        {
+            graphicsPreviewWindow = new SonicPi::GraphicsPreviewWindow();
+            graphicsPreviewWindow->setRenderThread(graphicsRenderThread);
+            graphicsPreviewWindow->setSharedFrameSlot(graphicsSharedFrame);
+            connect(graphicsPreviewWindow, &SonicPi::GraphicsPreviewWindow::closedByUser,
+                    this, [this]() {
+                        if (graphicsPreviewWindow)
+                            graphicsPreviewWindow->hide();
+                        if (graphicsPreviewAct)
+                        {
+                            QSignalBlocker blocker(graphicsPreviewAct);
+                            graphicsPreviewAct->setChecked(false);
+                        }
+                    });
+            SonicPi::GraphicsLog::info(QStringLiteral("menu: created graphics preview window"));
+        }
+
+        graphicsPreviewWindow->show();
+    }
+    else if (graphicsPreviewWindow)
+    {
+        graphicsPreviewWindow->hide();
+    }
+
+    if (graphicsPreviewAct)
+    {
+        QSignalBlocker blocker(graphicsPreviewAct);
+        graphicsPreviewAct->setChecked(on);
+    }
+}
+
 // Mirrors one Graphics log entry into the log pane. Runs on the GUI thread: the
 // sink that feeds it may be called from the render thread.
 void MainWindow::appendGraphicsLog(int level, const QString& message)
@@ -5459,6 +5509,7 @@ const QList<ShortcutDef>& MainWindow::shortcutDefs()
     { "GraphicsOutput", QT_TR_NOOP("Show or hide the graphics output window"), "Ctrl+Shift+G", "Ctrl+Shift+G", "Ctrl+Shift+G", "Graphics", &MainWindow::graphicsOutAct },
     { "GraphicsFullscreen", QT_TR_NOOP("Toggle fullscreen for the graphics output"), "Ctrl+Shift+F", "Ctrl+Shift+F", "Ctrl+Shift+F", "Graphics", &MainWindow::graphicsFullscreenAct },
     { "GraphicsReloadShader", QT_TR_NOOP("Re-read the graphics shader from disk"), "Ctrl+Shift+R", "Ctrl+Shift+R", "Ctrl+Shift+R", "Graphics", &MainWindow::graphicsReloadShaderAct },
+    { "GraphicsPreview", QT_TR_NOOP("Show or hide the graphics debug preview"), "Ctrl+Shift+P", "Ctrl+Shift+P", "Ctrl+Shift+P", "Graphics", &MainWindow::graphicsPreviewAct },
     { "CycleThemes", QT_TR_NOOP("Cycle through the available colour themes"), "ShiftMeta+M", "ShiftMeta+M", "ShiftMeta+M", "Visuals", &MainWindow::cycleThemesAct },
     { "Info", QT_TR_NOOP("Toggle information about Sonic Pi"), "Meta+n", "Meta+1", "Meta+1", "View", &MainWindow::infoAct },
 #if defined(Q_OS_MAC)
@@ -6306,6 +6357,13 @@ void MainWindow::createToolBar()
                                : QStringLiteral("NOT requested: no running render loop")));
     });
 
+    graphicsPreviewAct = new QAction(tr("Debug Preview"), this);
+    graphicsPreviewAct->setCheckable(true);
+    graphicsPreviewAct->setChecked(false);
+    connect(graphicsPreviewAct, &QAction::toggled, this, [this](bool on) {
+        showGraphicsPreview(on);
+    });
+
     toolBar->addAction(scopeAct);
     toolBar->addAction(graphicsOutAct);
     toolBar->addAction(infoAct);
@@ -6515,6 +6573,7 @@ void MainWindow::createToolBar()
     // concern, and it needs room to grow (display selection, external output).
     graphicsMenu = menuBar()->addMenu(tr("Graphics"));
     graphicsMenu->addAction(graphicsOutAct);
+    graphicsMenu->addAction(graphicsPreviewAct);
     graphicsMenu->addAction(graphicsFullscreenAct);
     graphicsMenu->addSeparator();
     graphicsMenu->addAction(graphicsReloadShaderAct);

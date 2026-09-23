@@ -101,6 +101,13 @@ GraphicsFrameStats GraphicsRenderThread::frameStats() const
     s.worstFrameMs = m_worstFrameMs.load(std::memory_order_relaxed);
     s.loopRunning  = m_loopRunning.load(std::memory_order_relaxed);
     s.hung         = m_hung.load(std::memory_order_relaxed);
+
+    s.consumerWaitAvgUs   = m_consumerWaitAvgUs.load(std::memory_order_relaxed);
+    s.consumerWaitWorstUs = m_consumerWaitWorstUs.load(std::memory_order_relaxed);
+    s.slowReaderCount     = m_waitTimeouts;
+    s.waitFailedCount     = m_waitFailures;
+    s.targetCount         = m_targetCount.load(std::memory_order_relaxed);
+    s.frameCapHz          = m_frameCapHz.load(std::memory_order_relaxed);
     return s;
 }
 
@@ -202,6 +209,7 @@ bool GraphicsRenderThread::applyRenderTargetSizeRequest()
 
     m_actualWidth.store(w, std::memory_order_relaxed);
     m_actualHeight.store(h, std::memory_order_relaxed);
+    m_targetCount.store(kTargetCount, std::memory_order_relaxed);
     GraphicsLog::info(QStringLiteral("render targets: %1 buffers at %2x%3 (double buffered)")
                           .arg(kTargetCount).arg(w).arg(h));
     return true;
@@ -500,6 +508,7 @@ void GraphicsRenderThread::run()
     // stutter - see the priority note in the constructor.
     const int capHz = m_targetFps > 0 ? m_targetFps : kDefaultFrameCapHz;
     const qint64 intervalNs = 1000000000LL / capHz;
+    m_frameCapHz.store(capHz, std::memory_order_relaxed);
 
     // The spin window scales with the interval rather than being a fixed 2ms.
     //
@@ -712,8 +721,16 @@ void GraphicsRenderThread::run()
         {
             const double secs = double(reportTimer.elapsed()) / 1000.0;
             const double fps = double(windowFrames) / secs;
+            const double waitAvgUs = windowFrames ? double(windowWaitUs) / double(windowFrames) : 0.0;
             m_fps.store(fps, std::memory_order_relaxed);
             m_worstFrameMs.store(windowWorstMs, std::memory_order_relaxed);
+
+            // Published for the debug window. Written once per reporting window rather
+            // than per frame: a figure that changes 60 times a second cannot be read, so
+            // a store in the hot path would buy nothing. The window draws them a little
+            // slower still (see GraphicsPreviewWindow::kStatsIntervalMs).
+            m_consumerWaitAvgUs.store(waitAvgUs, std::memory_order_relaxed);
+            m_consumerWaitWorstUs.store(double(windowWaitWorstUs), std::memory_order_relaxed);
 
             GraphicsLog::info(QStringLiteral("render loop: %1 frames in %2s = %3 fps, last %4ms, worst %5ms, "
                                              "consumer wait avg %6us worst %7us, slow-reader %8, wait-failed %9, "
@@ -723,7 +740,7 @@ void GraphicsRenderThread::run()
                                   .arg(fps, 0, 'f', 1)
                                   .arg(frameMs, 0, 'f', 2)
                                   .arg(windowWorstMs, 0, 'f', 2)
-                                  .arg(windowFrames ? windowWaitUs / qint64(windowFrames) : 0)
+                                  .arg(waitAvgUs, 0, 'f', 1)
                                   .arg(windowWaitWorstUs)
                                   .arg(m_waitTimeouts)
                                   .arg(m_waitFailures)
