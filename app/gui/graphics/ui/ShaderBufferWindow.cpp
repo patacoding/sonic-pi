@@ -157,12 +157,12 @@ ShaderBufferWindow::~ShaderBufferWindow() = default;
 //   * The EDITOR'S colours and font come from the theme through the lexer, because in Sonic Pi an
 //     editor's text font is supplied by its lexer, not by the widget.
 //
-// WHAT IS DELIBERATELY NOT HERE: the GUI transparency setting. That is
-// MainWindow::changeGUITransparency(), which calls setWindowOpacity() on the main window - it is a
-// property of that window, not of the application or of its theme, so it neither reaches nor
-// should reach this one. A see-through shader editor would make a shader harder to read, and this
-// window exists for reading one. Nothing needs to be added to keep transparency out; adding it
-// would take a deliberate setWindowOpacity() call, and there must not be one.
+// WINDOW TRANSPARENCY IS NOT SET HERE, on purpose. This is a live coding tool: the editor is meant
+// to sit OVER the graphics output, so its opacity must MATCH the main window's - and the way to
+// guarantee "match" is to have one calculation and one writer. MainWindow computes the opacity from
+// the GUI transparency preference and applies it to both windows; this window only has to be a
+// QWidget for that to work. Setting it here as well would be a second copy of the rule, free to
+// drift, which is the failure this codebase keeps paying for.
 void ShaderBufferWindow::applyTheme()
 {
     if (m_theme)

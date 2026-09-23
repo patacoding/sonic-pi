@@ -4164,6 +4164,9 @@ void MainWindow::showShaderBuffer()
         // the very complaint this fixes.
         if (SonicPiScintilla* ws = getCurrentWorkspace())
             graphicsShaderWindow->setEditorZoom(ws->currentZoom());
+        // As see-through as this window, so the editor can sit over the graphics output from the
+        // moment it opens - for someone who set the GUI transparent before opening the editor.
+        graphicsShaderWindow->setWindowOpacity(windowOpacity());
         connect(graphicsShaderWindow, &SonicPi::ShaderBufferWindow::closedByUser,
                 this, [this]() {
                     // Hidden rather than destroyed, so the text survives closing the window. The same
@@ -4659,6 +4662,16 @@ void MainWindow::changeGUITransparency(int val)
 {
     // scale it linearly from 0 -> 100 to 0.3 -> 1
     setWindowOpacity((0.7 * ((100 - (float)val) / 100.0)) + 0.3);
+
+    // The shader editor follows the main window, deliberately and exactly.
+    //
+    // This is a live coding tool: the editor is meant to sit OVER the graphics output, with the
+    // code legible in front and the picture showing through. So its opacity is not an independent
+    // preference - it takes the same value, computed once, right here. Reading windowOpacity() back
+    // rather than repeating the formula above is what makes "exactly" true: there is one
+    // calculation in the program and both windows use its result.
+    if (graphicsShaderWindow)
+        graphicsShaderWindow->setWindowOpacity(windowOpacity());
 }
 
 // Volume: the fader after the limiter, as a percentage. It cannot change how
