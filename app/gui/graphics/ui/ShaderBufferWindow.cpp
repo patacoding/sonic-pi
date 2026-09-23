@@ -38,6 +38,9 @@
 #include <QVariant>
 #include <QWheelEvent>
 
+#include <Qsci/qscicommand.h>
+#include <Qsci/qscicommandset.h>
+
 namespace SonicPi
 {
 
@@ -46,6 +49,71 @@ namespace
 // The fragment shader is the one this feature renders, and it is the file the renderer reads. Named
 // here as a constant so the window and the renderer cannot ask for different files.
 const char* kFragmentShaderFile = "default.frag";
+
+// Put the editing keys back on THIS editor's Scintilla commands.
+//
+// SonicPiScintilla's constructor calls standardCommands()->clearKeys() and re-adds only the
+// navigation keys. That is not an oversight: in the main window the editing shortcuts are
+// MainWindow ACTIONS (textUndoAct -> undoInCurrentWorkspace -> the current audio buffer's undo), so
+// the widgets themselves never carry them.
+//
+// A different top-level window inherits none of that, which left this editor with no Ctrl+Z, no
+// Ctrl+C/V/X and no Ctrl+A - a code editor without undo. The COMMANDS were never removed, only
+// their keys, so restoring the six expected bindings is the whole repair. They are set on this
+// editor's own command set, so nothing else in the application is affected.
+//
+// Deliberately only the six that mean the same thing in any text editor. Sonic Pi's other Code-menu
+// actions (comment/uncomment, align, cut-to-end-of-line, the delete-word pair) carry Sonic Pi
+// language semantics and must not be applied blind to GLSL - they stay out.
+void restoreEditingKeys(SonicPiScintilla* editor)
+{
+    if (!editor)
+        return;
+
+    // QsciCommand takes raw key codes (modifiers OR'd with a key), not QKeySequence - the same form
+    // the SonicPiScintilla constructor uses. The command modifier is spelled the way the
+    // application's own shortcut table spells it: Ctrl on Windows and Linux, Command on macOS.
+#if defined(Q_OS_MAC)
+    const int cmd = Qt::META;
+#else
+    const int cmd = Qt::CTRL;
+#endif
+
+    struct Binding
+    {
+        QsciCommand::Command command;
+        int primary;
+        int alternate;
+    };
+
+    // Undo/redo take the bindings the application's shortcut table gives them, with the platform's
+    // other common redo (Ctrl+Y) as an alternate so either habit works. The rest are the universal
+    // Ctrl+X/C/V/A.
+    //
+    // The cut/copy commands are named SelectionCut/SelectionCopy in QScintilla; there is no plain
+    // Cut/Copy.
+    const Binding bindings[] = {
+        { QsciCommand::Undo,          cmd | Qt::Key_Z,                 0 },
+        { QsciCommand::Redo,          cmd | Qt::SHIFT | Qt::Key_Z,     cmd | Qt::Key_Y },
+        { QsciCommand::SelectionCut,  cmd | Qt::Key_X,                 0 },
+        { QsciCommand::SelectionCopy, cmd | Qt::Key_C,                 0 },
+        { QsciCommand::Paste,         cmd | Qt::Key_V,                 0 },
+        { QsciCommand::SelectAll,     cmd | Qt::Key_A,                 0 },
+    };
+
+    QsciCommandSet* commands = editor->standardCommands();
+
+    for (const Binding& binding : bindings)
+    {
+        QsciCommand* command = commands->find(binding.command);
+        if (!command)
+            continue;
+
+        command->setKey(binding.primary);
+        if (binding.alternate != 0)
+            command->setAlternateKey(binding.alternate);
+    }
+}
 
 } // namespace
 
@@ -66,6 +134,7 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     m_lexer = new GlslLexer(m_theme, this);
     m_editor = new SonicPiScintilla(nullptr, m_theme, QStringLiteral("shader_buffer"), false);
     m_editor->setLexer(m_lexer);
+    restoreEditingKeys(m_editor);
 
     m_compileButton = new QPushButton(tr("Compile"), this);
     QPushButton* revertButton = new QPushButton(tr("Revert"), this);
@@ -261,6 +330,20 @@ void ShaderBufferWindow::reloadFromDisk()
     QTextStream in(&file);
     const QString text = in.readAll();
     file.close();
+
+    // Reloading what is already in the editor is a no-op, and reporting it as "Loaded" is
+    // indistinguishable from a button that does nothing - which is how it was read. It is NOT an
+    // edge case: Compile writes the file, so after any compile the file and the editor agree, and
+    // Revert then has nothing to go back to. (Undo is the tool for taking back an edit that has
+    // already been compiled; Revert only discards edits made since the last write.)
+    if (text == m_editor->text())
+    {
+        m_status->setText(tr("Nothing to revert: the editor already matches %1").arg(path));
+        GraphicsLog::info(QStringLiteral("shader buffer: revert was a no-op; the file already "
+                                         "matches the editor (%1, %2 bytes)")
+                              .arg(path).arg(text.size()));
+        return;
+    }
 
     m_editor->setText(text);
     m_lastWrittenText = text;
