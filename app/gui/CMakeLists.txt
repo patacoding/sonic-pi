@@ -95,6 +95,8 @@ set(NEW_API_SOURCES
 # with its own offscreen GL context; the display window arrives in Phase 1.
 set(GRAPHICS_SOURCES
     ${QTAPP_ROOT}/graphics/ShaderText.h
+    ${QTAPP_ROOT}/graphics/osc/GraphicsOscReceiver.cpp
+    ${QTAPP_ROOT}/graphics/osc/GraphicsOscReceiver.h
     ${QTAPP_ROOT}/graphics/osc/GraphicsUniformMessage.h
     ${QTAPP_ROOT}/graphics/rendering/GraphicsFrame.h
     ${QTAPP_ROOT}/graphics/rendering/GraphicsLog.cpp

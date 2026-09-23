@@ -119,14 +119,15 @@ inline Target targetFromGlUniform(unsigned int glType, int size, const QString& 
 enum class DecodeError
 {
     None,
-    NotOsc,         // not an OSC message at all: garbage, or a truncated datagram
-    WrongAddress,   // a valid OSC message for something else
-    NameMissing,    // no arguments, or an empty name
-    NameNotString,  // the first argument is not a string
-    ValuesMissing,  // a name with no value after it
-    TooManyValues,  // more than kMaxValues - e.g. somebody sending a matrix anyway
-    BadValueType,   // a value that is not a number: string, blob, or an int64 that does not fit
-    NonFinite,      // NaN or infinity, which GL turns into black or garbage output
+    NotOsc,             // not an OSC message at all: garbage, or a truncated datagram
+    MalformedArguments, // the argument bytes contradict the type tags, or stop short
+    WrongAddress,       // a valid OSC message for something else
+    NameMissing,        // no arguments, or an empty name
+    NameNotString,      // the first argument is not a string
+    ValuesMissing,      // a name with no value after it
+    TooManyValues,      // more than kMaxValues - e.g. somebody sending a matrix anyway
+    BadValueType,       // a value that is not a number: string, blob, or an int64 that does not fit
+    NonFinite,          // NaN or infinity, which GL turns into black or garbage output
 };
 
 // Values are kept in the form they arrived. `integral` says every argument was an integer, which
@@ -169,10 +170,17 @@ inline Decoded decode(const char* bytes, int length)
 
     // oscpkt validates the address, the zero padding, the type tags and the argument lengths, so
     // a malformed packet is rejected here rather than producing a plausible-looking value.
+    //
+    // The distinction it draws is worth keeping: MALFORMED_ARGUMENTS means the bytes are a plausible
+    // OSC message whose type tags do not describe them, which is what a hand-rolled sender gets
+    // wrong - and "not an OSC message" would send that user looking in the wrong place. (Ruby's own
+    // encoder cannot produce it: its tags always match the values.)
     oscpkt::Message message(bytes, static_cast<size_t>(length));
     if (!message.isOk())
     {
-        out.error = DecodeError::NotOsc;
+        out.error = message.getErr() == oscpkt::MALFORMED_ARGUMENTS
+            ? DecodeError::MalformedArguments
+            : DecodeError::NotOsc;
         return out;
     }
 
@@ -338,15 +346,16 @@ inline const char* describe(DecodeError error)
 {
     switch (error)
     {
-    case DecodeError::None:           return "ok";
-    case DecodeError::NotOsc:         return "not an OSC message";
-    case DecodeError::WrongAddress:   return "wrong address";
-    case DecodeError::NameMissing:    return "no uniform name";
-    case DecodeError::NameNotString:  return "the name is not a string";
-    case DecodeError::ValuesMissing:  return "no value after the name";
-    case DecodeError::TooManyValues:  return "too many values";
-    case DecodeError::BadValueType:   return "a value is not a usable number";
-    case DecodeError::NonFinite:      return "a value is NaN or infinite";
+    case DecodeError::None:               return "ok";
+    case DecodeError::NotOsc:             return "not an OSC message";
+    case DecodeError::MalformedArguments: return "the arguments do not match the type tags";
+    case DecodeError::WrongAddress:       return "wrong address";
+    case DecodeError::NameMissing:        return "no uniform name";
+    case DecodeError::NameNotString:      return "the name is not a string";
+    case DecodeError::ValuesMissing:      return "no value after the name";
+    case DecodeError::TooManyValues:      return "too many values";
+    case DecodeError::BadValueType:       return "a value is not a usable number";
+    case DecodeError::NonFinite:          return "a value is NaN or infinite";
     }
     return "unknown";
 }

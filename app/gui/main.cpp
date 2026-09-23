@@ -27,6 +27,7 @@
 #include "utils/dividerproxystyle.h"
 #include "utils/fontroles.h"
 
+#include "graphics/osc/GraphicsOscReceiver.h"
 #include "graphics/rendering/GraphicsLog.h"
 #include "graphics/rendering/GraphicsRenderThread.h"
 #include "graphics/rendering/GraphicsSettings.h"
@@ -223,6 +224,19 @@ int main(int argc, char* argv[])
                                            << std::endl;
                          });
         gfxThread->start();
+
+        // OSC-driven shader uniforms.
+        //
+        // Created here, beside the render thread, and owned by the application: it needs nothing
+        // from the main window, and keeping it out of MainWindow is deliberate - that translation
+        // unit is the most expensive in the tree to recompile, and a graphics feature should not
+        // have to pay it because it wanted a socket.
+        //
+        // Nothing consumes the values yet (S3): they are decoded and reported, so that "the code
+        // reaches this process" and "the value reaches the shader" stay separately checkable.
+        // Parented to the application so it lives as long as the event loop that serves it.
+        auto* gfxOsc = new SonicPi::GraphicsOscReceiver(&app);
+        Q_UNUSED(gfxOsc);
 
         // Hand the thread to MainWindow so the output window can tell it what size
         // to render at. The window is created lazily on first use, long after
