@@ -109,6 +109,12 @@ GraphicsFrameStats GraphicsRenderThread::frameStats() const
     s.targetCount         = m_targetCount.load(std::memory_order_relaxed);
     s.frameCapHz          = m_frameCapHz.load(std::memory_order_relaxed);
     s.belowTarget         = m_belowTarget.load(std::memory_order_relaxed);
+    if (m_gfxRenderer)
+    {
+        s.gpuMs      = m_gfxRenderer->gpuFrameMs();
+        s.gpuMsAvg   = m_gfxRenderer->gpuFrameAvgMs();
+        s.gpuMsWorst = m_gfxRenderer->gpuFrameWorstMs();
+    }
     return s;
 }
 
@@ -497,6 +503,21 @@ void GraphicsRenderThread::run()
     }
     // ---------------------------------------------------------------------
 
+    // Set up the GPU frame timer, now that the renderer exists and the context is current.
+    // Reported immediately: whether the shader's own cost can be measured, and why not when it
+    // cannot. A figure that is silently absent is worse than one that is absent and explained,
+    // because nobody knows to distrust it.
+    {
+        QMutexLocker lock(&m_rendererMutex);
+        if (m_gfxRenderer)
+        {
+            m_gfxRenderer->setUpGpuTimer();
+            if (m_verbose)
+                GraphicsLog::info(QStringLiteral("  gpu timing  : %1")
+                                      .arg(m_gfxRenderer->gpuTimerDescription()));
+        }
+    }
+
     // Tell any listener the context is usable. Emitted from this thread; a queued
     // connection is what a GUI-side receiver needs.
     emit contextReady(m_contextOk);
@@ -586,6 +607,12 @@ void GraphicsRenderThread::run()
     // rather than a state worth hiding behind a skipped frame.
     qint64  windowWaitUs = 0;
     qint64  windowWaitWorstUs = 0;
+    // GPU time accumulators for the reporting window. Averaged rather than sampled, because the
+    // renderer hands back one frame's figure at a time and a point sample of a varying quantity
+    // describes the frame rather than the shader.
+    double  windowGpuMsSum = 0.0;
+    double  windowGpuMsWorst = 0.0;
+    int     windowGpuCount = 0;
     quint64 totalFrames = 0;
     qint64  nextDeadlineNs = frameTimer.nsecsElapsed();
 
@@ -811,6 +838,28 @@ void GraphicsRenderThread::run()
             m_fps.store(fps, std::memory_order_relaxed);
             m_worstFrameMs.store(windowWorstMs, std::memory_order_relaxed);
 
+            // The GPU time, averaged over the window rather than sampled once.
+            //
+            // The renderer returns one frame's figure at a time, a few frames late, so a single
+            // reading is a point sample of a quantity that varies; averaged over a second it
+            // describes the shader rather than the frame. -1 means the timer is unavailable, and
+            // is carried through rather than turned into 0 - a shader that costs nothing and a
+            // shader that was not measured must not look alike.
+            if (m_gfxRenderer)
+            {
+                const double gpuNow = m_gfxRenderer->gpuFrameMs();
+                if (gpuNow >= 0.0)
+                {
+                    windowGpuMsSum += gpuNow;
+                    ++windowGpuCount;
+                    windowGpuMsWorst = qMax(windowGpuMsWorst, gpuNow);
+                }
+                const double avg = windowGpuCount > 0 ? windowGpuMsSum / double(windowGpuCount) : -1.0;
+                m_gfxRenderer->setGpuFrameAverages(avg,
+                                                   windowGpuCount > 0 ? windowGpuMsWorst : -1.0);
+
+            }
+
             // Published for the debug window. Written once per reporting window rather
             // than per frame: a figure that changes 60 times a second cannot be read, so
             // a store in the hot path would buy nothing. The window draws them a little
@@ -877,6 +926,9 @@ void GraphicsRenderThread::run()
             windowWorstMs = 0.0;
             windowWaitUs = 0;
             windowWaitWorstUs = 0;
+            windowGpuMsSum = 0.0;
+            windowGpuMsWorst = 0.0;
+            windowGpuCount = 0;
             reportTimer.restart();
         }
 
@@ -966,6 +1018,10 @@ void GraphicsRenderThread::run()
 
         for (int i = 0; i < kTargetCount; ++i)
             m_targets[i].reset();
+
+        // The query objects belong to this context, so they go while it is still current.
+        if (m_gfxRenderer)
+            m_gfxRenderer->releaseGpuTimer();
         m_gfxRenderer.reset();
     }
 

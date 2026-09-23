@@ -106,6 +106,10 @@ private:
     // instead of a painter pass and a texture upload.
     qint64  m_lastOverlayMs = 0;
     QString m_lastFpsText;
+    // The GPU figure is tracked separately from the fps because the two change independently: the
+    // rate can hold steady while the shader gets more expensive, and that is exactly the case
+    // worth seeing.
+    QString m_lastGpuText;
 };
 
 } // namespace SonicPi

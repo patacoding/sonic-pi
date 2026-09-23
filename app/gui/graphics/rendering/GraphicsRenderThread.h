@@ -69,6 +69,9 @@ struct GraphicsFrameStats
     // that measures both numbers, so every surface that reports it reads one answer
     // instead of each comparing the two and possibly disagreeing. Carries hysteresis -
     // see where it is set, and why a rate sitting on the threshold must not flicker it.
+    double  gpuMs              = -1.0;  // GPU time of the last measured frame, -1 if unavailable
+    double  gpuMsAvg           = -1.0;  // mean over the last reporting window
+    double  gpuMsWorst         = -1.0;  // worst in the last reporting window
     bool    belowTarget         = false;
 };
 

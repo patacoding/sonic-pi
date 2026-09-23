@@ -143,14 +143,17 @@ void GraphicsPreviewWindow::refreshFpsOverlay()
 
     const QString fpsText = QStringLiteral("%1").arg(s.fps, 0, 'f', 1);
     const QString targetText = QStringLiteral("/ %1 fps").arg(s.frameCapHz);
+    // The GPU figure, when it could be measured. -1 means the timer is unavailable, and is shown
+    // as "-" rather than as 0.0: a shader that costs nothing and a shader that was not measured
+    // must not look alike, and 0.0 would read as the former.
+    const QString gpuText = s.gpuMsAvg >= 0.0
+                                ? QStringLiteral("gpu %1 ms").arg(s.gpuMsAvg, 0, 'f', 2)
+                                : QStringLiteral("gpu -");
 
-    // Rebuilt only when the text changes, so the common case costs a string comparison
-    // rather than a painter pass and a texture upload.
-    static const int kFpsDecimals = 1;
-    Q_UNUSED(kFpsDecimals);
-    if (fpsText == m_lastFpsText)
+    if (fpsText == m_lastFpsText && gpuText == m_lastGpuText)
         return;
     m_lastFpsText = fpsText;
+    m_lastGpuText = gpuText;
 
     QFont font(QStringLiteral("Consolas"));
     font.setPixelSize(kFontPx);
@@ -158,22 +161,24 @@ void GraphicsPreviewWindow::refreshFpsOverlay()
     font.setBold(true);
 
     const QFontMetrics fm(font);
-    const int textW = qMax(fm.horizontalAdvance(fpsText), fm.horizontalAdvance(targetText));
+    const int textW = qMax(qMax(fm.horizontalAdvance(fpsText), fm.horizontalAdvance(targetText)),
+                           fm.horizontalAdvance(gpuText));
     const int lineH = fm.height();
 
-    QImage img(textW + kPadding * 2, lineH * 2 + kPadding * 2, QImage::Format_ARGB32);
+    QImage img(textW + kPadding * 2, lineH * 3 + kPadding * 2, QImage::Format_ARGB32);
     img.fill(QColor(0, 0, 0, 170));
 
     QPainter p(&img);
     p.setFont(font);
 
-    // Green while the target is being met, amber when it is not. The threshold is the
-    // producer's, not this window's - see GraphicsFrameStats::belowTarget.
+    // Green while the target is being met, amber when it is not. The threshold is the producer's,
+    // not this window's - see GraphicsFrameStats::belowTarget.
     p.setPen(s.belowTarget ? QColor(255, 190, 70) : QColor(120, 255, 140));
     p.drawText(kPadding, kPadding + fm.ascent(), fpsText);
 
     p.setPen(QColor(210, 210, 210));
     p.drawText(kPadding, kPadding + lineH + fm.ascent(), targetText);
+    p.drawText(kPadding, kPadding + lineH * 2 + fm.ascent(), gpuText);
     p.end();
 
     m_view.setOverlay(img);

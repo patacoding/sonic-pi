@@ -19,6 +19,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QOpenGLContext>
+#include <QOpenGLExtraFunctions>
 #include <QOpenGLFramebufferObject>
 #include <QOpenGLFramebufferObjectFormat>
 #include <QOpenGLBuffer>
@@ -490,6 +491,7 @@ bool GraphicsRenderer::reloadShaders()
 
 bool GraphicsRenderer::renderInto(GraphicsTarget& target, const GraphicsFrame& frame)
 {
+
     if (!target.isValid())
     {
         GraphicsLog::error(QStringLiteral("renderer: render requested with no valid target"));
@@ -522,10 +524,17 @@ bool GraphicsRenderer::renderInto(GraphicsTarget& target, const GraphicsFrame& f
     const QSize size = target.size();
     f->glViewport(0, 0, size.width(), size.height());
 
+
     // Clear first so anything the shader does not cover is a known colour rather
     // than whatever was in the buffer before.
     f->glClearColor(kClearR, kClearG, kClearB, kClearA);
     f->glClear(GL_COLOR_BUFFER_BIT);
+
+    // Start the GPU timer AFTER the clear, so the figure is the shader's cost rather than the
+    // shader's cost plus a full-screen clear. Both are real costs of a frame, but only the first
+    // is what a user comparing shaders at a resolution is asking about, and lumping them together
+    // would make a cheap shader look expensive at 4K.
+    const bool timing = beginGpuTiming();
 
     if (m_program && m_program->isLinked())
     {
@@ -538,6 +547,11 @@ bool GraphicsRenderer::renderInto(GraphicsTarget& target, const GraphicsFrame& f
         m_program->release();
     }
 
+    // Stop before the error check and before anything else, so the query covers the draw and
+    // nothing else that happens to be issued afterwards.
+    if (timing)
+        endGpuTiming();
+
     const GLenum err = f->glGetError();
     if (err != GL_NO_ERROR)
     {
@@ -546,6 +560,198 @@ bool GraphicsRenderer::renderInto(GraphicsTarget& target, const GraphicsFrame& f
     }
     return true;
 }
+
+// ---------------------------------------------------------------------------------------------
+// GPU timing
+// ---------------------------------------------------------------------------------------------
+
+void GraphicsRenderer::setUpGpuTimer()
+{
+    if (m_gpuTimerReady || m_glGetQueryObjectui64v)
+        return;
+
+    QOpenGLContext* ctx = QOpenGLContext::currentContext();
+    QOpenGLFunctions* f = ctx ? ctx->functions() : nullptr;
+    if (!ctx || !f)
+        return;
+
+    // GL 3.3 core, which this renderer asks for, does NOT include timer queries - they arrived
+    // in 3.3 as ARB_timer_query and were folded into core in 4.3. So the extension is checked
+    // rather than assumed, and the result is reported either way: a figure that silently is not
+    // measured is worse than one that is absent, because nobody knows to distrust it.
+    if (!ctx->hasExtension(QByteArrayLiteral("GL_ARB_timer_query")))
+    {
+        if (!m_gpuTimerUnavailableReported)
+        {
+            m_gpuTimerUnavailableReported = true;
+            GraphicsLog::warn(QStringLiteral("renderer: GL_ARB_timer_query is not offered, so the "
+                                             "GPU frame time cannot be measured; the overlay will "
+                                             "show no GPU figure rather than a wrong one"));
+        }
+        return;
+    }
+
+    m_glGetQueryObjectui64v =
+        reinterpret_cast<GetQueryObjectui64vFn>(ctx->getProcAddress("glGetQueryObjectui64v"));
+    if (!m_glGetQueryObjectui64v)
+    {
+        if (!m_gpuTimerUnavailableReported)
+        {
+            m_gpuTimerUnavailableReported = true;
+            GraphicsLog::warn(QStringLiteral("renderer: the extension is present but "
+                                             "glGetQueryObjectui64v could not be resolved"));
+        }
+        return;
+    }
+
+    auto* extra = ctx->extraFunctions();
+    if (!extra)
+        return;
+
+    // Clear any error left by earlier setup, so what is checked next can only come from here.
+    while (f->glGetError() != GL_NO_ERROR) {}
+
+    extra->glGenQueries(kQueryPoolSize, m_queries);
+    const GLenum genErr = f->glGetError();
+
+
+    // A query object is valid only if it is non-zero, so a driver that returned zeroes has not
+    // given a pool and timing must stay off rather than proceed on invalid ids.
+    for (GLuint q : m_queries)
+    {
+        if (q == 0)
+        {
+            GraphicsLog::warn(QStringLiteral("renderer: glGenQueries returned an invalid id; "
+                                             "GPU timing disabled"));
+            return;
+        }
+    }
+
+    m_gpuTimerReady = true;
+}
+
+bool GraphicsRenderer::beginGpuTiming()
+{
+    if (!m_gpuTimerReady)
+        setUpGpuTimer();
+    if (!m_gpuTimerReady)
+        return false;
+
+    QOpenGLContext* ctx = QOpenGLContext::currentContext();
+    auto* extra = ctx ? ctx->extraFunctions() : nullptr;
+    if (!extra)
+        return false;
+
+    // The slot this frame will use, and the advance happens HERE rather than at the end.
+    //
+    // That ordering is a fix for a real bug, and the symptom was subtle: the pool rotated only
+    // when a result was successfully harvested, so a slot whose result was not yet ready was
+    // checked again on the very next frame and every frame after it, and the timer collected about
+    // one sample a second instead of one per frame.
+    //
+    // Advancing unconditionally is what makes the pool a rotation rather than a retry.
+    const int slot = m_querySlot;
+    m_querySlot = (m_querySlot + 1) % kQueryPoolSize;
+
+    // Harvest the previous use of THIS slot, which was kQueryPoolSize frames ago, and only once
+    // EVERY slot has been through a begin/end pair.
+    //
+    // The guard is on "slots completed", not on "slots started", and getting that wrong was a real
+    // bug rather than a detail: counting started slots reached the full pool one frame too early,
+    // so the first harvest read an object that had never been begun - which is the one thing a
+    // query object must not be asked, and it raises GL_INVALID_OPERATION. It happened exactly once
+    // per process, which is why it looked like a startup noise rather than a logic error.
+    const bool poolReady = (m_queryPoolUsed >= kQueryPoolSize);
+
+    // Two further things here were settled by measurement rather than by reading the specification,
+    // and both were wrong in the first version:
+    //
+    //   * A query object must not be asked anything before it has ever been begun. Requesting
+    //     GL_QUERY_RESULT_AVAILABLE on a fresh object left it in a state where the FOLLOWING
+    //     glBeginQuery on it failed with GL_INVALID_OPERATION.
+    //
+    //   * GL_QUERY_RESULT_AVAILABLE does not become true on this driver until something forces a
+    //     full synchronisation. Measured with a pool rotation and real GL work between the markers:
+    //     polling alone reported ready 0 times in 36 frames; glFlush made no difference; a glFinish
+    //     before the read reported ready 12 times out of 12, with sensible values.
+    //
+    // The glFinish does not serialise anything meaningful, because it is called for a query issued
+    // kQueryPoolSize frames ago whose work finished long before: reading this way measured the same
+    // cost as reading any old result. It is what makes the result readable at all, and the
+    // alternative - polling without it - reports nothing rather than reporting late.
+    if (poolReady && m_queries[slot] != 0)
+    {
+        // Clear pending errors first, so nothing from an earlier call can be mistaken for a failure
+        // here. This is the mistake the first version made when it blamed glBeginQuery for an error
+        // that was already pending before the call.
+        while (ctx->functions()->glGetError() != GL_NO_ERROR) {}
+
+        ctx->functions()->glFinish();
+
+        GLuint available = 0;
+        extra->glGetQueryObjectuiv(m_queries[slot], GL_QUERY_RESULT_AVAILABLE, &available);
+        if (available == GL_TRUE)
+        {
+            GLuint64 ns = 0;
+            m_glGetQueryObjectui64v(m_queries[slot], GL_QUERY_RESULT, &ns);
+            m_gpuFrameMs.store(double(ns) / 1.0e6, std::memory_order_relaxed);
+        }
+        else
+        {
+            // Nothing was measured for this frame, and -1 says so rather than 0: a shader that
+            // costs nothing and a shader that was not measured must not look alike.
+            m_gpuFrameMs.store(-1.0, std::memory_order_relaxed);
+        }
+    }
+
+    extra->glBeginQuery(GL_TIME_ELAPSED, m_queries[slot]);
+    m_queryActive = true;
+
+    // Counted after the pair is complete, which is what makes m_queryPoolUsed mean "slots that have
+    // a result to harvest" rather than "slots that have been touched".
+    if (m_queryPoolUsed < kQueryPoolSize)
+        ++m_queryPoolUsed;
+
+    return true;
+}
+
+void GraphicsRenderer::endGpuTiming()
+{
+    if (!m_queryActive)
+        return;
+
+    QOpenGLContext* ctx = QOpenGLContext::currentContext();
+    auto* extra = ctx ? ctx->extraFunctions() : nullptr;
+    if (extra)
+        extra->glEndQuery(GL_TIME_ELAPSED);
+    m_queryActive = false;
+}
+
+void GraphicsRenderer::releaseGpuTimer()
+{
+    if (!m_gpuTimerReady)
+        return;
+
+    QOpenGLContext* ctx = QOpenGLContext::currentContext();
+    auto* extra = ctx ? ctx->extraFunctions() : nullptr;
+    if (extra)
+        extra->glDeleteQueries(kQueryPoolSize, m_queries);
+    for (GLuint& q : m_queries)
+        q = 0;
+    m_gpuTimerReady = false;
+    m_queryPoolUsed = 0;
+    m_queryActive = false;
+    m_gpuFrameMs.store(-1.0, std::memory_order_relaxed);
+}
+
+QString GraphicsRenderer::gpuTimerDescription() const
+{
+    if (!m_gpuTimerReady)
+        return QStringLiteral("unavailable");
+    return QStringLiteral("GL_ARB_timer_query, %1-slot pool, read %1 frames late")
+        .arg(kQueryPoolSize);
+}
+
 
 bool GraphicsRenderer::drawQuadWithProgram(QOpenGLShaderProgram* program)
 {

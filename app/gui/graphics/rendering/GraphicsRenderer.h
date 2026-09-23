@@ -25,6 +25,7 @@
 #include <QString>
 
 #include <memory>
+#include <atomic>
 
 #include "GraphicsFrame.h"
 
@@ -104,6 +105,29 @@ public:
     // reads deliberately rather than by habit.
     bool readPixels(GraphicsTarget& target, QSize* sizeOut,
                     std::unique_ptr<unsigned char[]>* pixelsOut);
+
+    // GPU time of one frame's draw, in milliseconds, or -1 when it has not been measured.
+    //
+    // What this measures that nothing else does: the CPU-side frame time says how long the
+    // thread took to ISSUE the work, which is a fraction of a millisecond for a shader that
+    // could still be too slow to run at the target rate. The GPU time is what actually answers
+    // "how expensive is this shader at this resolution", which is the question a user asking
+    // about frame rate is really asking.
+    //
+    // Written by the render thread and read by anything; a plain atomic so a reader cannot stall
+    // a frame. -1 rather than 0 for "not measured", because 0 would read as a free shader.
+    double gpuFrameMs() const { return m_gpuFrameMs.load(std::memory_order_relaxed); }
+    // The same value sampled for the whole previous reporting window's worst frame. Better than
+    // the average for spotting a shader that is usually fast and occasionally not.
+    double gpuFrameWorstMs() const { return m_gpuFrameWorstMs.load(std::memory_order_relaxed); }
+    // Average over the last reporting window, which the render thread computes and passes in
+    // because it owns the reporting cadence. Called once a second, not per frame.
+    void setGpuFrameAverages(double avgMs, double worstMs)
+    {
+        m_gpuFrameAvgMs.store(avgMs, std::memory_order_relaxed);
+        m_gpuFrameWorstMs.store(worstMs, std::memory_order_relaxed);
+    }
+    double gpuFrameAvgMs() const { return m_gpuFrameAvgMs.load(std::memory_order_relaxed); }
 
     // Re-read the shader files and recompile. On failure the previously working
     // program is kept and the compiler log is reported, so a bad edit does not take
@@ -239,6 +263,60 @@ private:
     std::unique_ptr<QOpenGLBuffer> m_vbo;
     QString m_vertexPath;
     QString m_fragmentPath;
+
+    // ---- GPU timing (GL_ARB_timer_query) ------------------------------------------------
+    //
+    // A POOL of query objects read round-robin, which is the whole trick. Reading a query's
+    // result forces the CPU to wait for the GPU, so a query written and read in the same frame
+    // would serialise the two and destroy the parallelism the design depends on - it would
+    // measure a pipeline made synchronous by the act of measuring it.
+    //
+    // Instead each frame starts a query into the next slot and reads the result of the slot used
+    // kQueryPoolSize frames ago. That result has been ready for several frames, so reading it is
+    // free, and the cost reported is a few frames old - exactly right for a number that changes
+    // a few times a second.
+    //
+    // If a slot's previous result is not ready, that frame is not timed rather than waited for.
+    // Under a stall the pool is exhausted and timing stops on its own, then resumes.
+    static constexpr int kQueryPoolSize = 4;
+    GLuint m_queries[kQueryPoolSize] = { 0, 0, 0, 0 };
+    int    m_querySlot = 0;
+    int    m_queryPoolUsed = 0;      // how many entries hold a result worth reading
+    bool   m_queryActive = false;    // a glBeginQuery is open
+    bool   m_gpuTimerReady = false;  // extension present and entry point resolved
+    bool   m_gpuTimerUnavailableReported = false;
+
+    // Resolved by hand: QOpenGLExtraFunctions exposes glGetQueryObjectuiv, whose result is 32
+    // bits, but a GL_TIME_ELAPSED result is nanoseconds in a 64-bit value, and this Qt version
+    // has no wrapper for that one.
+    using GetQueryObjectui64vFn = void (*)(GLuint, GLenum, GLuint64*);
+    GetQueryObjectui64vFn m_glGetQueryObjectui64v = nullptr;
+
+    std::atomic<double> m_gpuFrameMs{-1.0};
+    std::atomic<double> m_gpuFrameAvgMs{-1.0};
+    std::atomic<double> m_gpuFrameWorstMs{-1.0};
+
+    // Open a query if possible, returning whether one was opened.
+    bool beginGpuTiming();
+    // Close the query and harvest an older slot's result. Safe when beginGpuTiming returned
+    // false.
+    void endGpuTiming();
+
+public:
+    // Resolve the entry point and create the query pool. Requires a current context, and is safe
+    // to call more than once; the render thread calls it once after this renderer exists.
+    //
+    // Public because the render thread owns the context and therefore owns when this can happen,
+    // and because this is what produces gpuTimerDescription() - the render thread logs that line,
+    // and a measurement nobody can ask about is one nobody knows to distrust.
+    void setUpGpuTimer();
+
+    // Drop the query objects, while the context is still current.
+    void releaseGpuTimer();
+
+    // What the timer reports about itself, for the one log line at startup: whether GPU timing is
+    // available, and why not when it is not.
+    QString gpuTimerDescription() const;
 };
 
 } // namespace SonicPi
