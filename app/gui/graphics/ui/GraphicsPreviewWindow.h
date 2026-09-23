@@ -89,13 +89,13 @@ protected:
     void closeEvent(QCloseEvent* e) override;
 
 private:
-    // Where the whole frame goes inside this window's surface: fitted by aspect ratio,
-    // centred, in device pixels with a bottom-left origin as GL wants. Never crops.
-    QRect fittedRect(const QSize& frame, const QSize& surface) const;
-
     // Rebuild the fps overlay from the render thread's figures, at most a few times a second
     // and only when the text actually changes.
     void refreshFpsOverlay();
+
+    // Placement is fittedFrameRect() in GraphicsTextureView.h, shared with the output window:
+    // leaving the picture whole is a rule about the display side rather than about either
+    // window, so it is not implemented twice.
 
     GraphicsTextureView m_view{GraphicsConsumer::Preview};
 

@@ -75,5 +75,29 @@ void setOutputSize(const QSize& size);
 void setFrameCapHz(int hz);
 void setShowOutput(bool show);
 
+// Safety ceilings, and the parsing for values typed by hand.
+//
+// Not limits on what is reasonable - the user decides that, and a number that comes from a
+// projector's spec sheet is not the program's business to second-guess. They exist so a slipped
+// digit (38400x2160) is caught before it reaches the driver. 16384 is the widest texture modern
+// GPUs offer; 500Hz is beyond any display and any plausible external consumer.
+//
+// If a real need exceeds either, the value is what should change rather than the check.
+constexpr int kMaxOutputDimension = 16384;
+constexpr int kMaxFrameRateHz = 500;
+
+// Parse "3840x2160", "3840 x 2160", "3840X2160", "3840*2160" or a bare "3840" (taken as width
+// and height, since a square output is occasionally wanted and refusing it would be an opinion).
+// Returns false when the text is not a pair of positive integers, or when either exceeds
+// kMaxOutputDimension.
+//
+// A free function taking a string, so the accept/reject rule is testable without opening a
+// dialog - which is the only way this rule gets checked, since a modal dialog cannot be driven
+// from an automated run.
+bool parseOutputSize(const QString& text, QSize* sizeOut);
+
+// Parse a frame rate as a single positive integer, at most kMaxFrameRateHz.
+bool parseFrameRateHz(const QString& text, int* hzOut);
+
 } // namespace GraphicsSettings
 } // namespace SonicPi

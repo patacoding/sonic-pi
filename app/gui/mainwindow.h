@@ -908,6 +908,29 @@ private:
     // numbers over it. A separate window rather than a pane here, so that nothing about
     // rendering lives in this class - see showGraphicsPreview().
     QAction *graphicsPreviewAct;
+    // Output resolution and frame rate, as submenus of the Graphics menu.
+    //
+    // A submenu in the menu that already exists, rather than a settings pane or a
+    // preferences page: these are two values with a short list of sensible choices each, and
+    // the point of the feature is to change them while watching the picture and the frame
+    // rate. Opening a dialog to do that would hide the thing being judged.
+    //
+    // Owned by the menu; the check state is rebuilt from GraphicsSettings when the menu is
+    // about to be shown, so a hand-edited graphics.ini is reflected rather than contradicted.
+    QMenu *graphicsResolutionMenu = nullptr;
+    QMenu *graphicsFrameRateMenu = nullptr;
+    // Applies the resolution and frame rate the menu, or a hand-edited file, now asks for.
+    // Called when the menu opens, so a change made outside the running app is adopted.
+    void applyGraphicsConfig();
+    // Rebuild the tick marks from what is actually configured.
+    void syncGraphicsConfigMenu();
+    // Ask for an output resolution in WxH form. Presets cover the common cases; this is for
+    // the exact native resolution of a projector, LED processor or display, which is the
+    // number that actually matters when the output is mapped onto hardware.
+    void askForCustomResolution();
+    // Ask for a frame rate in Hz. Same rule: a positive integer, with a safety ceiling.
+    void askForCustomFrameRate();
+
     // The output window, created lazily on first show and owned here.
     SonicPi::GraphicsWindow* graphicsWindow = nullptr;
     // The debug preview window, likewise. It is a real consumer of the same handoff, not

@@ -14,6 +14,7 @@
 #include "GraphicsWindow.h"
 #include "GraphicsLog.h"
 #include "GraphicsSettings.h"
+#include "GraphicsTextureView.h"
 
 #include <QDateTime>
 
@@ -134,20 +135,24 @@ void GraphicsWindow::initializeGL()
                                   : QStringLiteral("DIFFERENT from Qt's global group"))));
     }
 
-    // The size being displayed is the render target's, so the crop matches what was
-    // actually rendered. Taken from the render thread rather than re-read from
-    // settings: a second copy of the setting could disagree with the target.
+    // Reported for the log only; the placement itself reads the live size every frame, because
+    // the output resolution is settable at runtime from the Graphics menu and a window that
+    // kept a copy would fit a size the renderer had stopped using.
     m_outputSize = m_renderThread ? m_renderThread->renderTargetSize()
                                   : GraphicsSettings::outputSize();
     {
         const qreal dpr = devicePixelRatio();
         const QSize surface(qMax(1, int(width() * dpr)), qMax(1, int(height() * dpr)));
-        GraphicsLog::info(QStringLiteral("window: showing a 1:1 crop of the %1x%2 output; "
-                                         "surface is %3x%4 device pixels (logical %5x%6 at dpr %7)")
+        const QRect dest = fittedRect();
+        GraphicsLog::info(QStringLiteral("window: showing the whole %1x%2 output fitted into %3x%4; "
+                                         "surface is %5x%6 device pixels (logical %7x%8 at dpr %9), "
+                                         "so the picture occupies %10x%11")
                               .arg(m_outputSize.width()).arg(m_outputSize.height())
+                              .arg(width()).arg(height())
                               .arg(surface.width()).arg(surface.height())
                               .arg(width()).arg(height())
-                              .arg(dpr));
+                              .arg(dpr)
+                              .arg(dest.width()).arg(dest.height()));
     }
 
     // Nothing else to set up here: this window displays the render thread's
@@ -206,8 +211,10 @@ void GraphicsWindow::paintGL()
                     GraphicsRenderer::kClearA);
     f->glClear(GL_COLOR_BUFFER_BIT);
 
-    // 1:1 crop, centred, never scaled - see cropRect().
-    const QRect destination = cropRect();
+    // The whole output, fitted and centred - see fittedRect(). The clear above painted the
+    // margin, so whatever the aspect ratio does not fill reads as black rather than as
+    // whatever the previous frame left there.
+    const QRect destination = fittedRect();
     if (destination.isEmpty())
         return;
 
@@ -314,28 +321,25 @@ void GraphicsWindow::paintGL()
     requestUpdate();
 }
 
-// Where the output image goes on the window's surface, in device pixels with a
-// top-left origin.
+// Where the whole frame goes on this window's surface.
 //
-// 1:1 and centred. Never scaled, so a mismatch between the window's shape and the
-// output's shape shows as margin rather than as distortion.
-QRect GraphicsWindow::cropRect() const
+// Fitted, never cropped. This was a 1:1 centred crop, which meant a window smaller than the
+// output - a 4K output on a 2K screen, or simply a small window - showed a magnified middle of
+// the picture with no indication that most of it was off-screen. The output resolution is a
+// property of the OUTPUT, not of this window: it is what an external consumer receives, and
+// Spout has no window at all, so this window has no standing to crop it.
+//
+// The fitting itself is fittedFrameRect(), shared with the debug preview so the two cannot
+// drift apart.
+QRect GraphicsWindow::fittedRect() const
 {
-    if (m_outputSize.isEmpty())
+    const QSize output = m_renderThread ? m_renderThread->renderTargetSize() : m_outputSize;
+    if (output.isEmpty())
         return QRect();
 
     const qreal dpr = devicePixelRatio();
-    const int surfaceW = qMax(1, int(width() * dpr));
-    const int surfaceH = qMax(1, int(height() * dpr));
-
-    // The visible part is at most the surface and at most the output itself.
-    const int visibleW = qMin(surfaceW, m_outputSize.width());
-    const int visibleH = qMin(surfaceH, m_outputSize.height());
-
-    // Centred on the surface, so the window is a viewport onto the middle of the
-    // output. A window larger than the output therefore leaves even margin on all
-    // sides rather than pinning the image into a corner.
-    return QRect((surfaceW - visibleW) / 2, (surfaceH - visibleH) / 2, visibleW, visibleH);
+    const QSize surface(qMax(1, int(width() * dpr)), qMax(1, int(height() * dpr)));
+    return fittedFrameRect(output, surface);
 }
 
 QScreen* GraphicsWindow::showOnNextScreen()

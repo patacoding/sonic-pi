@@ -16,6 +16,7 @@
 
 #include <QDir>
 #include <QFile>
+#include <QRegularExpression>
 #include <QSettings>
 
 namespace SonicPi
@@ -198,6 +199,52 @@ void setFrameCapHz(int hz)
 void setShowOutput(bool show)
 {
     writeSetting(QStringLiteral("show-output"), show);
+}
+
+bool parseOutputSize(const QString& text, QSize* sizeOut)
+{
+    static const QRegularExpression pair(
+        QStringLiteral("^\\s*(\\d+)\\s*[xX*\u00d7,]\\s*(\\d+)\\s*$"));
+    static const QRegularExpression single(QStringLiteral("^\\s*(\\d+)\\s*$"));
+
+    int w = 0;
+    int h = 0;
+    if (const QRegularExpressionMatch m = pair.match(text); m.hasMatch())
+    {
+        w = m.captured(1).toInt();
+        h = m.captured(2).toInt();
+    }
+    else if (const QRegularExpressionMatch m = single.match(text); m.hasMatch())
+    {
+        w = h = m.captured(1).toInt();
+    }
+    else
+    {
+        return false;
+    }
+
+    if (w <= 0 || h <= 0 || w > kMaxOutputDimension || h > kMaxOutputDimension)
+        return false;
+
+    if (sizeOut)
+        *sizeOut = QSize(w, h);
+    return true;
+}
+
+bool parseFrameRateHz(const QString& text, int* hzOut)
+{
+    static const QRegularExpression number(QStringLiteral("^\\s*(\\d+)\\s*$"));
+    const QRegularExpressionMatch m = number.match(text);
+    if (!m.hasMatch())
+        return false;
+
+    const int hz = m.captured(1).toInt();
+    if (hz <= 0 || hz > kMaxFrameRateHz)
+        return false;
+
+    if (hzOut)
+        *hzOut = hz;
+    return true;
 }
 
 } // namespace GraphicsSettings

@@ -117,38 +117,9 @@ void GraphicsPreviewWindow::resizeGL(int w, int h)
     update();
 }
 
-// The whole frame, fitted by aspect ratio and centred, in device pixels with the
-// bottom-left origin GL expects.
-//
-// Fit rather than crop, so nothing of the picture is ever hidden - that is the point of a
-// preview. It also means this window is the one place where the output IS scaled, which is
-// the opposite of the output window's rule (1:1, centred, never scaled). The two rules are
-// different because the two windows answer different questions: the output window must show
-// pixels exactly as rendered, the preview must show the whole picture whatever its size.
-QRect GraphicsPreviewWindow::fittedRect(const QSize& frame, const QSize& surface) const
-{
-    if (frame.isEmpty() || surface.isEmpty())
-        return QRect();
-
-    // Integer arithmetic, so the result is exact and compares cleanly.
-    const int byWidthH  = qMax(1, frame.height() * surface.width() / frame.width());
-    const int byHeightW = qMax(1, frame.width() * surface.height() / frame.height());
-
-    int w, h;
-    if (byWidthH <= surface.height())
-    {
-        // Height-limited fit: the frame is relatively taller than the window.
-        w = surface.width();
-        h = byWidthH;
-    }
-    else
-    {
-        w = byHeightW;
-        h = surface.height();
-    }
-
-    return QRect((surface.width() - w) / 2, (surface.height() - h) / 2, w, h);
-}
+// The fitting itself lives in GraphicsTextureView.h as fittedFrameRect(), shared with the
+// output window. It used to be a method here; two copies of a rule about the display side is
+// how this feature has previously ended up with implementations that disagree.
 
 // Build the overlay image from the render thread's figures.
 //
@@ -234,7 +205,7 @@ void GraphicsPreviewWindow::paintGL()
     if (frame.isEmpty() && m_renderThread)
         frame = m_renderThread->renderTargetSize();
 
-    const QRect dest = fittedRect(frame, surface);
+    const QRect dest = fittedFrameRect(frame, surface);
     if (!dest.isEmpty())
     {
         // glViewport's origin is the bottom-left, the rect's is the top-left - hence the y

@@ -128,9 +128,11 @@ public:
     void setVerbose(bool verbose) { m_verbose = verbose; }
 
     // The frame rate ceiling, in Hz. Zero or negative means "use the default".
-    // Set before start(); changing it later would need the loop to re-read it, and
-    // nothing needs that yet.
-    void setTargetFps(int fps) { m_targetFps = fps; }
+    //
+    // Safe to call while the loop is running: the loop re-reads it at the top of the next
+    // frame and restarts its pacing from there. See applyRateRequest() for why a restart is
+    // the correct response rather than an adjustment.
+    void setTargetFps(int fps);
 
     // What the display the output window is on can actually show, in Hz. Zero means
     // unknown.
@@ -146,9 +148,9 @@ public:
     // "on target" there is a false good-news message, and a user asking what rate they are
     // getting was told a number they cannot see.
     //
-    // Safe to call while the loop is running: the loop re-reads it once a second, at the
-    // same point it reports.
-    void setDisplayRefreshHz(int hz) { m_displayRefreshHz.store(hz, std::memory_order_relaxed); }
+    // Safe to call while the loop is running: the effective rate is re-derived at the top of
+    // the next frame.
+    void setDisplayRefreshHz(int hz);
 
     bool contextIsValid() const { return m_contextOk; }
     QString rendererName() const { return m_renderer; }
@@ -188,6 +190,11 @@ public:
     // A request that differs from the current size is not applied until that
     // frame, so callers should not expect the change to have happened on return.
     void setRenderTargetSize(const QSize& sizeInPixels);
+
+    // An alias, because the two callers speak differently: the startup path "sets" the size it
+    // read from settings, while the menu asks for a size the user chose. Same function, and
+    // deliberately not a second one.
+    void requestRenderTargetSize(const QSize& sizeInPixels) { setRenderTargetSize(sizeInPixels); }
 
     // The size currently being rendered into. May differ from the last requested
     // size until the render thread has applied it.
@@ -230,6 +237,16 @@ private:
     // the top of a frame. Returns true if the target was rebuilt. Must be called
     // with the context current.
     bool applyRenderTargetSizeRequest();
+
+    // The rate to pace to: the user's request capped by what the display can show. Both
+    // inputs are guarded, so this is the one place the pair is read together.
+    int effectiveTargetHz() const;
+
+    // Apply a pending rate change to the loop's local pacing state. Returns true when the
+    // rate actually changed, in which case the caller MUST restart its pacing and its
+    // statistics rather than adjust them - see the call site for why that is the correct
+    // response and not a shortcut.
+    bool applyRateChange(int* capHz, qint64* intervalNs, qint64* spinWindowNs);
 
     std::unique_ptr<QOpenGLContext>   m_context;
     std::unique_ptr<QOffscreenSurface> m_surface;
@@ -298,8 +315,18 @@ private:
     bool    m_verbose   = true;
     bool    m_contextOk = false;
     bool    m_renderVerified = false;
-    // Frame rate ceiling. 0 means use kDefaultFrameCapHz.
-    int     m_targetFps = 0;
+
+    // The rate the loop paces to, and what it was derived from. Guarded by m_rateMutex
+    // because a menu can change them while the loop reads them, and they are read once per
+    // frame rather than once per rate change. Contention is nil - a call happens when the
+    // user picks a menu item - so a mutex is the honest tool here rather than an atomic for
+    // two ints that must be read together.
+    mutable QMutex m_rateMutex;
+    int     m_targetFps = 0;          // the user's request; 0 means "use the default"
+    int     m_displayRefreshHz = 0;   // what the display can show; 0 means unknown
+    // Set when either of the above changes, so the loop restarts its pacing instead of
+    // carrying a deadline that belongs to the previous rate.
+    std::atomic<bool> m_rateChangePending{false};
 
     // Not owned. See setSharedFrameSlot().
     GraphicsSharedFrameSlot* m_sharedFrame = nullptr;
@@ -329,9 +356,6 @@ private:
     std::atomic<int>       m_frameCapHz{0};
     // Latched, not recomputed by readers: see GraphicsFrameStats::belowTarget.
     std::atomic<bool>      m_belowTarget{false};
-    // What the output window's display can show, or 0 when unknown. See
-    // setDisplayRefreshHz() for why an offscreen renderer cannot work this out itself.
-    std::atomic<int>       m_displayRefreshHz{0};
 
     // The requested and the actual render target size. Kept as plain ints in
     // atomics rather than a QSize because QSize is not lock-free to read

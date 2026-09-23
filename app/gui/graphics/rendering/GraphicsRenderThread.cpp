@@ -112,6 +112,58 @@ GraphicsFrameStats GraphicsRenderThread::frameStats() const
     return s;
 }
 
+void GraphicsRenderThread::setTargetFps(int fps)
+{
+    QMutexLocker lock(&m_rateMutex);
+    if (m_targetFps == fps)
+        return;
+    m_targetFps = fps;
+    // The flag, not the value, is what the loop watches. It reads both values under the same
+    // lock when it sees the flag, so it can never apply a half-updated pair.
+    m_rateChangePending.store(true, std::memory_order_release);
+}
+
+void GraphicsRenderThread::setDisplayRefreshHz(int hz)
+{
+    QMutexLocker lock(&m_rateMutex);
+    if (m_displayRefreshHz == hz)
+        return;
+    m_displayRefreshHz = hz;
+    m_rateChangePending.store(true, std::memory_order_release);
+}
+
+// The rate to pace to: what the user asked for, capped by what the display can show.
+//
+// One place, so the startup path and the menu path cannot derive it differently - and the
+// display cap is the reason this is not simply the user's number. This thread renders
+// offscreen, so nothing else throttles it to a display, and pacing above the refresh rate
+// produces frames nobody can see while reporting a rate the user cannot observe. Measured
+// before the cap existed: a 240Hz request was met - 240.3 fps, logged as healthy - on a
+// 165Hz panel.
+int GraphicsRenderThread::effectiveTargetHz() const
+{
+    QMutexLocker lock(&m_rateMutex);
+    const int requested = m_targetFps > 0 ? m_targetFps : kDefaultFrameCapHz;
+    const int display = m_displayRefreshHz;
+    return (display > 0 && display < requested) ? display : requested;
+}
+
+bool GraphicsRenderThread::applyRateChange(int* capHz, qint64* intervalNs, qint64* spinWindowNs)
+{
+    if (!m_rateChangePending.exchange(false, std::memory_order_acquire))
+        return false;
+
+    const int wanted = effectiveTargetHz();
+    if (wanted == *capHz)
+        return false;
+
+    *capHz = wanted;
+    *intervalNs = 1000000000LL / *capHz;
+    *spinWindowNs = qMin(qint64(2000000), *intervalNs / 8);
+    m_frameCapHz.store(*capHz, std::memory_order_relaxed);
+    return true;
+}
+
 bool GraphicsRenderThread::requestShaderReload()
 {
     if (!m_loopRunning.load(std::memory_order_relaxed))
@@ -505,42 +557,22 @@ void GraphicsRenderThread::run()
     //
     // The rate the loop paces to, which is NOT simply what the user asked for.
     //
-    // It is also capped by what the display can show, once the output window has reported
-    // that. This thread renders offscreen, so nothing else throttles it to a display, and
-    // pacing above the refresh rate produces frames nobody can see while reporting a rate
-    // the user cannot observe. Measured before this cap existed: a 240Hz request was met -
-    // 240.3 fps, logged as healthy - on a 165Hz panel.
+    // It is also capped by what the display can show. This thread renders offscreen, so
+    // nothing else throttles it to a display, and pacing above the refresh rate produces
+    // frames nobody can see while reporting a rate the user cannot observe. Measured before
+    // this cap existed: a 240Hz request was met - 240.3 fps, logged as healthy - on a 165Hz
+    // panel.
     //
-    // Re-evaluated once a second inside the loop (the window may be moved to another
-    // screen, and it does not exist yet when this thread starts), so these are the initial
-    // values.
-    int capHz = m_targetFps > 0 ? m_targetFps : kDefaultFrameCapHz;
-    const int requestedHz = capHz;
+    // Derived through effectiveTargetHz() and not recomputed here, so the startup path and
+    // the menu path cannot disagree about what the rate is.
+    int capHz = effectiveTargetHz();
     qint64 intervalNs = 1000000000LL / capHz;
-
-    {
-        const int displayHz = m_displayRefreshHz.load(std::memory_order_relaxed);
-        if (displayHz > 0 && displayHz < capHz)
-            capHz = displayHz;
-        intervalNs = 1000000000LL / capHz;
-    }
+    qint64 spinWindowNs = qMin(qint64(2000000), intervalNs / 8);
     m_frameCapHz.store(capHz, std::memory_order_relaxed);
 
-    // The spin window scales with the interval rather than being a fixed 2ms.
-    //
-    // Sleep alone cannot hit a sub-millisecond deadline: Windows' timer
-    // granularity is about 1ms, and a request is rounded up to the next tick. So
-    // the last part of the wait is spun. That part has to stay a small fraction of
-    // the interval - a fixed 2ms against a 6.9ms interval (144Hz) throws away most
-    // of the frame, and the spin would dominate.
-    qint64 spinWindowNs = qMin(qint64(2000000), intervalNs / 8);
-
-    GraphicsLog::info(QStringLiteral("render loop: started, cap %1Hz%2, interval %3ns, spin %4us, "
+    GraphicsLog::info(QStringLiteral("render loop: started, cap %1Hz, interval %2ns, spin %3us, "
                                      "priority=lowest")
                           .arg(capHz)
-                          .arg(capHz != requestedHz
-                                   ? QStringLiteral(" (display limit; %1Hz was asked for)").arg(requestedHz)
-                                   : QString())
                           .arg(intervalNs)
                           .arg(spinWindowNs / 1000));
 
@@ -579,6 +611,40 @@ void GraphicsRenderThread::run()
         // can never land between the clear and the draw. This is the only place
         // the target changes size.
         applyRenderTargetSizeRequest();
+
+        // A rate change made from the menu since the last frame: RESTART, do not adjust.
+        //
+        // nextDeadlineNs was accumulated from the OLD interval, so after a change it is a
+        // value belonging to a different target - continuing to pace against it means pacing
+        // M beats to N's tempo. Every "smooth" way to adapt it is a way of preserving a
+        // number that has stopped meaning anything.
+        //
+        // So everything deriving from the old rate is thrown away and re-anchored to now:
+        // the pacing deadline, the statistics window, and the frame delta. That is also why
+        // the three risks of a live rate change - catching up (a burst of frames), stalling
+        // (waiting out a stale deadline), and statistics that average two different rates -
+        // need no separate handling: resetting is what removes them, rather than something
+        // done to work around them.
+        //
+        // The frame is abandoned rather than drawn, because it was built from a pacing state
+        // that no longer applies and its time delta would be measured against a frame from
+        // the previous rate.
+        if (applyRateChange(&capHz, &intervalNs, &spinWindowNs))
+        {
+            nextDeadlineNs = frameStartNs;
+            reportTimer.restart();
+            windowFrames = 0;
+            windowWorstMs = 0.0;
+            windowWaitUs = 0;
+            windowWaitWorstUs = 0;
+            lastFrameStartNs = frameStartNs;
+            GraphicsLog::info(QStringLiteral("render loop: rate changed to %1Hz "
+                                             "(interval %2ns, spin %3us); pacing restarted")
+                                  .arg(capHz)
+                                  .arg(intervalNs)
+                                  .arg(spinWindowNs / 1000));
+            continue;
+        }
 
         GraphicsFrame frame;
         frame.timeSeconds = double(frameStartNs - clockStartNs) / 1.0e9;
@@ -741,31 +807,6 @@ void GraphicsRenderThread::run()
             const double secs = double(reportTimer.elapsed()) / 1000.0;
             const double fps = double(windowFrames) / secs;
             const double waitAvgUs = windowFrames ? double(windowWaitUs) / double(windowFrames) : 0.0;
-
-            // Re-derive the pace from what the display can show.
-            //
-            // Once a second, and here, because both inputs can change while the loop runs:
-            // the output window reports its screen's refresh rate when it opens and when it
-            // is moved, and the loop must not keep aiming above what that screen can display.
-            // Reported when the effective pace changes so a move between screens is visible
-            // rather than silent.
-            {
-                const int displayHz = m_displayRefreshHz.load(std::memory_order_relaxed);
-                const int wanted = (displayHz > 0 && displayHz < requestedHz) ? displayHz : requestedHz;
-                if (wanted != capHz)
-                {
-                    capHz = wanted;
-                    intervalNs = 1000000000LL / capHz;
-                    spinWindowNs = qMin(qint64(2000000), intervalNs / 8);
-                    m_frameCapHz.store(capHz, std::memory_order_relaxed);
-                    GraphicsLog::info(QStringLiteral("render loop: pace changed to %1Hz (asked for %2, "
-                                                     "display %3)")
-                                          .arg(capHz)
-                                          .arg(requestedHz)
-                                          .arg(displayHz > 0 ? QString::number(displayHz)
-                                                             : QStringLiteral("unknown")));
-                }
-            }
 
             m_fps.store(fps, std::memory_order_relaxed);
             m_worstFrameMs.store(windowWorstMs, std::memory_order_relaxed);

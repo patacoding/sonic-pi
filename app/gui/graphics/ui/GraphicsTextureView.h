@@ -29,6 +29,45 @@
 namespace SonicPi
 {
 
+// Where a frame of `frame` pixels goes inside a surface of `surface` pixels: fitted whole by
+// aspect ratio and centred, in device pixels with a TOP-LEFT origin (the caller converts for
+// glViewport, which counts from the bottom-left).
+//
+// Shared by both consumer windows, because leaving the picture complete is a rule about the
+// display side rather than about either window: the output resolution is a property of the
+// OUTPUT - it is what Spout will send, and Spout has no window at all - so no window may crop
+// it or scale it to suit itself. Both windows therefore show all of it, and a window smaller
+// than the output shows a smaller version of the whole picture rather than a magnified middle
+// of it.
+//
+// The one place a size is still respected rather than fitted is the aspect-ratio difference,
+// which shows as black margin. That is deliberate: stretching would misrepresent the picture,
+// and the margin is a fact about the window rather than about the output.
+inline QRect fittedFrameRect(const QSize& frame, const QSize& surface)
+{
+    if (frame.isEmpty() || surface.isEmpty())
+        return QRect();
+
+    // Integer arithmetic, so the result is exact and compares cleanly.
+    const int byWidthH  = qMax(1, frame.height() * surface.width() / frame.width());
+    const int byHeightW = qMax(1, frame.width() * surface.height() / frame.height());
+
+    int w, h;
+    if (byWidthH <= surface.height())
+    {
+        // Height-limited fit: the frame is relatively taller than the surface.
+        w = surface.width();
+        h = byWidthH;
+    }
+    else
+    {
+        w = byHeightW;
+        h = surface.height();
+    }
+
+    return QRect((surface.width() - w) / 2, (surface.height() - h) / 2, w, h);
+}
+
 // The whole consumer side of the handoff, in one place, so that a second consumer
 // cannot drift from the first.
 //

@@ -44,6 +44,7 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QPropertyAnimation>
+#include <QInputDialog>
 #include <QMessageBox>
 #include <QNetworkInterface>
 #include <QPainter>
@@ -2718,6 +2719,19 @@ void MainWindow::honourPrefs()
     if (graphicsOutAct && piSettings->show_graphics && !(graphicsWindow && graphicsWindow->isVisible()))
         showGraphicsOutput(true);
 
+    // Adopt the configured resolution and frame rate on the boot path too.
+    //
+    // The render thread reads the size from settings when it starts, so this is not what makes
+    // startup work - it is what makes startup and the menu ONE path, so a value cannot be
+    // honoured differently depending on whether it was set before or after launch. It also
+    // puts the tick marks where the file says they belong before the menu is first opened.
+    //
+    // Guarded like the call above, for the same reason: honourPrefs() runs more than once, and
+    // applyGraphicsConfig() only acts when a value actually differs, so repeating it is
+    // harmless while reaching it before the render thread exists is not.
+    if (graphicsRenderThread)
+        applyGraphicsConfig();
+
     changeShowAutoCompletion();
     changeShowCompletionHelp();
     changeShowContext();
@@ -4015,9 +4029,180 @@ void MainWindow::setGraphicsRenderThread(SonicPi::GraphicsRenderThread* thread)
     graphicsRenderThread = thread;
 }
 
+// Ask for a frame rate in Hz.
+//
+// The same rule as the resolution: a positive integer with a safety ceiling, nothing else. The
+// rate that matters is whatever the rest of the chain runs at, and the program does not get to
+// decide that a number is unusual.
+//
+// Note what this number does and does not control. It paces the renderer, and it is what the
+// debug window's overlay compares against, so it is also the expectation the user is shown as
+// met or missed. It is NOT the rate that reaches a display: the effective rate is capped at the
+// display's refresh rate, because this thread renders offscreen and pacing above what a screen
+// can show would produce frames nobody can see. A value above the display is therefore accepted
+// and quietly clamped, not refused - the overlay shows the clamped figure, so the user can see
+// what happened rather than being told they were wrong.
+void MainWindow::askForCustomFrameRate()
+{
+    const int current = SonicPi::GraphicsSettings::frameCapHz();
+
+    bool ok = false;
+    const QString text = QInputDialog::getText(
+        this, tr("Frame Rate"),
+        tr("Frames per second, as a positive integer.\n\n"
+           "This paces the renderer and is the rate the debug window's overlay measures against. "
+           "It is capped at the display's refresh rate, so a larger value is accepted but the "
+           "overlay will show the rate the display can actually be given."),
+        QLineEdit::Normal,
+        current > 0 ? QString::number(current) : QStringLiteral("60"),
+        &ok);
+
+    if (!ok)
+        return;
+
+    int hz = 0;
+    if (!SonicPi::GraphicsSettings::parseFrameRateHz(text, &hz))
+    {
+        SonicPi::GraphicsLog::warn(QStringLiteral("graphics: refusing '%1'; the frame rate must be "
+                                                  "a positive integer no larger than %2")
+                                       .arg(text.trimmed())
+                                       .arg(SonicPi::GraphicsSettings::kMaxFrameRateHz));
+        return;
+    }
+
+    if (hz == current)
+        return;
+
+    SonicPi::GraphicsLog::info(QStringLiteral("menu: frame rate -> %1Hz").arg(hz));
+    SonicPi::GraphicsSettings::setFrameCapHz(hz);
+    applyGraphicsConfig();
+}
+
 void MainWindow::setGraphicsSharedFrame(SonicPi::GraphicsSharedFrameSlot* slot)
 {
     graphicsSharedFrame = slot;
+}
+
+// Ask for an output resolution as WxH.
+//
+// One text field, because the value is copied from a spec sheet or a display's settings page and
+// arrives as a single string like "3840x2160".
+//
+// The only rule is the one the user set: a positive integer, with a safety ceiling. No list of
+// acceptable sizes, no aspect-ratio check, no "did you mean". Someone driving an LED processor
+// through Spout is specifying a number that comes from that hardware, and the program is in no
+// position to have opinions about it.
+//
+// The ceiling exists to catch a slipped digit - 38400x2160 - before it reaches the driver, not
+// to predict what a GPU will take. If the allocation genuinely fails, the render target path
+// already logs it and keeps the previous size rather than crashing.
+void MainWindow::askForCustomResolution()
+{
+    const QSize current = SonicPi::GraphicsSettings::outputSize();
+
+    bool ok = false;
+    const QString text = QInputDialog::getText(
+        this, tr("Output Resolution"),
+        tr("Width x height in pixels.\n\n"
+           "This is the resolution that is rendered and that an external consumer such as Spout "
+           "receives. It is independent of any window: the output windows show the whole frame "
+           "scaled to fit, and a consumer with no window at all still receives exactly this."),
+        QLineEdit::Normal,
+        QStringLiteral("%1x%2").arg(current.width()).arg(current.height()),
+        &ok);
+
+    if (!ok)
+        return;   // cancelled, which is not an error
+
+    QSize wanted;
+    if (!SonicPi::GraphicsSettings::parseOutputSize(text, &wanted))
+    {
+        SonicPi::GraphicsLog::warn(QStringLiteral("graphics: refusing '%1'; expected a positive "
+                                                  "integer, or WxH, no larger than %2")
+                                       .arg(text.trimmed())
+                                       .arg(SonicPi::GraphicsSettings::kMaxOutputDimension));
+        return;
+    }
+
+    if (wanted == current)
+        return;
+
+    // The GPU cost, reported because it is the reason a large resolution can cost frame rate:
+    // two targets at four bytes per pixel each.
+    SonicPi::GraphicsLog::info(QStringLiteral("menu: output resolution -> %1x%2 "
+                                              "(two targets, about %3 MB of GPU memory)")
+                                   .arg(wanted.width()).arg(wanted.height())
+                                   .arg(double(wanted.width()) * double(wanted.height()) * 4.0 * 2.0
+                                            / (1024.0 * 1024.0), 0, 'f', 1));
+    SonicPi::GraphicsSettings::setOutputSize(wanted);
+    applyGraphicsConfig();
+}
+
+// Adopt the configured output resolution and frame rate.
+//
+// Called when the menu opens and after anything in the menu is chosen, so a value edited in
+// graphics.ini by hand is picked up without a restart, and the ticks always describe what is
+// actually configured rather than what was last clicked.
+//
+// This class does not decide either value and does not keep one: it reads
+// GraphicsSettings, tells the render thread, and puts the ticks where the file says they
+// belong. The render thread applies at the top of its next frame, which is why a change is
+// visible almost immediately rather than at the next restart.
+void MainWindow::applyGraphicsConfig()
+{
+    if (graphicsRenderThread)
+    {
+        const QSize size = SonicPi::GraphicsSettings::outputSize();
+        const int hz = SonicPi::GraphicsSettings::frameCapHz();
+
+        // Logged only when something changes, so opening the menu is not a log entry. This is
+        // the "fact that changed" that a log is for.
+        const QSize current = graphicsRenderThread->renderTargetSize();
+        if (size != current)
+        {
+            SonicPi::GraphicsLog::info(QStringLiteral("menu: output resolution -> %1x%2")
+                                           .arg(size.width()).arg(size.height()));
+            graphicsRenderThread->requestRenderTargetSize(size);
+        }
+
+        const int currentHz = graphicsRenderThread->frameStats().frameCapHz;
+        if (hz > 0 && hz != currentHz)
+        {
+            SonicPi::GraphicsLog::info(QStringLiteral("menu: frame rate -> %1Hz").arg(hz));
+            graphicsRenderThread->setTargetFps(hz);
+        }
+    }
+
+    syncGraphicsConfigMenu();
+}
+
+// Put the ticks where the configured values say they belong.
+//
+// Rebuilt rather than toggled: a hand-edited file can hold a size that is not on the list at
+// all, and in that case no entry should be ticked rather than the nearest one being wrong.
+void MainWindow::syncGraphicsConfigMenu()
+{
+    const QSize size = SonicPi::GraphicsSettings::outputSize();
+    const int hz = SonicPi::GraphicsSettings::frameCapHz();
+
+    if (graphicsResolutionMenu)
+    {
+        for (QAction* a : graphicsResolutionMenu->actions())
+        {
+            QSignalBlocker blocker(a);
+            a->setChecked(a->text() == QStringLiteral("%1 x %2")
+                                             .arg(size.width()).arg(size.height()));
+        }
+    }
+
+    if (graphicsFrameRateMenu)
+    {
+        for (QAction* a : graphicsFrameRateMenu->actions())
+        {
+            QSignalBlocker blocker(a);
+            a->setChecked(a->text() == QStringLiteral("%1 Hz").arg(hz));
+        }
+    }
 }
 
 void MainWindow::showGraphicsOutput(bool on)
@@ -6575,6 +6760,73 @@ void MainWindow::createToolBar()
     graphicsMenu->addAction(graphicsOutAct);
     graphicsMenu->addAction(graphicsPreviewAct);
     graphicsMenu->addAction(graphicsFullscreenAct);
+    graphicsMenu->addSeparator();
+
+    // Output resolution and frame rate.
+    //
+    // Ranges of sensible values rather than free-form entry: these are performance knobs on a
+    // realtime audio machine, and the useful choices are a handful of standard sizes and
+    // refresh rates. A text field would invite 1234x567 and then need validation, clamping and
+    // an error path for a value nobody wanted.
+    //
+    // Both write through GraphicsSettings (the feature's own file) and then ask the render
+    // thread to apply, so this class never holds a copy of either value. The reason the
+    // graphics feature keeps its state out of here is that every attempt to keep a copy in
+    // this class has ended with the copy and the original disagreeing.
+    graphicsResolutionMenu = graphicsMenu->addMenu(tr("Output Resolution"));
+    {
+        static const QSize kSizes[] = {
+            QSize(640, 360), QSize(960, 540), QSize(1280, 720),
+            QSize(1920, 1080), QSize(2560, 1440),
+        };
+        for (const QSize& size : kSizes)
+        {
+            QAction* a = graphicsResolutionMenu->addAction(
+                QStringLiteral("%1 x %2").arg(size.width()).arg(size.height()));
+            a->setCheckable(true);
+            connect(a, &QAction::triggered, this, [this, size]() {
+                SonicPi::GraphicsSettings::setOutputSize(size);
+                applyGraphicsConfig();
+            });
+        }
+
+        // Presets are a convenience, not the limit. The resolution that matters is the native
+        // one of whatever the output is mapped onto - a projector, an LED processor, a capture
+        // card - and those are 1920x1200, 3840x2160, 5120x1080 for a wide LED wall, and so on.
+        // A list of five would be wrong for most real installations, so free entry has to exist.
+        graphicsResolutionMenu->addSeparator();
+        QAction* custom = graphicsResolutionMenu->addAction(tr("Custom..."));
+        connect(custom, &QAction::triggered, this, [this]() { askForCustomResolution(); });
+    }
+
+    graphicsFrameRateMenu = graphicsMenu->addMenu(tr("Frame Rate"));
+    {
+        static const int kRates[] = { 30, 60, 75, 90, 120, 144, 165, 240 };
+        for (int hz : kRates)
+        {
+            QAction* a = graphicsFrameRateMenu->addAction(QStringLiteral("%1 Hz").arg(hz));
+            a->setCheckable(true);
+            connect(a, &QAction::triggered, this, [this, hz]() {
+                SonicPi::GraphicsSettings::setFrameCapHz(hz);
+                applyGraphicsConfig();
+            });
+        }
+
+        // Same reasoning as the resolution: the useful rate is whatever the rest of the chain
+        // runs at - a capture card, a media server, a projector - and a fixed list cannot know
+        // it. The preset list is convenience, not the set of permitted values.
+        graphicsFrameRateMenu->addSeparator();
+        QAction* custom = graphicsFrameRateMenu->addAction(tr("Custom..."));
+        connect(custom, &QAction::triggered, this, [this]() { askForCustomFrameRate(); });
+    }
+
+    syncGraphicsConfigMenu();
+
+    // Adopt anything changed outside the running app - a hand-edited graphics.ini - when the
+    // menu is opened. Nothing is logged unless a value actually changed, so this is not a
+    // per-open log entry.
+    connect(graphicsMenu, &QMenu::aboutToShow, this, [this]() { applyGraphicsConfig(); });
+
     graphicsMenu->addSeparator();
     graphicsMenu->addAction(graphicsReloadShaderAct);
 

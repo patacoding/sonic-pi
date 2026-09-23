@@ -138,10 +138,14 @@ protected:
     void closeEvent(QCloseEvent* e) override;
 
 private:
-    // Where the output image is placed on the window's surface, in device pixels
-    // with a top-left origin. 1:1 and centred, never scaled: the window is a
-    // viewport onto the output, not a scaling surface.
-    QRect cropRect() const;
+    // Where the whole frame goes on this window's surface, in device pixels with a top-left
+    // origin.
+    //
+    // Fitted and centred, never cropped - the same rule the debug preview follows, and for the
+    // same reason: the output resolution is a property of the OUTPUT, since that is what Spout
+    // sends and Spout has no window at all. A window may not crop it or scale it to suit
+    // itself, so a window smaller than the output shows a smaller whole picture.
+    QRect fittedRect() const;
 
     // Tell the render thread what this window's screen can show, in Hz. Called whenever this
     // window's placement changes, because that is when the answer can change.
