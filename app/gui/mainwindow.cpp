@@ -4145,7 +4145,7 @@ void MainWindow::showShaderBuffer()
             SonicPi::GraphicsLog::warn(QStringLiteral("shader buffer: no shader file could be produced; "
                                                       "the editor will show whatever it can read"));
 
-        graphicsShaderWindow = new SonicPi::ShaderBufferWindow(theme, graphicsRenderThread);
+        graphicsShaderWindow = new SonicPi::ShaderBufferWindow(theme, graphicsRenderThread, gui_settings);
         // A QWidget with no parent is a top-level window, which is what this is. Sized generously
         // because it is an editor, not a panel.
         graphicsShaderWindow->resize(760, 620);

@@ -19,13 +19,16 @@
 #include "sonicpitheme.h"
 
 #include <QCloseEvent>
+#include <QDir>
 #include <QFile>
+#include <QFileDialog>
 #include <QFontDatabase>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QSettings>
 #include <QShortcut>
 #include <QSplitter>
 #include <QStringList>
@@ -49,10 +52,11 @@ const char* kFragmentShaderFile = "default.frag";
 int shaderLogFirstErrorLine(const QString& compilerLog);
 
 ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread* renderThread,
-                                       QWidget* parent)
+                                       QSettings* settings, QWidget* parent)
     : QWidget(parent),
       m_theme(theme),
-      m_renderThread(renderThread)
+      m_renderThread(renderThread),
+      m_settings(settings)
 {
     setWindowTitle(tr("Sonic Pi - Shader Buffer"));
     setObjectName(QStringLiteral("ShaderBufferWindow"));
@@ -65,6 +69,8 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     QPushButton* revertButton = new QPushButton(tr("Revert"), this);
     m_jumpButton = new QPushButton(tr("Go to Error"), this);
     m_jumpButton->setEnabled(false);
+    QPushButton* loadButton = new QPushButton(tr("Load File..."), this);
+    QPushButton* saveButton = new QPushButton(tr("Save File..."), this);
 
     m_status = new QLabel(this);
     m_status->setWordWrap(true);
@@ -85,6 +91,8 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     buttonsLayout->addWidget(m_compileButton);
     buttonsLayout->addWidget(revertButton);
     buttonsLayout->addWidget(m_jumpButton);
+    buttonsLayout->addWidget(loadButton);
+    buttonsLayout->addWidget(saveButton);
     buttonsLayout->addWidget(m_status, 1);
 
     auto* split = new QSplitter(Qt::Vertical, this);
@@ -100,6 +108,8 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     connect(m_compileButton, &QPushButton::clicked, this, &ShaderBufferWindow::compile);
     connect(revertButton, &QPushButton::clicked, this, &ShaderBufferWindow::reloadFromDisk);
     connect(m_jumpButton, &QPushButton::clicked, this, [this]() { jumpToLine(m_errorLine); });
+    connect(loadButton, &QPushButton::clicked, this, &ShaderBufferWindow::loadFromFile);
+    connect(saveButton, &QPushButton::clicked, this, &ShaderBufferWindow::saveToFile);
 
     // The render thread's verdict arrives here, queued from another thread.
     connect(m_renderThread, &GraphicsRenderThread::shaderCompileFinished,
@@ -184,6 +194,95 @@ void ShaderBufferWindow::compile()
 void ShaderBufferWindow::compileFinished(bool ok, const QString& compilerLog)
 {
     showCompileReport(ok, compilerLog);
+}
+
+// Import a fragment shader from an arbitrary file.
+//
+// Deliberately does NOT compile. Importing changes what is being edited, and whether that code goes
+// into the renderer is a separate decision the user makes by pressing Compile. Compiling here would
+// mean that opening the wrong file could change the live output - the thing this whole feature is
+// arranged to prevent.
+void ShaderBufferWindow::loadFromFile()
+{
+    const QString startDir = m_settings
+                                 ? m_settings->value(QStringLiteral("lastShaderDir"),
+                                                     QDir::homePath() + QStringLiteral("/Desktop")).toString()
+                                 : QDir::homePath();
+
+    QString selectedFilter = tr("Fragment shaders (*.frag)");
+    const QString fileName = QFileDialog::getOpenFileName(
+        this, tr("Load Shader into Buffer"), startDir,
+        QStringLiteral("%1 (*.frag);;%2 (*.glsl *.fs *.txt);;%3 (*.*)")
+            .arg(tr("Fragment shaders")).arg(tr("GLSL files")).arg(tr("All files")),
+        &selectedFilter);
+    if (fileName.isEmpty())
+        return;   // cancelled, which is not an error
+
+    QFile file(fileName);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        m_status->setText(tr("Could not read %1").arg(fileName));
+        GraphicsLog::warn(QStringLiteral("shader buffer: could not read %1").arg(fileName));
+        return;
+    }
+    QTextStream in(&file);
+    const QString text = in.readAll();
+    file.close();
+
+    if (m_settings)
+        m_settings->setValue(QStringLiteral("lastShaderDir"), QDir(fileName).absolutePath());
+
+    m_editor->setText(text);
+    // The report is cleared because it describes the PREVIOUS contents. Leaving a stale compiler error
+    // next to freshly imported code would point at a line that no longer means anything.
+    showCompileReport(true, QString());
+    m_status->setText(tr("Loaded %1 into the buffer. Press Compile to render it.").arg(fileName));
+    GraphicsLog::info(QStringLiteral("shader buffer: imported %1 (%2 bytes)").arg(fileName).arg(text.size()));
+}
+
+// Export the editor's text to an arbitrary file.
+//
+// Does not write the buffer's own file either: exporting a copy is not the same act as putting this
+// text into the renderer, and conflating them would make "Save to File" silently change the output.
+void ShaderBufferWindow::saveToFile()
+{
+    const QString startDir = m_settings
+                                 ? m_settings->value(QStringLiteral("lastShaderDir"),
+                                                     QDir::homePath() + QStringLiteral("/Desktop")).toString()
+                                 : QDir::homePath();
+
+    QString selectedFilter = tr("Fragment shaders (*.frag)");
+    QString fileName = QFileDialog::getSaveFileName(
+        this, tr("Save Shader Buffer As"), startDir,
+        QStringLiteral("%1 (*.frag);;%2 (*.glsl);;%3 (*.*)")
+            .arg(tr("Fragment shaders")).arg(tr("GLSL files")).arg(tr("All files")),
+        &selectedFilter);
+    if (fileName.isEmpty())
+        return;
+
+    if (m_settings)
+        m_settings->setValue(QStringLiteral("lastShaderDir"), QDir(fileName).absolutePath());
+
+    // A shader without an extension is a file the next dialog will not recognise, so one is added -
+    // the same courtesy the audio buffer's save dialog extends.
+    if (!fileName.contains(QRegularExpression(QStringLiteral("\\.[A-Za-z0-9]+$"))))
+        fileName += QStringLiteral(".frag");
+
+    QFile file(fileName);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
+    {
+        m_status->setText(tr("Could not write %1").arg(fileName));
+        GraphicsLog::warn(QStringLiteral("shader buffer: could not write %1").arg(fileName));
+        return;
+    }
+    {
+        QTextStream out(&file);
+        out << m_editor->text();
+    }
+    file.close();
+
+    m_status->setText(tr("Saved to %1").arg(fileName));
+    GraphicsLog::info(QStringLiteral("shader buffer: exported to %1").arg(fileName));
 }
 
 void ShaderBufferWindow::showCompileReport(bool ok, const QString& compilerLog)

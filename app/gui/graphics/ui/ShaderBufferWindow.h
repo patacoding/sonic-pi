@@ -22,6 +22,7 @@
 class QLabel;
 class QPlainTextEdit;
 class QPushButton;
+class QSettings;
 class QTimer;
 
 class SonicPiScintilla;
@@ -53,9 +54,14 @@ class ShaderBufferWindow : public QWidget
     Q_OBJECT
 
 public:
-    // `theme` and `renderThread` are not owned. Both must outlive this window; MainWindow owns the
-    // window, the theme and the render thread, so that holds.
-    ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread* renderThread, QWidget* parent = nullptr);
+    // `theme`, `renderThread` and `settings` are not owned, and must outlive this window. MainWindow
+    // owns all three.
+    //
+    // `settings` is the GUI's own settings object, passed in rather than opened here so that the file
+    // dialogs' remembered directory lives with the rest of the GUI's preferences instead of this
+    // feature inventing a second place to keep state.
+    ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread* renderThread, QSettings* settings,
+                       QWidget* parent = nullptr);
     ~ShaderBufferWindow() override;
 
     // Load the shader from disk into the editor. Called on creation and by Revert.
@@ -64,6 +70,15 @@ public:
     // Write the editor's text to the shader file and ask the render thread to compile it. The reply
     // arrives at compileFinished().
     void compile();
+
+    // Import a shader from an arbitrary file into the editor, and export the editor's text to one.
+    //
+    // These are NOT the same thing as the buffer's own file, and the difference is the whole point of
+    // having both: the buffer's file is what gets rendered, and these are how a shader gets in from or
+    // out to the rest of the machine. Neither one compiles - importing changes what is being edited,
+    // and the user decides when to put it into the renderer.
+    void loadFromFile();
+    void saveToFile();
 
 signals:
     // Emitted when the user closes this window, so the menu action that opened it can be un-ticked.
@@ -89,6 +104,8 @@ private:
 
     SonicPiTheme* m_theme = nullptr;
     GraphicsRenderThread* m_renderThread = nullptr;
+    // Not owned. The GUI's settings, for the file dialogs' remembered directory only.
+    QSettings* m_settings = nullptr;
 
     SonicPiScintilla* m_editor = nullptr;
     QPlainTextEdit* m_report = nullptr;
