@@ -48,6 +48,101 @@ int toByte(float v)
 #define GRAPHICS_SHADER_DIR ""
 #endif
 
+// The self-test's own shaders, compiled into the binary rather than read from disk.
+//
+// WHY, because this is a deliberate departure from how the real shader is loaded:
+//
+// The pipeline self-check has to answer one question reliably - "does this build draw
+// the pixels it thinks it draws" - and it can only answer it if the pattern it draws is
+// the pattern it compares against. Loaded from the user's shader directory, it is not:
+// the first anchors.frag the user edits changes the picture and every anchor mismatches,
+// producing
+//
+//     [ERROR] shader output FAILED at one or more anchors
+//
+// on every start of a perfectly healthy build. That is worse than a missing check,
+// because a false ERROR teaches its reader to ignore ERRORs.
+//
+// Two further reasons this belongs in the binary:
+//
+//   * It is a FIXTURE, not a shader anyone is meant to edit. The editable one is
+//     default.frag; that is the point of the shader directory.
+//   * The expected colours in the anchor table below are a contract with this source. A
+//     file on disk can be edited, deleted, or left behind by an older build, so the two
+//     halves of one contract could disagree - which is the class of bug this whole feature
+//     kept running into.
+//
+// The shipped copies stay in app/gui/graphics/shaders/ as documentation, and because the
+// first run copies them into the user's directory for editing. Nothing reads them for the
+// self-check any more.
+const char* kSelfTestVertexShader = R"(
+#version 330 core
+layout(location = 0) in vec2 a_pos;
+layout(location = 1) in vec2 a_uv;
+out vec2 v_uv;
+void main()
+{
+    v_uv = a_uv;
+    gl_Position = vec4(a_pos, 0.0, 1.0);
+}
+)";
+
+const char* kSelfTestFragmentShader = R"(
+#version 330 core
+
+// Quadrant test pattern. This is a self-test, not a picture: it exists so the offscreen
+// pipeline can be proved to draw the right pixels in the right places, because "it ran
+// without crashing" is not evidence that anything correct was rendered.
+//
+// The regions and their colours are a contract with verifyShaderOutput() below, which
+// reads these five points back and compares them channel by channel.
+//
+//   uv (0,0) bottom-left   red     (255,   0,   0)
+//   uv (1,0) bottom-right  green   (  0, 255,   0)
+//   uv (0,1) top-left      blue    (  0,   0, 255)
+//   uv (1,1) top-right     yellow  (255, 255,   0)
+//   centre                 white   (255, 255, 255)
+//
+// The uv origin is bottom-left because that is OpenGL's, which is why (0,0) is red
+// rather than the more habitual top-left.
+//
+// Yellow is the odd one out: red + green. That is not an oversight. It makes the
+// top-right corner the one point where both horizontal and vertical position are
+// confirmed at once, so a pattern that is one axis out cannot pass by accident.
+//
+// Branchless quadrant select: c0 when neither selector is set, c3 when both are.
+in vec2 v_uv;
+layout(location = 0) out vec4 FragColor;
+
+vec3 pick(float sx, float sy, vec3 c0, vec3 c1, vec3 c2, vec3 c3)
+{
+    return mix(mix(c0, c1, sx), mix(c2, c3, sx), sy);
+}
+
+void main()
+{
+    const vec3 kRed    = vec3(1.0, 0.0, 0.0);
+    const vec3 kGreen  = vec3(0.0, 1.0, 0.0);
+    const vec3 kBlue   = vec3(0.0, 0.0, 1.0);
+    const vec3 kYellow = vec3(1.0, 1.0, 0.0);
+
+    // step() rather than a branch: uniform control flow, and no driver-dependent
+    // behaviour.
+    float sx = step(0.5, v_uv.x);
+    float sy = step(0.5, v_uv.y);
+
+    vec3 colour = pick(sx, sy, kRed, kGreen, kBlue, kYellow);
+
+    // White centre patch. A region rather than a single pixel, so the anchor does not
+    // depend on exactly which fragment the rasteriser lands on.
+    float inCentre = step(0.4375, v_uv.x) * step(v_uv.x, 0.5625)
+                   * step(0.4375, v_uv.y) * step(v_uv.y, 0.5625);
+    colour = mix(colour, vec3(1.0), inCentre);
+
+    FragColor = vec4(colour, 1.0);
+}
+)";
+
 // There is no registry of live renderers any more.
 //
 // One existed so a GUI-initiated reload could reach every renderer. That could not
@@ -198,6 +293,32 @@ std::unique_ptr<QOpenGLShaderProgram> GraphicsRenderer::buildProgram(const QStri
     if (!program->link())
     {
         GraphicsLog::error(QStringLiteral("renderer: shader program failed to link\n%1")
+                               .arg(program->log()));
+        return nullptr;
+    }
+
+    return program;
+}
+
+std::unique_ptr<QOpenGLShaderProgram> GraphicsRenderer::buildSelfTestProgram()
+{
+    auto program = std::make_unique<QOpenGLShaderProgram>();
+
+    if (!program->addShaderFromSourceCode(QOpenGLShader::Vertex, kSelfTestVertexShader))
+    {
+        GraphicsLog::error(QStringLiteral("renderer: the self-test vertex shader failed to compile\n%1")
+                               .arg(program->log()));
+        return nullptr;
+    }
+    if (!program->addShaderFromSourceCode(QOpenGLShader::Fragment, kSelfTestFragmentShader))
+    {
+        GraphicsLog::error(QStringLiteral("renderer: the self-test fragment shader failed to compile\n%1")
+                               .arg(program->log()));
+        return nullptr;
+    }
+    if (!program->link())
+    {
+        GraphicsLog::error(QStringLiteral("renderer: the self-test shader program failed to link\n%1")
                                .arg(program->log()));
         return nullptr;
     }
@@ -523,7 +644,12 @@ bool GraphicsRenderer::verifyShaderOutput(GraphicsTarget& target)
     // of the pipeline - buffer, attributes, projection, framebuffer, readback -
     // and needs a known image to compare against, which default.frag deliberately
     // is not.
-    auto anchors = buildProgram(QStringLiteral("passthrough.vert"), QStringLiteral("anchors.frag"));
+    //
+    // Built from source compiled into the binary, NOT from a file in the shader
+    // directory. See kSelfTestFragmentShader: loaded from disk, an edit to the user's
+    // copy changed the pattern and made every anchor mismatch, so a healthy build reported
+    // a failure on every start.
+    auto anchors = buildSelfTestProgram();
     if (!anchors)
     {
         GraphicsLog::error(QStringLiteral("renderer: could not build the verification shader"));

@@ -89,6 +89,12 @@ public:
     // draws. Coupling the two would mean a legitimate edit to the default shader
     // broke the pipeline's self-test, and the anchors would have to be kept in a
     // synthetic image that ships as the default.
+    //
+    // That reasoning was then applied one step further: the self-test's own shaders are
+    // compiled into the binary rather than read from the shader directory, because they
+    // are a FIXTURE whose only reader is this function. See kSelfTestFragmentShader in
+    // the .cpp - loading them from the user's editable copy made a healthy build report
+    // a shader failure on every start, which is worse than not checking at all.
     bool verifyShaderOutput(GraphicsTarget& target);
 
     // Reads the whole target back as RGBA8. Returns false on failure.
@@ -161,6 +167,11 @@ private:
     // and logs the compiler output on any failure.
     std::unique_ptr<QOpenGLShaderProgram> buildProgram(const QString& vertexFile,
                                                        const QString& fragmentFile);
+
+    // Compile the self-test's own shader pair. Both halves are string literals in the
+    // .cpp, so this cannot be broken by an edit to the shader directory, and cannot
+    // disagree with the anchor table it is checked against.
+    std::unique_ptr<QOpenGLShaderProgram> buildSelfTestProgram();
 
     // Load the default shader pair into m_program. Leaves m_program untouched on
     // failure.

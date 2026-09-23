@@ -201,7 +201,20 @@ int main(int argc, char* argv[])
         auto* gfxThread = new SonicPi::GraphicsRenderThread(&app);
         // The frame rate ceiling, from Graphics' own settings file. 0 means no
         // explicit preference, so the renderer uses its default cap.
-        gfxThread->setTargetFps(SonicPi::GraphicsSettings::frameCapHz());
+        //
+        // Reported, because this value has already gone missing once and the failure is
+        // invisible: a cap that does not arrive looks exactly like a cap that was never
+        // set, and the renderer then quietly runs at its default. The log line is the only
+        // place the two can be told apart.
+        {
+            const int cap = SonicPi::GraphicsSettings::frameCapHz();
+            SonicPi::GraphicsLog::info(QStringLiteral("settings: frame cap = %1 Hz%2 (from %3)")
+                                           .arg(cap)
+                                           .arg(cap > 0 ? QString()
+                                                        : QStringLiteral(" (unset; the renderer's default applies)"))
+                                           .arg(SonicPi::GraphicsSettings::filePath()));
+            gfxThread->setTargetFps(cap);
+        }
         gfxThread->setSharedFrameSlot(&gfxSharedFrame);
         QObject::connect(gfxThread, &SonicPi::GraphicsRenderThread::contextReady,
                          &app, [](bool ok) {

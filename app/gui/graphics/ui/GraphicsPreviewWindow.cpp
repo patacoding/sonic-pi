@@ -221,19 +221,25 @@ void GraphicsPreviewWindow::paintGL()
 
     reportStats();
 
-    // Ask for the next repaint ONLY when the producer has published something new.
+    // Ask for the next repaint, ALWAYS.
     //
-    // requestUpdate() alone spins as fast as the event loop delivers updates - measured at
-    // 139 paints a second against a 60Hz producer, so 79 of them re-drew a picture that had
-    // not changed. Gating on the frame index ties this window's cadence to the thing it is
-    // displaying, which is the only cadence it has any reason to care about, and it needs no
-    // timer and no knowledge of the producer's rate.
-    const quint64 frameIndex = m_view.lastFrameIndex();
-    if (frameIndex != m_lastRequestedFrame)
-    {
-        m_lastRequestedFrame = frameIndex;
-        requestUpdate();
-    }
+    // This was briefly gated on the frame index changing, to stop the window repainting
+    // faster than the producer draws. That was a serious bug, and it presented as the exact
+    // opposite of waste: the picture FROZE.
+    //
+    // Why: drawSharedFrame() updates the view's frame index on every paint, so on the
+    // second paint of the same frame the index was already equal to the one recorded when
+    // the previous update was requested. The condition was false, no further update was
+    // requested, and the loop stopped dead after one frame.
+    //
+    // The general rule it broke: requesting the next frame must never be conditional on
+    // state that drawing the current frame changes.
+    //
+    // requestUpdate() is the right call here precisely BECAUSE it coalesces. Asking every
+    // time is how it is meant to be used; the platform decides how many of those become
+    // paints. Being asked too often means a frame delivered too often; being asked
+    // conditionally means a stopped window.
+    requestUpdate();
 }
 
 void GraphicsPreviewWindow::keyPressEvent(QKeyEvent* e)

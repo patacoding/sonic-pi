@@ -26,20 +26,32 @@ namespace GraphicsSettings
 namespace
 {
 
-// All keys live in one group.
+// Keys are read and written at the ROOT of the file, with no group.
 //
-// This is not cosmetic. QSettings writes a key with no group into a "[General]"
-// section, but a read with a bare key name does NOT look inside that section - so a
-// value written as "show-output" and then read as "show-output" travels through two
-// different places and never comes back. The symptom is a setting that saves
-// correctly, appears in the file, and is silently never honoured again, because the
-// reader only ever sees its default.
+// This is the opposite of what an earlier version of this module did, and the earlier
+// version was wrong in a way that was invisible for exactly as long as nobody set a value:
 //
-// That is exactly what this module shipped with: the output window opened once, the
-// app saved the preference, and from then on the window never appeared again while
-// graphics.ini plainly said "show-output". Every access now goes through one of the
-// two helpers below, so the two halves cannot drift apart again.
-const QString kGroup = QStringLiteral("General");
+//   QSettings with IniFormat treats "[General]" as the file's ROOT section. A key written
+//   with beginGroup("General") does NOT land there - it lands in a real child group
+//   literally named "General", which Qt then has to escape on disk as "[%General]" because
+//   a child group must not be called "General". And a key inside that child group is
+//   invisible to a root-level read.
+//
+//   Measured, with a standalone QSettings reproduction against a file containing
+//   "[General] frame-cap-hz=144":
+//
+//     allKeys()                    -> ("frame-cap-hz", "output-height", "output-width", ...)
+//     beginGroup("General"); allKeys() -> ()          <- the child group is empty
+//     value("General/frame-cap-hz")-> -1              <- and so is this
+//     value("frame-cap-hz")        -> 144             <- the root read is the one that works
+//
+//   So every getter returned its default and every setter wrote somewhere nothing reads.
+//   The symptom was twofold and looked like two unrelated bugs: a file that grows a
+//   mysterious empty "[%General]" section, and preferences that appear in the file yet are
+//   never honoured - the frame rate cap silently ran at the renderer's default 60Hz while
+//   graphics.ini said 144.
+//
+// Both halves are fixed by using no group at all, which is what Qt means by "[General]".
 
 // Resolved once, on first use, the same way GraphicsLog resolves its directory.
 //
@@ -73,18 +85,13 @@ QString ensurePath()
 QVariant readSetting(const QString& key, const QVariant& fallback)
 {
     QSettings s(ensurePath(), QSettings::IniFormat);
-    s.beginGroup(kGroup);
-    const QVariant v = s.value(key, fallback);
-    s.endGroup();
-    return v;
+    return s.value(key, fallback);
 }
 
 void writeSetting(const QString& key, const QVariant& value)
 {
     QSettings s(ensurePath(), QSettings::IniFormat);
-    s.beginGroup(kGroup);
     s.setValue(key, value);
-    s.endGroup();
     s.sync();
 }
 

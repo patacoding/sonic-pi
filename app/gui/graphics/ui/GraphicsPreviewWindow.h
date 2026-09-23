@@ -91,12 +91,6 @@ private:
     // Not owned. See setRenderThread().
     GraphicsRenderThread* m_renderThread = nullptr;
 
-    // The frame index the last repaint was requested for, so the window asks for another
-    // repaint only when the producer has actually published something new. Without it the
-    // window repaints as fast as the event loop spins - measured at 139 paints a second
-    // against a 60Hz producer, which is 79 wasted frames a second.
-    quint64 m_lastRequestedFrame = 0;
-
     // Statistics reporting, timed by hand. Not GraphicsLog::throttled(), which suppresses
     // by message CONTENT - this message carries changing numbers, so nothing would ever
     // be suppressed.
