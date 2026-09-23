@@ -678,8 +678,16 @@ if(WIN32)
         set(WINDEPLOYQT_BIN "windeployqt")
     endif()
     message(STATUS "windeployqt: ${WINDEPLOYQT_BIN}")
-    add_custom_command(TARGET ${APP_NAME} POST_BUILD
-        COMMAND ${WINDEPLOYQT_BIN} $<TARGET_FILE:${APP_NAME}>)
+    # SONIC_PI_GUI_ONLY (see app/CMakeLists.txt): windeployqt re-copies the
+    # Qt runtime and every .qm into the output directory on every build, which
+    # a GUI-only iteration does not need - the previous deploy is still there
+    # and is only invalidated by a Qt change, which is not a GUI-only change.
+    if(SONIC_PI_GUI_ONLY)
+        message(STATUS "SONIC_PI_GUI_ONLY=ON: skipping windeployqt; the existing deployment is left as it is.")
+    else()
+        add_custom_command(TARGET ${APP_NAME} POST_BUILD
+            COMMAND ${WINDEPLOYQT_BIN} $<TARGET_FILE:${APP_NAME}>)
+    endif()
 endif() # Win32
 
 # Make convenient source groups in the IDE

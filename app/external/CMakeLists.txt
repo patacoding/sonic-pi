@@ -93,7 +93,8 @@ foreach(opt
 endforeach()
 
 # SuperSonic — BUILD_ALWAYS ensures source changes are picked up
-# without needing to manually delete stamp files.
+# without needing to manually delete stamp files. (SONIC_PI_GUI_ONLY clears
+# it; see the block above.)
 # SOURCE_DIR is the supersonic submodule (see cmake/supersonic.cmake, which
 # also names the engine and its bridge). It is scsynth hosted on clockwork
 # (AGPL-3.0-or-later, or a commercial licence — see clockwork/LICENSE), which
@@ -103,6 +104,20 @@ endforeach()
 # The option names are clockwork's: the product name is CLOCKWORK_PRODUCT_NAME
 # and plugin hosting is CLOCKWORK_PLUGINS.
 include(${CMAKE_CURRENT_LIST_DIR}/../cmake/supersonic.cmake)
+
+# BUILD_ALWAYS is what makes an edit under app/external/... visible without
+# deleting stamp files, and it is the reason a no-change build still re-enters
+# the nested CMake + cargo build. SONIC_PI_GUI_ONLY (see app/CMakeLists.txt)
+# turns it off for GUI-only iterations, where nothing the engine is built from
+# can have changed: the stamps then make this project a no-op. A tree that has
+# never built the engine still builds it here, because the stamps are missing -
+# so this cannot produce a half-built tree, only a stale engine, and only after
+# an engine edit that a GUI-only build is explicitly not promising to see.
+if(SONIC_PI_GUI_ONLY)
+    set(SUPERSONIC_BUILD_ALWAYS OFF)
+else()
+    set(SUPERSONIC_BUILD_ALWAYS ON)
+endif()
 
 # VST3 + CLAP hosting: the whole reason for the engine swap, so ON here and
 # named rather than inherited. It is an option, not a constant, because the
@@ -129,7 +144,7 @@ ExternalProject_Add(supersonic
     SOURCE_DIR ${SUPERSONIC_SOURCE_DIR}
     BINARY_DIR ${CMAKE_BINARY_DIR}/ss/b
     DOWNLOAD_COMMAND ""
-    BUILD_ALWAYS ON
+    BUILD_ALWAYS ${SUPERSONIC_BUILD_ALWAYS}
     CMAKE_ARGS
         -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
         -DBUILD_TESTS=OFF

@@ -5,7 +5,12 @@ if /I "%CONFIG%" == "" (set CONFIG=Release)
 
 call "%~dp0win-prebuild.bat"
 if errorlevel 1 goto :build_failed
-call "%~dp0win-config.bat" %CONFIG%
+REM State the mode rather than relying on its default: SONIC_PI_GUI_ONLY is a
+REM cache entry, so a tree last configured by win-build-gui-only.bat would keep
+REM it ON and this "full" build would quietly skip the audio engine and the Qt
+REM deploy step. One extra configure argument is what stops that. It must be
+REM quoted - `=` is an argument delimiter to cmd (see win-config.bat).
+call "%~dp0win-config.bat" %CONFIG% "-DSONIC_PI_GUI_ONLY=OFF"
 if errorlevel 1 goto :build_failed
 call "%~dp0win-build-gui.bat" %CONFIG%
 if errorlevel 1 goto :build_failed
