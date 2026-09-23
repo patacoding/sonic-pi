@@ -259,24 +259,32 @@ void GraphicsWindow::paintGL()
         m_staleFrames += m_view.takeStaleCount();
         const GraphicsSharedFrame shared = m_sharedFrame ? m_sharedFrame->read()
                                                          : GraphicsSharedFrame();
-        // The paint count is reported because the window paces ITSELF now, and "how often
-        // is it actually repainting" is the only way to tell whether that pacing is the
-        // display's or a busy loop's. It is not decoration: a preview window that
-        // repainted 139 times a second while the display runs at 60 was found by exactly
-        // this number.
+        // Reported as a RATE, not a count, and that matters: this report is once a minute,
+        // so a bare count would be a minute's worth of paints being read as if it described
+        // the frame number next to it, which is one second old. A count without its interval
+        // is a number that cannot be interpreted.
+        //
+        // The rate is worth having because the window paces ITSELF now, so "how often is it
+        // actually repainting" is the only way to tell whether that pacing is the display's
+        // or a busy loop's. Measured before this line existed: a preview window repainting
+        // 139 times a second while the producer ran at 60.
+        const double paintsPerSec =
+            elapsed > 0 ? double(m_paintCount) * 1000.0 / double(elapsed) : 0.0;
+
         GraphicsLog::info(shared.valid()
                               ? QStringLiteral("window: showing shared frame %1 (texture %2, "
-                                               "%3x%4); %5 stale, %6 paints in %7ms")
+                                               "%3x%4); %5 stale, %6 paints/s over the last %7s")
                                     .arg(shared.frameIndex)
                                     .arg(shared.texture)
                                     .arg(shared.size.width())
                                     .arg(shared.size.height())
                                     .arg(m_staleFrames)
-                                    .arg(m_paintCount)
-                                    .arg(elapsed)
-                              : QStringLiteral("window: no frame published yet (%1 paints in %2ms)")
-                                    .arg(m_paintCount)
-                                    .arg(elapsed));
+                                    .arg(paintsPerSec, 0, 'f', 0)
+                                    .arg(double(elapsed) / 1000.0, 0, 'f', 0)
+                              : QStringLiteral("window: no frame published yet (%1 paints/s over the "
+                                               "last %2s)")
+                                    .arg(paintsPerSec, 0, 'f', 0)
+                                    .arg(double(elapsed) / 1000.0, 0, 'f', 0));
         m_staleFrames = 0;
         m_paintCount = 0;
     }
