@@ -226,6 +226,16 @@ signals:
     // wants it, so nothing blocks the loop.
     void frameStatsUpdated();
 
+    // Emitted from the render thread when an attempt to compile the shader finishes, with the
+    // compiler's own output when it failed.
+    //
+    // This is what makes a shader editor safe to use against a live output: the editor learns whether
+    // its text compiled, and learns the reason when it did not, without ever compiling anything
+    // itself. Compiling on the GUI thread would mean using the wrong context - the failure that
+    // already cost this feature a rewrite - so the request goes one way and the verdict comes back
+    // this way.
+    void shaderCompileFinished(bool ok, const QString& compilerLog);
+
 protected:
     void run() override;
 

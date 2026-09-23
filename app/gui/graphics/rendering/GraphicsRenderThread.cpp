@@ -295,22 +295,27 @@ void GraphicsRenderThread::applyShaderReload()
     // The context is current by construction here - this runs on the render thread -
     // which is exactly what compiling requires and what a caller on another thread
     // cannot provide.
-    std::unique_ptr<QOpenGLShaderProgram> replacement;
+    GraphicsCompileResult result;
     {
         // A short lock just to read m_gfxRenderer safely. Not held across the compile.
         QMutexLocker lock(&m_rendererMutex);
         if (!m_gfxRenderer)
         {
             GraphicsLog::warn(QStringLiteral("reload: no renderer to reload"));
+            emit shaderCompileFinished(false, QStringLiteral("No renderer to compile into."));
             return;
         }
-        replacement = m_gfxRenderer->compileReplacement();
+        result = m_gfxRenderer->compileReplacement();
     }
 
-    if (!replacement)
+    if (!result.ok())
     {
+        // The previous program is untouched, so the picture keeps running. The compiler's own words
+        // go back to whoever asked - the shader editor - because a failure the user cannot read is a
+        // failure they will retry blindly.
         GraphicsLog::info(QStringLiteral("reload: FAILED after %1ms; the previous shader is still in use")
                               .arg(t.elapsed()));
+        emit shaderCompileFinished(false, result.log);
         return;
     }
 
@@ -318,10 +323,11 @@ void GraphicsRenderThread::applyShaderReload()
     {
         QMutexLocker lock(&m_rendererMutex);
         if (m_gfxRenderer)
-            m_gfxRenderer->adoptProgram(std::move(replacement));
+            m_gfxRenderer->adoptProgram(std::move(result.program));
     }
 
     GraphicsLog::info(QStringLiteral("reload: applied after %1ms").arg(t.elapsed()));
+    emit shaderCompileFinished(true, QString());
 }
 
 void GraphicsRenderThread::installDebugLogger()

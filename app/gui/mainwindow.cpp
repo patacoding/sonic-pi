@@ -44,6 +44,7 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QPropertyAnimation>
+#include <QDialog>
 #include <QInputDialog>
 #include <QMessageBox>
 #include <QNetworkInterface>
@@ -4029,6 +4030,18 @@ void MainWindow::setGraphicsRenderThread(SonicPi::GraphicsRenderThread* thread)
     graphicsRenderThread = thread;
 }
 
+// The width the explanation text in the two Graphics value dialogs is pinned to.
+//
+// A constant rather than a per-dialog calculation, because the complaint being fixed is that these
+// dialogs were shaped by their prose: pinning the prose to a readable column and letting the dialog
+// follow the input field is the whole point, and a number written once makes that stable.
+//
+// This is not optional tidying. setWordWrap(true) alone does NOT narrow such a dialog: a wrapped
+// QLabel still reports the width of its longest line in sizeHint(), so the dialog sizes itself as if
+// the wrap were not there. The label's width has to be pinned for the wrap to have any effect on the
+// dialog's shape.
+static constexpr int kValueDialogTextWidth = 380;
+
 // Ask for a frame rate in Hz.
 //
 // The same rule as the resolution: a positive integer with a safety ceiling, nothing else. The
@@ -4046,19 +4059,38 @@ void MainWindow::askForCustomFrameRate()
 {
     const int current = SonicPi::GraphicsSettings::frameCapHz();
 
-    bool ok = false;
-    const QString text = QInputDialog::getText(
-        this, tr("Frame Rate"),
-        tr("Frames per second, as a positive integer.\n\n"
-           "This paces the renderer and is the rate the debug window's overlay measures against. "
-           "It is capped at the display's refresh rate, so a larger value is accepted but the "
-           "overlay will show the rate the display can actually be given."),
-        QLineEdit::Normal,
-        current > 0 ? QString::number(current) : QStringLiteral("60"),
-        &ok);
+    // See askForCustomResolution() for why this is an object rather than the convenience getText().
+    QInputDialog dlg(this);
+    dlg.setWindowTitle(tr("Frame Rate"));
+    dlg.setLabelText(tr("Frames per second, as a positive integer.\n\n"
+                        "This paces the renderer and is the rate the debug window's overlay "
+                        "measures against. It is capped at the display's refresh rate, so a larger "
+                        "value is accepted but the overlay will show the rate the display can "
+                        "actually be given."));
+    dlg.setInputMode(QInputDialog::TextInput);
+    dlg.setTextValue(current > 0 ? QString::number(current) : QStringLiteral("60"));
+    dlg.setOkButtonText(tr("Set"));
+    dlg.setCancelButtonText(tr("Cancel"));
+    if (QLineEdit* edit = dlg.findChild<QLineEdit*>())
+        edit->setMinimumWidth(edit->fontMetrics().horizontalAdvance(QStringLiteral("00000")) + 24);
 
-    if (!ok)
+    // Pinned like the resolution dialog's, and for the same reason: a wrapped label still reports
+    // the width of its longest line in sizeHint(), so wrapping alone does not narrow the dialog.
+    if (QLabel* label = dlg.findChild<QLabel*>())
+    {
+        label->setWordWrap(true);
+        label->setMinimumWidth(kValueDialogTextWidth);
+        label->setMaximumWidth(kValueDialogTextWidth);
+        label->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
+    }
+
+    dlg.adjustSize();
+    dlg.setMinimumWidth(kValueDialogTextWidth + 48);
+
+    if (dlg.exec() != QDialog::Accepted)
         return;
+
+    const QString text = dlg.textValue();
 
     int hz = 0;
     if (!SonicPi::GraphicsSettings::parseFrameRateHz(text, &hz))
@@ -4088,31 +4120,55 @@ void MainWindow::setGraphicsSharedFrame(SonicPi::GraphicsSharedFrameSlot* slot)
 // One text field, because the value is copied from a spec sheet or a display's settings page and
 // arrives as a single string like "3840x2160".
 //
+// Built as an object rather than with the convenience getText(), which sizes the dialog from the
+// prompt text. The prompt's width is pinned and its height follows the wrapped text, so the dialog
+// is shaped by what is typed into it rather than by how much is explained above it.
+//
 // The only rule is the one the user set: a positive integer, with a safety ceiling. No list of
 // acceptable sizes, no aspect-ratio check, no "did you mean". Someone driving an LED processor
 // through Spout is specifying a number that comes from that hardware, and the program is in no
 // position to have opinions about it.
 //
-// The ceiling exists to catch a slipped digit - 38400x2160 - before it reaches the driver, not
-// to predict what a GPU will take. If the allocation genuinely fails, the render target path
-// already logs it and keeps the previous size rather than crashing.
+// The ceiling exists to catch a slipped digit - 38400x2160 - before it reaches the driver, not to
+// predict what a GPU will take. If the allocation genuinely fails, the render target path already
+// logs it and keeps the previous size rather than crashing.
 void MainWindow::askForCustomResolution()
 {
     const QSize current = SonicPi::GraphicsSettings::outputSize();
 
-    bool ok = false;
-    const QString text = QInputDialog::getText(
-        this, tr("Output Resolution"),
-        tr("Width x height in pixels.\n\n"
-           "This is the resolution that is rendered and that an external consumer such as Spout "
-           "receives. It is independent of any window: the output windows show the whole frame "
-           "scaled to fit, and a consumer with no window at all still receives exactly this."),
-        QLineEdit::Normal,
-        QStringLiteral("%1x%2").arg(current.width()).arg(current.height()),
-        &ok);
+    QInputDialog dlg(this);
+    dlg.setWindowTitle(tr("Output Resolution"));
+    dlg.setLabelText(tr("Width x height in pixels.\n\n"
+                        "This is the resolution that is rendered and that an external consumer "
+                        "such as Spout receives. It is independent of any window: the output "
+                        "windows show the whole frame scaled to fit, and a consumer with no "
+                        "window at all still receives exactly this."));
+    dlg.setInputMode(QInputDialog::TextInput);
+    dlg.setTextValue(QStringLiteral("%1x%2").arg(current.width()).arg(current.height()));
+    dlg.setOkButtonText(tr("Set"));
+    dlg.setCancelButtonText(tr("Cancel"));
+    if (QLineEdit* edit = dlg.findChild<QLineEdit*>())
+        edit->setMinimumWidth(edit->fontMetrics().horizontalAdvance(QStringLiteral("00000x00000")) + 24);
 
-    if (!ok)
-        return;   // cancelled, which is not an error
+    // The prompt label is what makes the dialog wide, and setWordWrap alone does not fix it: a
+    // wrapped label still REPORTS the width of its longest line in sizeHint(), so the dialog sizes
+    // itself as if the wrap were not there. Its width is therefore pinned and its height left to
+    // follow the wrapped text.
+    if (QLabel* label = dlg.findChild<QLabel*>())
+    {
+        label->setWordWrap(true);
+        label->setMinimumWidth(kValueDialogTextWidth);
+        label->setMaximumWidth(kValueDialogTextWidth);
+        label->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
+    }
+
+    dlg.adjustSize();
+    dlg.setMinimumWidth(kValueDialogTextWidth + 48);
+
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    const QString text = dlg.textValue();
 
     QSize wanted;
     if (!SonicPi::GraphicsSettings::parseOutputSize(text, &wanted))

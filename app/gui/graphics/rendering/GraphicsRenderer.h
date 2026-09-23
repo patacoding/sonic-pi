@@ -36,6 +36,23 @@ namespace SonicPi
 
 class GraphicsTarget;
 
+// The outcome of one attempt to build the shader, with the compiler's own words.
+//
+// Returned rather than only logged, because a compile failure now has to reach the person who caused
+// it: an editor that says nothing when the code is wrong is worse than no editor. The log remains for
+// the record; this carries the same text to the user.
+//
+// A struct rather than an out-parameter so the outcome and its explanation cannot come apart -
+// reporting "failed" without the log, or a log without its outcome, are both bugs waiting to happen.
+struct GraphicsCompileResult
+{
+    std::unique_ptr<QOpenGLShaderProgram> program;   // null when the build failed
+    QString log;                                     // the compiler's output; empty on success
+    QString fragmentPath;                            // the file that was read, for the message
+
+    bool ok() const { return program != nullptr; }
+};
+
 // The shader program and the geometry that draws with it. No render target.
 //
 // What it owns is exactly what should exist once per shader: the linked program, the
@@ -150,10 +167,10 @@ public:
     // adoptProgram() at a moment of its choosing, which is a pointer swap and
     // effectively instantaneous.
     //
-    // Returns nullptr and logs the compiler output on failure, leaving the current
-    // program alone, so a broken edit changes nothing - the same guarantee
-    // reloadShaders() gives.
-    std::unique_ptr<QOpenGLShaderProgram> compileReplacement();
+    // Returns a result whose program is null on failure, carrying the compiler's output either
+    // way. The current program is left alone on failure, so a broken edit changes nothing - the
+    // guarantee that makes a shader editor safe to use while the output is live.
+    GraphicsCompileResult compileReplacement();
 
     // Install a program produced by compileReplacement(). Requires a current context.
     //
@@ -187,19 +204,28 @@ private:
     // The VAO and the quad's vertex buffer, both required before any draw.
     bool createQuadGeometry();
 
-    // Compile a vertex/fragment pair from disk into a linked program. Returns nullptr
-    // and logs the compiler output on any failure.
-    std::unique_ptr<QOpenGLShaderProgram> buildProgram(const QString& vertexFile,
-                                                       const QString& fragmentFile);
+    // Compile a vertex/fragment pair from disk, carrying the compiler's output whether or not the
+    // build succeeded: on failure that output IS the message the user needs, and on success an empty
+    // string is itself information - nothing to report.
+    GraphicsCompileResult buildProgram(const QString& vertexFile,
+                                      const QString& fragmentFile);
 
     // Compile the self-test's own shader pair. Both halves are string literals in the
     // .cpp, so this cannot be broken by an edit to the shader directory, and cannot
     // disagree with the anchor table it is checked against.
     std::unique_ptr<QOpenGLShaderProgram> buildSelfTestProgram();
 
-    // Load the default shader pair into m_program. Leaves m_program untouched on
-    // failure.
+    // Load the default shader pair into m_program. Leaves m_program untouched on failure.
     bool loadShaders();
+
+    // Build the built-in fallback shader and install it, for the one case where there is no previous
+    // program to keep: a shader that will not compile at startup. Returns false if even the fallback
+    // cannot be built, in which case the output is a flat clear colour and the log says so.
+    bool installFallbackShader();
+
+    // True while the built-in fallback is what is being drawn, so a later successful compile can
+    // report the change and so the state is not invisible.
+    bool m_usingFallbackShader = false;
 
     // The writable per-user shader directory, and the fallback in the source tree.
     // Returns an empty string if neither contains the file.

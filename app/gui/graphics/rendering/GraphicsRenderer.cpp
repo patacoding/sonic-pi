@@ -182,12 +182,20 @@ bool GraphicsRenderer::initialize()
     if (!createQuadGeometry())
         return false;
 
-    // A shader that will not compile is reported but not fatal: the draw falls back
-    // to a flat clear, so the output still shows something identifiable.
+    // A shader that will not compile is reported but not fatal, and now it is not a blank output
+    // either: at startup there is no previous program to keep, so the choice is a built-in fallback
+    // shader or nothing at all. The fallback draws something unmistakably not the user's shader, so
+    // "my edit broke it" is visible rather than looking like the feature stopped working.
     if (!loadShaders())
     {
-        GraphicsLog::warn(QStringLiteral("renderer: no usable shader; falling back to a flat clear"));
-        return false;
+        GraphicsLog::warn(QStringLiteral("renderer: the shader on disk did not build at startup; "
+                                         "installing the built-in fallback"));
+        if (!installFallbackShader())
+        {
+            GraphicsLog::error(QStringLiteral("renderer: no usable shader at all; the output will be "
+                                              "a flat clear colour until the shader compiles"));
+            return false;
+        }
     }
 
     return true;
@@ -269,36 +277,52 @@ QString GraphicsRenderer::resolveShaderPath(const QString& fileName) const
     return QString();
 }
 
-std::unique_ptr<QOpenGLShaderProgram> GraphicsRenderer::buildProgram(const QString& vertexFile,
-                                                                     const QString& fragmentFile)
+GraphicsCompileResult GraphicsRenderer::buildProgram(const QString& vertexFile,
+                                                     const QString& fragmentFile)
 {
+    GraphicsCompileResult result;
+    result.fragmentPath = resolveShaderPath(fragmentFile);
+
     const QString vert = resolveShaderPath(vertexFile);
-    const QString frag = resolveShaderPath(fragmentFile);
+    const QString frag = result.fragmentPath;
     if (vert.isEmpty() || frag.isEmpty())
-        return nullptr;
+    {
+        // A missing file is a failure like any other, and says so in the same channel as a compiler
+        // error: the user needs one place where "the shader did not build" is explained, and "the
+        // file is not there" must not be a silent variant of it.
+        result.log = QObject::tr("Shader file not found.\n  vertex:   %1\n  fragment: %2\n\n"
+                                 "Looked in the user shader directory and the shipped copy.")
+                         .arg(vert.isEmpty() ? QStringLiteral("(missing)") : vert,
+                              frag.isEmpty() ? QStringLiteral("(missing)") : frag);
+        return result;
+    }
 
     auto program = std::make_unique<QOpenGLShaderProgram>();
 
     if (!program->addShaderFromSourceFile(QOpenGLShader::Vertex, vert))
     {
+        result.log = program->log();
         GraphicsLog::error(QStringLiteral("renderer: vertex shader failed to compile (%1)\n%2")
-                               .arg(vert, program->log()));
-        return nullptr;
+                               .arg(vert, result.log));
+        return result;
     }
     if (!program->addShaderFromSourceFile(QOpenGLShader::Fragment, frag))
     {
+        result.log = program->log();
         GraphicsLog::error(QStringLiteral("renderer: fragment shader failed to compile (%1)\n%2")
-                               .arg(frag, program->log()));
-        return nullptr;
+                               .arg(frag, result.log));
+        return result;
     }
     if (!program->link())
     {
+        result.log = program->log();
         GraphicsLog::error(QStringLiteral("renderer: shader program failed to link\n%1")
-                               .arg(program->log()));
-        return nullptr;
+                               .arg(result.log));
+        return result;
     }
 
-    return program;
+    result.program = std::move(program);
+    return result;
 }
 
 std::unique_ptr<QOpenGLShaderProgram> GraphicsRenderer::buildSelfTestProgram()
@@ -327,36 +351,35 @@ std::unique_ptr<QOpenGLShaderProgram> GraphicsRenderer::buildSelfTestProgram()
     return program;
 }
 
-std::unique_ptr<QOpenGLShaderProgram> GraphicsRenderer::compileReplacement()
+GraphicsCompileResult GraphicsRenderer::compileReplacement()
 {
     const QString vertexFile = QStringLiteral("passthrough.vert");
     const QString fragmentFile = QStringLiteral("default.frag");
 
-    auto program = buildProgram(vertexFile, fragmentFile);
-    if (!program)
+    GraphicsCompileResult result = buildProgram(vertexFile, fragmentFile);
+    if (!result.ok())
     {
-        // Names the file and states that the previous program survives, so a compile
-        // failure cannot be mistaken for a reload that never arrived.
+        // Names the file and states that the previous program survives, so a compile failure cannot
+        // be mistaken for a reload that never arrived. The same explanation goes to the user through
+        // the returned log; this is the record.
         GraphicsLog::error(QStringLiteral("shader load FAILED; keeping the previous program. "
                                           "fragment file was: %1")
-                               .arg(resolveShaderPath(fragmentFile)));
-        return nullptr;
+                               .arg(result.fragmentPath));
+        return result;
     }
-
-    const QString fragPath = resolveShaderPath(fragmentFile);
 
     // The file's size and modification time.
     //
-    // So a reload that read a stale copy is distinguishable from one that read the
-    // current bytes: compare these against the file on disk. Two rounds of explaining
-    // "editing has no effect" would have been settled by these two numbers.
-    const QFileInfo fragInfo(fragPath);
+    // So a reload that read a stale copy is distinguishable from one that read the current bytes:
+    // compare these against the file on disk. Two rounds of explaining "editing has no effect" would
+    // have been settled by these two numbers.
+    const QFileInfo fragInfo(result.fragmentPath);
     GraphicsLog::info(QStringLiteral("shader: compiled  fragment=%1  bytes=%2  mtime=%3")
-                          .arg(fragPath)
+                          .arg(result.fragmentPath)
                           .arg(fragInfo.size())
                           .arg(fragInfo.lastModified().toString(QStringLiteral("HH:mm:ss.zzz"))));
 
-    return program;
+    return result;
 }
 
 void GraphicsRenderer::adoptProgram(std::unique_ptr<QOpenGLShaderProgram> program)
@@ -375,11 +398,65 @@ void GraphicsRenderer::adoptProgram(std::unique_ptr<QOpenGLShaderProgram> progra
 
 bool GraphicsRenderer::loadShaders()
 {
-    auto program = compileReplacement();
-    if (!program)
+    GraphicsCompileResult result = compileReplacement();
+    if (!result.ok())
         return false;
 
+    adoptProgram(std::move(result.program));
+    return true;
+}
+
+// A last-resort shader, compiled from a literal.
+//
+// Used when the shader on disk will not build AT STARTUP, which is the one case where "keep the
+// previous program" has no previous program to keep: the renderer would otherwise be left with no
+// program, and the application would start to a blank output with nothing but a log line to explain
+// it. A recognisable gradient is better than a blank: it says "something is drawing, and it is not
+// your shader" without needing to be read about first.
+//
+// Deliberately not the default.frag from the source tree. That file is user-editable state, and the
+// whole point of this fallback is to be the thing that cannot fail.
+static const char* kFallbackFragmentShader = R"(
+#version 330 core
+uniform float iTime;
+uniform vec2  iResolution;
+in vec2 v_uv;
+layout(location = 0) out vec4 FragColor;
+void main()
+{
+    // A slow diagonal gradient, unmistakably not a user's shader.
+    float g = fract(v_uv.x * 0.5 + v_uv.y * 0.5 + iTime * 0.1);
+    FragColor = vec4(g, 0.25 + 0.25 * sin(iTime), 1.0 - g, 1.0);
+}
+)";
+
+bool GraphicsRenderer::installFallbackShader()
+{
+    auto program = std::make_unique<QOpenGLShaderProgram>();
+
+    // The vertex half comes from the shipped tree rather than a literal, because the quad's attribute
+    // locations have to match the geometry this renderer already built - and that contract lives in
+    // passthrough.vert. If even that is unreadable, there is nothing sensible left to do.
+    const QString vert = resolveShaderPath(QStringLiteral("passthrough.vert"));
+    if (vert.isEmpty() || !program->addShaderFromSourceFile(QOpenGLShader::Vertex, vert))
+    {
+        GraphicsLog::error(QStringLiteral("renderer: the fallback shader could not be built either; "
+                                          "the output will be a flat clear colour"));
+        return false;
+    }
+    if (!program->addShaderFromSourceCode(QOpenGLShader::Fragment, kFallbackFragmentShader)
+        || !program->link())
+    {
+        GraphicsLog::error(QStringLiteral("renderer: the fallback fragment shader failed to link\n%1")
+                               .arg(program->log()));
+        return false;
+    }
+
     adoptProgram(std::move(program));
+    m_usingFallbackShader = true;
+    GraphicsLog::warn(QStringLiteral("renderer: using the built-in fallback shader, because the "
+                                     "shader on disk does not compile. Fix it in the shader editor "
+                                     "and compile again; the output is not blank in the meantime"));
     return true;
 }
 
