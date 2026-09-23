@@ -80,6 +80,15 @@ public:
     void loadFromFile();
     void saveToFile();
 
+    // The actual reading and writing, separated from the dialogs that choose a path.
+    //
+    // Not tidiness: while these were welded to a modal QFileDialog, nothing about them could be
+    // exercised by an automated run, and "import a shader" is the kind of logic that is wrong in
+    // small ways - a BOM, a truncated read, an extension that does not get appended. Split, the
+    // dialog is the only untested part and the logic is testable.
+    bool importFrom(const QString& fileName);
+    bool exportTo(const QString& fileName);
+
 signals:
     // Emitted when the user closes this window, so the menu action that opened it can be un-ticked.
     void closedByUser();

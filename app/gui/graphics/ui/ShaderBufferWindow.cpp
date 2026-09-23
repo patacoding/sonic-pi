@@ -15,6 +15,7 @@
 
 #include "GraphicsLog.h"
 #include "GraphicsSettings.h"
+#include "../ShaderText.h"
 #include "sonicpiscintilla.h"
 #include "sonicpitheme.h"
 
@@ -46,10 +47,6 @@ const char* kFragmentShaderFile = "default.frag";
 
 } // namespace
 
-// Declared before use in showCompileReport(), defined below with its reasoning. Free-standing rather
-// than a member so the parsing rule can be tested without a window - see the comment on the
-// definition, and tools/settings-probe/shader-log-check.cpp.
-int shaderLogFirstErrorLine(const QString& compilerLog);
 
 ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread* renderThread,
                                        QSettings* settings, QWidget* parent)
@@ -218,26 +215,32 @@ void ShaderBufferWindow::loadFromFile()
     if (fileName.isEmpty())
         return;   // cancelled, which is not an error
 
+    if (m_settings)
+        m_settings->setValue(QStringLiteral("lastShaderDir"), QDir(fileName).absolutePath());
+
+    importFrom(fileName);
+}
+
+bool ShaderBufferWindow::importFrom(const QString& fileName)
+{
     QFile file(fileName);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
     {
         m_status->setText(tr("Could not read %1").arg(fileName));
         GraphicsLog::warn(QStringLiteral("shader buffer: could not read %1").arg(fileName));
-        return;
+        return false;
     }
     QTextStream in(&file);
     const QString text = in.readAll();
     file.close();
 
-    if (m_settings)
-        m_settings->setValue(QStringLiteral("lastShaderDir"), QDir(fileName).absolutePath());
-
     m_editor->setText(text);
     // The report is cleared because it describes the PREVIOUS contents. Leaving a stale compiler error
-    // next to freshly imported code would point at a line that no longer means anything.
+    // beside freshly imported code would point at a line that no longer means anything.
     showCompileReport(true, QString());
     m_status->setText(tr("Loaded %1 into the buffer. Press Compile to render it.").arg(fileName));
     GraphicsLog::info(QStringLiteral("shader buffer: imported %1 (%2 bytes)").arg(fileName).arg(text.size()));
+    return true;
 }
 
 // Export the editor's text to an arbitrary file.
@@ -263,17 +266,19 @@ void ShaderBufferWindow::saveToFile()
     if (m_settings)
         m_settings->setValue(QStringLiteral("lastShaderDir"), QDir(fileName).absolutePath());
 
-    // A shader without an extension is a file the next dialog will not recognise, so one is added -
-    // the same courtesy the audio buffer's save dialog extends.
-    if (!fileName.contains(QRegularExpression(QStringLiteral("\\.[A-Za-z0-9]+$"))))
-        fileName += QStringLiteral(".frag");
+    exportTo(fileName);
+}
+
+bool ShaderBufferWindow::exportTo(const QString& chosenName)
+{
+    const QString fileName = ShaderText::withFragmentExtension(chosenName);
 
     QFile file(fileName);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
     {
         m_status->setText(tr("Could not write %1").arg(fileName));
         GraphicsLog::warn(QStringLiteral("shader buffer: could not write %1").arg(fileName));
-        return;
+        return false;
     }
     {
         QTextStream out(&file);
@@ -283,6 +288,7 @@ void ShaderBufferWindow::saveToFile()
 
     m_status->setText(tr("Saved to %1").arg(fileName));
     GraphicsLog::info(QStringLiteral("shader buffer: exported to %1").arg(fileName));
+    return true;
 }
 
 void ShaderBufferWindow::showCompileReport(bool ok, const QString& compilerLog)
@@ -304,7 +310,7 @@ void ShaderBufferWindow::showCompileReport(bool ok, const QString& compilerLog)
     // A line number is offered when one can be recognised, and its absence is not an error: some
     // diagnostics name none, and inventing one would put the cursor somewhere arbitrary and look like
     // a bug in the editor rather than a limitation of the message.
-    m_errorLine = shaderLogFirstErrorLine(compilerLog);
+    m_errorLine = ShaderText::firstErrorLine(compilerLog);
     m_jumpButton->setEnabled(m_errorLine > 0);
 
     if (m_errorLine > 0)
@@ -325,51 +331,6 @@ void ShaderBufferWindow::showCompileReport(bool ok, const QString& compilerLog)
     }
 }
 
-// The first line number mentioned in a compiler diagnostic, or 0 when none is recognisable.
-//
-// Deliberately loose, and tested separately (tools/settings-probe/shader-log-check.cpp) because the
-// formats differ per driver and this is the part most likely to be wrong:
-//
-//   Mesa    0:12(5): error: ...
-//   NVIDIA  0(12) : error C0000: ...
-//   Apple   ERROR: 0:12: ...
-//
-// They agree only that a line number appears among the first tokens, so this looks for a number in
-// that position rather than trying to match one vendor. Returning 0 means "no jump offered", which is
-// the honest answer: a wrong guess moves the cursor to an unrelated line and reads as a bug in the
-// editor rather than a limitation of the message.
-int shaderLogFirstErrorLine(const QString& compilerLog)
-{
-    // The longest line a shader is going to have. Also stops a large number in a driver's internal
-    // code being read as a line number.
-    constexpr int kMaxPlausibleLine = 100000;
-
-    const QStringList lines = compilerLog.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
-    for (const QString& raw : lines)
-    {
-        const QString line = raw.trimmed();
-
-        // "0:12(5): error" and "0:12: error" - the commonest shape, column second.
-        static const QRegularExpression colonForm(QStringLiteral("^\\d+\\s*:\\s*(\\d+)"));
-        // "0(12) : error C0000" - line in parentheses.
-        static const QRegularExpression parenForm(QStringLiteral("^\\d+\\s*\\(\\s*(\\d+)\\s*\\)"));
-        // "ERROR: 0:12:" and "WARNING: 12:" - a level prefix first.
-        static const QRegularExpression prefixedForm(
-            QStringLiteral("^(?:ERROR|WARNING)\\s*:\\s*\\d*\\s*:?\\s*(\\d+)\\s*[:(]"));
-
-        const QRegularExpression* forms[] = { &colonForm, &parenForm, &prefixedForm };
-        for (const QRegularExpression* re : forms)
-        {
-            if (const QRegularExpressionMatch m = re->match(line); m.hasMatch())
-            {
-                const int n = m.captured(1).toInt();
-                if (n > 0 && n <= kMaxPlausibleLine)
-                    return n;
-            }
-        }
-    }
-    return 0;
-}
 
 void ShaderBufferWindow::jumpToLine(int line)
 {
