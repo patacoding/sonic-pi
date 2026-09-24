@@ -280,6 +280,46 @@ QString fragmentFileName(const QString& shaderName)
     return shaderName + QStringLiteral(".frag");
 }
 
+QString activeShaderName()
+{
+    migrateFromGuiSettingsOnce();
+    const QString stored = readSetting(QStringLiteral("active-buffer"), QString()).toString().trimmed();
+    if (stored.isEmpty())
+        return defaultShaderName();
+
+    // A name is a file name without its extension; a stored "noise.frag" is accepted rather than
+    // treated as a different buffer, because the two spellings can only mean the same file.
+    return stored.endsWith(QStringLiteral(".frag")) ? stored.chopped(5) : stored;
+}
+
+void setActiveShaderName(const QString& shaderName)
+{
+    if (shaderName.trimmed().isEmpty())
+        return;
+    writeSetting(QStringLiteral("active-buffer"), shaderName);
+}
+
+QStringList shaderNames()
+{
+    const QDir dir(shaderDirectoryPath());
+    if (!dir.exists())
+        return QStringList{ defaultShaderName() };
+
+    QStringList names;
+    const QStringList files = dir.entryList(QStringList{ QStringLiteral("*.frag") }, QDir::Files,
+                                            QDir::Name | QDir::IgnoreCase);
+    for (const QString& file : files)
+        names << file.chopped(5);   // ".frag"
+
+    // The default buffer always exists as a name, even before its file does: it is what a fresh session
+    // renders, and a menu or tab bar with nothing in it would look broken rather than empty.
+    if (!names.contains(defaultShaderName(), Qt::CaseInsensitive))
+        names.prepend(defaultShaderName());
+
+    return names;
+}
+
+
 QString writableShaderPath(const QString& fileName)
 {
     return shaderDirectoryPath() + QLatin1Char('/') + fileName;

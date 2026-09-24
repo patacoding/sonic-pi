@@ -224,9 +224,11 @@ int main(int argc, char* argv[])
         // to "what is on screen": the renderer compiles it, and the shader editor opens it by asking the
         // same thread. One decision, one holder, no second place where a file name could be guessed.
         //
-        // With one buffer the choice is constant; when there are several, this is where the stored
-        // choice is read (graphics-multi-buffer-plan.md, M2/M3).
-        gfxThread->setShaderName(SonicPi::GraphicsSettings::defaultShaderName());
+        // It comes from graphics.ini, because "which picture do I come back to" is the user's decision -
+        // the menu writes it when they switch. A name whose file is missing is left as it is rather than
+        // substituted: the renderer says so in the buffer's own words, which is more useful than a
+        // silent fallback to another shader.
+        gfxThread->setActiveShaderName(SonicPi::GraphicsSettings::activeShaderName());
         QObject::connect(gfxThread, &SonicPi::GraphicsRenderThread::contextReady,
                          &app, [](bool ok) {
                              if (!ok)

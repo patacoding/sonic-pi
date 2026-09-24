@@ -191,7 +191,7 @@ void GraphicsRenderer::destroy()
     m_program.reset();
 }
 
-bool GraphicsRenderer::initialize()
+bool GraphicsRenderer::initialize(bool fallbackWhenNothingBuilds)
 {
     if (!QOpenGLContext::currentContext())
     {
@@ -208,6 +208,15 @@ bool GraphicsRenderer::initialize()
     // "my edit broke it" is visible rather than looking like the feature stopped working.
     if (!loadShaders())
     {
+        if (!fallbackWhenNothingBuilds)
+        {
+            // A buffer being brought up while another one is already on screen. The picture that exists
+            // is better than a gradient: the caller keeps it and reports this buffer's failure.
+            GraphicsLog::warn(QStringLiteral("renderer: buffer '%1' did not build; the picture on screen "
+                                             "is left alone").arg(m_shaderName));
+            return false;
+        }
+
         GraphicsLog::warn(QStringLiteral("renderer: the shader on disk did not build at startup; "
                                          "installing the built-in fallback"));
         if (!installFallbackShader())

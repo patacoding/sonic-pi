@@ -110,7 +110,16 @@ public:
 
     // Builds the quad geometry and loads the shader files. Requires a current
     // context. Returns false and logs why on failure.
-    bool initialize();
+    //
+    // `fallbackWhenNothingBuilds` is true for the FIRST renderer of a session: with no previous program
+    // to keep, the choice is the built-in fallback or a blank output, and a blank output is worse. It is
+    // FALSE for a buffer created later, where "keep the previous program" means the picture already on
+    // screen - installing the fallback there would throw away a working shader to show a gradient.
+    bool initialize(bool fallbackWhenNothingBuilds = true);
+
+    // Whether this renderer has a program to draw with. A buffer that failed to compile has none, and
+    // the caller uses this to decide whether a switch to it is allowed (see GraphicsRenderThread).
+    bool hasProgram() const { return m_program != nullptr; }
 
     // Which buffer this renderer compiles.
     //

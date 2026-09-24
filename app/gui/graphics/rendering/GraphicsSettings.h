@@ -15,6 +15,7 @@
 
 #include <QSize>
 #include <QString>
+#include <QStringList>
 
 namespace SonicPi
 {
@@ -131,6 +132,25 @@ inline QString defaultShaderName()
 // "default" -> "default.frag". The one place the extension is applied, so a name and its file cannot
 // disagree.
 QString fragmentFileName(const QString& shaderName);
+
+// The buffer to render: the one the user last switched to, or the default when there is no choice yet.
+//
+// Stored rather than derived, because "which picture do I come back to" is the user's decision and not
+// something to guess from the directory. Nothing here validates the name - a name whose file does not
+// exist is a real state (a buffer whose file was deleted, a config edited by hand), and the renderer
+// reports it in the buffer's own words rather than this function silently substituting another.
+QString activeShaderName();
+
+// Remember the buffer the user switched to, so the next session starts on it.
+void setActiveShaderName(const QString& shaderName);
+
+// Every buffer in the shader directory: its top-level *.frag files, as names, sorted.
+//
+// THE DIRECTORY IS THE LIST. There is no index table, no registry and no fixed count - a buffer is a
+// file, whether the user made it in the editor or put it there by hand, and subdirectories (lib/ and
+// friends) are libraries rather than buffers. That is the whole rule, which is why this is a directory
+// read rather than a stored list that could disagree with what is on disk.
+QStringList shaderNames();
 
 // The file to READ for a given role. The user's copy when it exists, otherwise the shipped copy, and
 // an empty string when neither is present.

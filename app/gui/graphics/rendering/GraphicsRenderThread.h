@@ -25,6 +25,7 @@
 #include <QSurfaceFormat>
 
 #include <atomic>
+#include <map>
 #include <memory>
 
 class QOffscreenSurface;
@@ -162,9 +163,15 @@ public:
     // opens. The thread is the live answer to "what is on screen" - the configured name is only where a
     // session starts - so anything that needs to agree with the picture asks here.
     //
-    // Must be set before start(): the renderer is created on the thread and takes the name with it.
-    void setShaderName(const QString& name);
-    QString shaderName() const { return m_shaderName; }
+    // Safe to call at any time, from any thread:
+    //   * before start(), it decides the buffer the first renderer is built for;
+    //   * while the loop runs, it is a SWITCH, applied at the top of a frame on the render thread.
+    //
+    // A switch to a buffer that cannot be built does NOT happen: the picture on screen stays, and the
+    // log says which buffer failed. That is the same promise compiling makes (never lose the picture),
+    // applied to the thing that is being switched TO.
+    void setActiveShaderName(const QString& name);
+    QString shaderName() const;
 
     // Result of the Phase 0 framebuffer readback check. False if the check did
     // not run, so a caller cannot mistake "not attempted" for "passed".
@@ -295,14 +302,52 @@ private:
     // protect the texture a consumer samples - see the double-buffer note below.
     mutable QMutex m_rendererMutex;
 
-    // The shader program and geometry. One, not two: only the render TARGET is
-    // duplicated for double buffering, so there is one program, one set of uniform
-    // locations, and one compile per reload.
+    // ONE RENDERER PER BUFFER - which is what a renderer already was: it owns exactly what should exist
+    // once per shader (the program, the quad, the uniform locations). A second buffer is therefore a
+    // second renderer, not an array of programs inside one object.
     //
-    // Declared after the context so it is destroyed before it - GL objects need a
-    // current context to tear down. run() also resets explicitly before releasing the
-    // context, so this ordering is belt and braces.
-    std::unique_ptr<GraphicsRenderer> m_gfxRenderer;
+    // Owned by, and only ever touched from, the render thread: a renderer holds GL objects, and those
+    // belong to this thread's context. Readers on other threads use m_activeRenderer below, which is
+    // safe because an entry is NEVER evicted - a buffer that exists stays compiled for the session, so a
+    // published pointer cannot dangle. (Scoped to the session on purpose: with a handful of buffers that
+    // is a few hundred kilobytes, and eviction would buy a use-after-free waiting to happen.)
+    //
+    // std::map rather than QHash: the value is a unique_ptr, which Qt's container cannot hold, and an
+    // ordered map also makes the "renderers alive" log line stable between runs.
+    //
+    // Declared after the context so it is destroyed before it - GL objects need a current context to
+    // tear down. run() also clears it explicitly before releasing the context, so this ordering is belt
+    // and braces.
+    std::map<QString, std::unique_ptr<GraphicsRenderer>> m_renderers;
+
+    // The renderer currently being drawn with, or null before the first one exists.
+    //
+    // An atomic POINTER rather than a lock: the frame loop reads it once per frame and must not take a
+    // mutex to do it, and the writers are the render thread itself plus nothing else (a switch is
+    // applied on this thread - that is the whole reason switches are requests).
+    std::atomic<GraphicsRenderer*> m_activeRenderer{nullptr};
+
+    // The buffer's name, for readers on other threads (the editor asks which file it should open) and
+    // for the switch request. `m_activeShaderName` is what is ACTUALLY being rendered - it changes only
+    // when a switch succeeds - while `m_requestedShaderName` is what has been asked for and not yet
+    // applied.
+    mutable QMutex m_bufferMutex;
+    QString m_activeShaderName = GraphicsSettings::defaultShaderName();
+    QString m_requestedShaderName = GraphicsSettings::defaultShaderName();
+    std::atomic<bool> m_switchRequested{false};
+
+    // Bring up the renderer for a buffer, creating it if this is the first time it has been needed.
+    //
+    // MUST be called on the render thread with the context current, and with m_rendererMutex held (the
+    // creation compiles the shader, which is slow, and the loop must not draw with a half-built
+    // renderer). Returns null when the buffer could not be brought up at all, in which case the caller
+    // keeps whatever is on screen.
+    GraphicsRenderer* ensureRenderer(const QString& shaderName);
+
+    // Apply a pending switch at the top of a frame: bring the buffer up if needed, and make it the one
+    // being drawn with - but only if it has a program. A buffer that fails to build leaves the picture
+    // alone and says so.
+    void applyShaderSwitch();
 
     // The two render targets, alternating.
     //
@@ -372,15 +417,10 @@ private:
     // The last snapshot taken, kept alive because a frame holds a pointer to it.
     GraphicsUniformSnapshot m_uniformSnapshot;
     quint64 m_uniformVersion = 0;
-    // The GL_RENDERER string. Distinct from m_gfxRenderer, which is the object
-    // that draws.
+    // The GL_RENDERER string. Distinct from m_renderers, which are the objects
+    // that draw.
     QString m_renderer;
     QString m_version;
-
-    // Which buffer is being rendered. Set before start(), read from anywhere: written once at setup,
-    // read by the GUI to name the file it edits, so a plain member is enough (M2's switching will have
-    // to make it atomic or guarded, and that is a change worth making only when it is needed).
-    QString m_shaderName = GraphicsSettings::defaultShaderName();
 
     // Loop state. Written by the render thread, read by anyone.
     std::atomic<bool>      m_reloadRequested{false};
