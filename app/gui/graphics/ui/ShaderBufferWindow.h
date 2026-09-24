@@ -23,6 +23,7 @@ class QLabel;
 class QPlainTextEdit;
 class QPushButton;
 class QSettings;
+class QTabWidget;
 class QTimer;
 
 class SonicPiScintilla;
@@ -84,12 +85,17 @@ public:
     void zoomIn();
     void zoomOut();
 
-    // Write the editor's text to the shader file and ask the render thread to compile it. The reply
-    // arrives at compileFinished().
+    // Write the CURRENT TAB's text to that buffer's file and ask the render thread to compile it and put
+    // it on screen. The reply arrives at compileFinished().
     //
-    // Bound to Alt+R as well as the Compile button, the same key Sonic Pi's own Run uses: the
-    // semantics are the same - take what is in the buffer and put it into effect.
+    // Bound to Alt+R as well as the Compile button, the same key Sonic Pi's own Run uses: the semantics
+    // are the same as an audio buffer's Run - take what is in the buffer and put it into effect. For a
+    // picture "into effect" also means "on screen", which is why one key does both here: there is only
+    // one output, so a buffer that has compiled but is not shown is work nobody can see.
     void compile();
+
+    // Show the window on one buffer, creating its tab if it is not there yet, and make it current.
+    void showBuffer(const QString& shaderName);
 
     // Import a shader from an arbitrary file into the editor, and export the editor's text to one.
     //
@@ -131,8 +137,12 @@ protected:
 private:
     // Show the compiler's output, prefixed with where the problem is (file:line). Empty text with ok
     // true clears the report.
+    //
+    // The report belongs to the BUFFER it is about, not to the window: each buffer keeps its own, and
+    // switching tabs brings that buffer's report back with it. One shared pane would show a stale error
+    // from another shader beside code it has nothing to do with.
     void showCompileReport(bool ok, const QString& compilerLog, const QString& errorFile,
-                           int errorLine);
+                           int errorLine, const QString& shaderName = QString());
     // Put the cursor on `line` (1-based) and make sure it is visible. No-op for a line number that is
     // not in the document, because a diagnostic referring to a line the editor does not have would
     // otherwise move the cursor somewhere arbitrary and look like a bug.
@@ -142,20 +152,56 @@ private:
     // is not a line in this document at all, so the caller compares files before asking
     // (docs/shader-includes-plan.md 4).
     void jumpToLine(int line);
-    // The file this window edits, resolved through GraphicsSettings so it is the same file the
-    // renderer reads. Empty when it could not be produced.
-    QString shaderFilePath() const;
-    // Read the buffer's own file into the editor. Called once, on creation: the file is the
-    // renderer's source, so the window opens showing what is being rendered.
-    void reloadFromDisk();
+
+    // ---- the buffers, as tabs ---------------------------------------------------------------
+    //
+    // One editor per buffer, kept for the life of the window: switching tabs must not throw away
+    // unsaved text, which is the audio side's behaviour too (its ten buffers are ten editors, not one
+    // reused editor).
+    //
+    // The LIST comes from the shader directory (GraphicsSettings::shaderNames()), so a buffer is a file
+    // and nothing else has to be maintained. It is re-read on every rebuildTabs() - opening the window,
+    // creating a buffer - rather than watched with a file watcher: a watcher is a thread and a set of
+    // platform behaviours for a list that changes only when the user changes it.
+    void rebuildTabs(const QString& selectName = QString());
+    // The buffer currently being edited (the current tab's name). Empty only when there are no tabs at
+    // all, which needs the shader directory to be unreadable.
+    QString editingShaderName() const;
+    // Make `name` the current tab. No-op when it is already current.
+    void selectTab(const QString& name);
+    // The editor for the current tab, or null.
+    SonicPiScintilla* currentEditor() const;
+    // Re-label the tabs: the buffer that is on screen gets the mark, and every tab's tooltip says what
+    // pressing Compile would do. Called whenever the picture or the current tab changes.
+    void updateTabLabels();
+    // Show the CURRENT tab's own report and status line. Called on every tab change and after a verdict,
+    // because a report belongs to a buffer and must not be left beside another buffer's code.
+    void showCurrentBuffer();
+    // Create a new buffer: ask for a name, write a minimal shader to its file, and open it in a tab.
+    void newBuffer();
+    // A minimal valid shader for a new buffer. Valid on purpose: a new buffer that shows a blank output
+    // with a compile error teaches the wrong thing about what just happened.
+    static QString newBufferTemplate(const QString& name);
+
+    // The file a buffer's text lives in, and where it is written. Empty when the name is unknown.
+    static QString bufferFilePath(const QString& shaderName);
 
     SonicPiTheme* m_theme = nullptr;
     GraphicsRenderThread* m_renderThread = nullptr;
     // Not owned. The GUI's settings, for the file dialogs' remembered directory only.
     QSettings* m_settings = nullptr;
 
-    SonicPiScintilla* m_editor = nullptr;
-    // Owned by the editor (set on it), and held here so applyTheme() can re-colour it.
+    QTabWidget* m_tabs = nullptr;
+    // The editor of each tab, by buffer name. Owned by the tab widget.
+    QHash<QString, SonicPiScintilla*> m_editors;
+    // Each buffer's report and status line, so switching tabs does not mix two shaders' diagnostics.
+    QHash<QString, QString> m_reports;
+    QHash<QString, QString> m_statusByBuffer;
+    // The name of the buffer the LAST compile request was made for, so a verdict arriving later can be
+    // filed against the right buffer even if the user has switched tabs in the meantime.
+    QString m_compilingShaderName;
+
+    // Owned by the editors (set on them), and held here so applyTheme() can re-colour them.
     GlslLexer* m_lexer = nullptr;
     QPlainTextEdit* m_report = nullptr;
     QLabel* m_status = nullptr;

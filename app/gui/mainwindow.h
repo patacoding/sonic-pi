@@ -905,10 +905,6 @@ private:
     // Re-reads the shader files from disk. They live outside the binary so they
     // can be edited and reloaded without a rebuild.
     QAction *graphicsReloadShaderAct;
-    // The buffers, listed from the shader directory when the menu opens. A member because it is
-    // repopulated on every open rather than built once: the list IS the directory, which the user can
-    // change from the editor or from outside the application.
-    QMenu *graphicsBufferMenu;
     // The graphics debug preview: the same picture smaller, with the render thread's
     // numbers over it. A separate window rather than a pane here, so that nothing about
     // rendering lives in this class - see showGraphicsPreview().

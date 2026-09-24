@@ -88,10 +88,10 @@ struct GraphicsFrameStats
 // obtained while the context is current - QOpenGLFunctions fatal-errors
 // otherwise.
 //
-// Shader reload is a request, not a call. The context belongs to this thread, so
-// a reloader on another thread cannot make it current; requestShaderReload()
-// sets a flag that the loop picks up on its next iteration, where the context is
-// current by construction.
+// Shader compiles are REQUESTS, not calls. The context belongs to this thread, so a
+// caller on another thread cannot make it current; requestShaderCompile() sets a flag
+// that the loop picks up on its next iteration, where the context is current by
+// construction.
 class GraphicsRenderThread : public QThread
 {
     Q_OBJECT
@@ -159,19 +159,25 @@ public:
     bool contextIsValid() const { return m_contextOk; }
     QString rendererName() const { return m_renderer; }
 
-    // Which buffer this thread renders, and therefore which file the renderer compiles and the editor
-    // opens. The thread is the live answer to "what is on screen" - the configured name is only where a
-    // session starts - so anything that needs to agree with the picture asks here.
-    //
-    // Safe to call at any time, from any thread:
-    //   * before start(), it decides the buffer the first renderer is built for;
-    //   * while the loop runs, it is a SWITCH, applied at the top of a frame on the render thread.
-    //
-    // A switch to a buffer that cannot be built does NOT happen: the picture on screen stays, and the
-    // log says which buffer failed. That is the same promise compiling makes (never lose the picture),
-    // applied to the thing that is being switched TO.
+    // Which buffer is being rendered. Set once, before start(), from the configured name; after that it
+    // changes only when a compile puts another buffer on screen. The editor asks this to know which tab
+    // the picture belongs to, and the live answer has to be the thread's rather than a setting's.
     void setActiveShaderName(const QString& name);
     QString shaderName() const;
+
+    // Build a buffer and put it on screen. Applied at the top of a frame; returns immediately.
+    //
+    // ONE operation, not two ("compile", then "switch"), because for a picture there is no useful state
+    // in between: a buffer that has compiled but is not on screen is work nobody can see, and a switch
+    // to a buffer that has not compiled is a picture that cannot be drawn. They are the same act, and it
+    // is the gesture live coding needs - edit a buffer, press the key, the picture becomes it.
+    //
+    // An empty name means "the buffer currently on screen", which is what Reload Shader means.
+    //
+    // A buffer that will not build does NOT reach the screen: the picture stays exactly as it was, and
+    // the compiler's own output comes back through shaderCompileFinished so the editor can show it where
+    // the user is looking. Returns false when there is no running loop to apply it to.
+    bool requestShaderCompile(const QString& shaderName = QString());
 
     // Result of the Phase 0 framebuffer readback check. False if the check did
     // not run, so a caller cannot mistake "not attempted" for "passed".
@@ -225,11 +231,6 @@ public:
     // The size currently being rendered into. May differ from the last requested
     // size until the render thread has applied it.
     QSize renderTargetSize() const;
-
-    // Ask for the shader files to be re-read. Applied at the top of the next
-    // frame; returns immediately. Returns false if there is no running loop to
-    // apply it, in which case nothing will happen.
-    bool requestShaderReload();
 
     // Ask the loop to finish and block until the thread has stopped.
     //
@@ -327,27 +328,27 @@ private:
     // applied on this thread - that is the whole reason switches are requests).
     std::atomic<GraphicsRenderer*> m_activeRenderer{nullptr};
 
-    // The buffer's name, for readers on other threads (the editor asks which file it should open) and
-    // for the switch request. `m_activeShaderName` is what is ACTUALLY being rendered - it changes only
-    // when a switch succeeds - while `m_requestedShaderName` is what has been asked for and not yet
-    // applied.
+    // The buffer's name: what is ACTUALLY being rendered, and what has been asked for (a compile
+    // request carries its buffer with it, because "compile the one I am looking at" and "compile the one
+    // I am editing" are different questions once the editor has tabs).
     mutable QMutex m_bufferMutex;
     QString m_activeShaderName = GraphicsSettings::defaultShaderName();
     QString m_requestedShaderName = GraphicsSettings::defaultShaderName();
-    std::atomic<bool> m_switchRequested{false};
 
     // Bring up the renderer for a buffer, creating it if this is the first time it has been needed.
     //
-    // MUST be called on the render thread with the context current, and with m_rendererMutex held (the
-    // creation compiles the shader, which is slow, and the loop must not draw with a half-built
-    // renderer). Returns null when the buffer could not be brought up at all, in which case the caller
-    // keeps whatever is on screen.
-    GraphicsRenderer* ensureRenderer(const QString& shaderName);
+    // MUST be called on the render thread with the context current, and with m_rendererMutex held.
+    // The renderer comes back with its GEOMETRY only: the compile is the caller's next step, because the
+    // caller is the one that has to report the result and decide whether the buffer may go on screen.
+    //
+    // Returns null when the buffer could not even be created (no context, no VAO), in which case the
+    // caller keeps whatever is on screen.
+    GraphicsRenderer* createRenderer(const QString& shaderName);
 
-    // Apply a pending switch at the top of a frame: bring the buffer up if needed, and make it the one
-    // being drawn with - but only if it has a program. A buffer that fails to build leaves the picture
-    // alone and says so.
-    void applyShaderSwitch();
+    // Apply a pending compile request at the top of a frame: build the requested buffer and, only if it
+    // built, make it the one being drawn with. A buffer that fails leaves the picture alone and sends the
+    // compiler's own words back to whoever asked.
+    void applyShaderCompile();
 
     // The two render targets, alternating.
     //

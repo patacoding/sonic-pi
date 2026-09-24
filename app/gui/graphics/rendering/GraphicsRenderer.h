@@ -108,6 +108,22 @@ public:
     GraphicsRenderer(const GraphicsRenderer&) = delete;
     GraphicsRenderer& operator=(const GraphicsRenderer&) = delete;
 
+    // The quad's geometry, and nothing else. Requires a current context.
+    //
+    // Split out of initialize() so a buffer can be created WITHOUT compiling it: the caller that is
+    // about to compile it wants the compile's own result in its hands - to report it, and to decide
+    // whether the buffer may become the one on screen. Compiling inside the constructor is what makes
+    // that impossible, and it is why this exists.
+    bool prepare();
+
+    // Compile this buffer's files and install the program. The compiler's own output comes back either
+    // way (empty on success).
+    //
+    // One call rather than "compile, then adopt": the two halves must not come apart - a program that
+    // is compiled but never installed, or installed from a compile nobody checked, are both states that
+    // have already cost this feature a rewrite.
+    GraphicsCompileResult buildAndInstall();
+
     // Builds the quad geometry and loads the shader files. Requires a current
     // context. Returns false and logs why on failure.
     //

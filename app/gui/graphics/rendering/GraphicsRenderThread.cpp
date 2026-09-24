@@ -173,18 +173,29 @@ bool GraphicsRenderThread::applyRateChange(int* capHz, qint64* intervalNs, qint6
     return true;
 }
 
-bool GraphicsRenderThread::requestShaderReload()
+bool GraphicsRenderThread::requestShaderCompile(const QString& shaderName)
 {
     if (!m_loopRunning.load(std::memory_order_relaxed))
     {
-        GraphicsLog::warn(QStringLiteral("reload requested but the render loop is not running"));
+        GraphicsLog::warn(QStringLiteral("compile requested but the render loop is not running"));
         return false;
     }
+
+    // Empty means "the buffer on screen", which is what a plain reload is. Stored rather than resolved
+    // here, because the answer can change before the loop gets to it - and the loop's answer is the one
+    // that belongs with the frame it applies to.
+    {
+        QMutexLocker lock(&m_bufferMutex);
+        m_requestedShaderName = shaderName;
+    }
     m_reloadRequested.store(true, std::memory_order_relaxed);
+
     // Timestamped on request, so the delay before the loop picks it up is
     // measurable rather than a matter of impression. "Reload is unreliable and
     // sometimes takes seconds" is only diagnosable if both ends are timed.
-    GraphicsLog::info(QStringLiteral("reload: requested"));
+    GraphicsLog::info(QStringLiteral("compile: requested by the GUI%1")
+                          .arg(shaderName.isEmpty() ? QString()
+                                                    : QStringLiteral(" for buffer '%1'").arg(shaderName)));
     return true;
 }
 
@@ -240,19 +251,26 @@ bool GraphicsRenderThread::applyRenderTargetSizeRequest()
 
     const QSize wanted(w, h);
 
-    // The active buffer's renderer is created once and kept across rebuilds: it owns the program and
-    // the geometry, which do not depend on the target size. Recreating it here - as an earlier version
-    // did - would recompile the shader on every resize, and would be the first step back towards two of
-    // everything.
-    //
-    // The first renderer of a session gets the built-in fallback if its shader will not build, because
-    // there is nothing on screen to keep; any later one does not, because by then there is.
-    const bool firstRenderer = m_renderers.empty();
-    GraphicsRenderer* renderer = ensureRenderer(shaderName());
-    if (!renderer || (!renderer->hasProgram() && firstRenderer))
+    // The startup renderer: geometry, then the buffer's shader, then - if there is nothing to show and
+    // this is the session's first renderer - the built-in fallback rather than a blank output. Later
+    // buffers never take that route: by then there IS something on screen worth keeping, and a compile
+    // request that fails leaves it alone (see applyShaderCompile).
+    GraphicsRenderer* renderer = createRenderer(shaderName());
+    if (!renderer)
     {
         GraphicsLog::error(QStringLiteral("renderer: could not be initialised"));
         return false;
+    }
+
+    if (!renderer->hasProgram())
+    {
+        const bool firstRenderer = m_renderers.size() == 1;
+        if (!renderer->initialize(firstRenderer))
+        {
+            GraphicsLog::error(QStringLiteral("renderer: could not be initialised"));
+            m_renderers.clear();
+            return false;
+        }
     }
 
     m_activeRenderer.store(renderer, std::memory_order_relaxed);
@@ -286,42 +304,22 @@ void GraphicsRenderThread::setActiveShaderName(const QString& name)
     // reported, rather than to a name nobody can read.
     const QString wanted = name.isEmpty() ? GraphicsSettings::defaultShaderName() : name;
 
-    bool isSwitch = false;
     {
         QMutexLocker lock(&m_bufferMutex);
-        if (m_requestedShaderName == wanted)
-            return;
+        m_activeShaderName = wanted;
         m_requestedShaderName = wanted;
-
-        // Before the loop runs there is nothing on screen, so this is the INITIAL choice rather than a
-        // switch. Taking it as the active name means the first renderer built is the configured
-        // buffer's - otherwise startup builds the default one, compiles it, runs the self-check against
-        // it, and then throws that work away one frame later when the switch lands. Measured before this
-        // line existed: exactly that, in the startup log.
-        if (m_loopRunning.load(std::memory_order_relaxed))
-        {
-            isSwitch = true;
-        }
-        else
-        {
-            m_activeShaderName = wanted;
-        }
     }
 
-    if (isSwitch)
-        m_switchRequested.store(true, std::memory_order_release);
-
-    // Recorded either way, and worded for which it is: "I asked for noise and got default" is exactly
-    // the kind of thing a log has to be able to show, and the pair of lines says it.
+    // Recorded, worded for what it is: this is the buffer the session STARTS on - the picture changes
+    // only when a compile puts another buffer on screen (requestShaderCompile).
     const QString path = GraphicsSettings::shaderPath(GraphicsSettings::fragmentFileName(wanted));
-    const QString what = isSwitch ? QStringLiteral("switch requested to") : QStringLiteral("starting on");
     if (path.isEmpty())
-        GraphicsLog::warn(QStringLiteral("buffer: %1 '%2', which has no file yet (looked for %3)")
-                              .arg(what, wanted,
+        GraphicsLog::warn(QStringLiteral("buffer: starting on '%1', which has no file yet (looked for %2)")
+                              .arg(wanted,
                                    GraphicsSettings::writableShaderPath(
                                        GraphicsSettings::fragmentFileName(wanted))));
     else
-        GraphicsLog::info(QStringLiteral("buffer: %1 '%2' (%3)").arg(what, wanted, path));
+        GraphicsLog::info(QStringLiteral("buffer: starting on '%1' (%2)").arg(wanted, path));
 }
 
 QString GraphicsRenderThread::shaderName() const
@@ -330,7 +328,7 @@ QString GraphicsRenderThread::shaderName() const
     return m_activeShaderName;
 }
 
-GraphicsRenderer* GraphicsRenderThread::ensureRenderer(const QString& shaderName)
+GraphicsRenderer* GraphicsRenderThread::createRenderer(const QString& shaderName)
 {
     // Called with m_rendererMutex held and the context current (see the note in the header).
     const QString name = shaderName.isEmpty() ? GraphicsSettings::defaultShaderName() : shaderName;
@@ -339,64 +337,34 @@ GraphicsRenderer* GraphicsRenderThread::ensureRenderer(const QString& shaderName
     if (found != m_renderers.end())
         return found->second.get();
 
-    // The first renderer of a session may install the built-in fallback; a later one must not, because
-    // by then there is a picture on screen worth keeping.
-    const bool firstRenderer = m_renderers.empty();
-
     auto renderer = std::make_unique<GraphicsRenderer>();
     renderer->setShaderName(name);
-    if (!renderer->initialize(firstRenderer))
+    if (!renderer->prepare())
     {
-        // Not inserted, so a later attempt retries from scratch rather than caching a broken renderer -
-        // which is what makes "fix the file, then switch again" work.
-        GraphicsLog::warn(QStringLiteral("buffer: '%1' could not be brought up; not switching to it")
-                              .arg(name));
+        GraphicsLog::error(QStringLiteral("buffer: '%1' has no geometry to draw with").arg(name));
         return nullptr;
     }
 
     renderer->setUpGpuTimer();
     GraphicsRenderer* raw = renderer.get();
     m_renderers.emplace(name, std::move(renderer));
-    GraphicsLog::info(QStringLiteral("buffer: '%1' is ready (%2 renderer(s) alive)")
-                          .arg(name).arg(m_renderers.size()));
     return raw;
 }
 
-void GraphicsRenderThread::applyShaderSwitch()
+void GraphicsRenderThread::applyShaderCompile()
 {
+    // Which buffer to build: the one the request named, or - for a plain "Reload Shader" - the one
+    // already on screen.
     QString wanted;
     {
         QMutexLocker lock(&m_bufferMutex);
         wanted = m_requestedShaderName;
     }
+    const QString current = shaderName();
+    if (wanted.isEmpty())
+        wanted = current;
 
-    QMutexLocker lock(&m_rendererMutex);
-
-    GraphicsRenderer* renderer = ensureRenderer(wanted);
-    if (!renderer || !renderer->hasProgram())
-    {
-        // The promise: a switch that cannot be honoured leaves the picture alone. Saying which buffer
-        // failed, and that the previous one is still on screen, is the whole of the report - a silent
-        // refusal would look exactly like a switch that never arrived.
-        const QString current = shaderName();
-        GraphicsLog::error(QStringLiteral("buffer: switch to '%1' FAILED; still rendering '%2'")
-                               .arg(wanted, current));
-        return;
-    }
-
-    m_activeRenderer.store(renderer, std::memory_order_relaxed);
-    {
-        QMutexLocker bufferLock(&m_bufferMutex);
-        m_activeShaderName = wanted;
-    }
-
-    GraphicsLog::info(QStringLiteral("buffer: now rendering '%1'").arg(wanted));
-}
-
-void GraphicsRenderThread::applyShaderReload()
-{
-    const QString name = shaderName();
-    GraphicsLog::info(QStringLiteral("reload: applying on the render thread (buffer '%1')").arg(name));
+    GraphicsLog::info(QStringLiteral("compile: buffer '%1' (on screen: '%2')").arg(wanted, current));
 
     QElapsedTimer t;
     t.start();
@@ -415,41 +383,51 @@ void GraphicsRenderThread::applyShaderReload()
     // The context is current by construction here - this runs on the render thread -
     // which is exactly what compiling requires and what a caller on another thread
     // cannot provide.
+    GraphicsRenderer* renderer = nullptr;
     GraphicsCompileResult result;
     {
-        // A short lock just to read the renderer safely. Not held across the compile. The pointer is
-        // safe to keep afterwards because a renderer is never destroyed while the thread runs.
         QMutexLocker lock(&m_rendererMutex);
-        GraphicsRenderer* renderer = m_activeRenderer.load(std::memory_order_relaxed);
-        if (!renderer)
-        {
-            GraphicsLog::warn(QStringLiteral("reload: no renderer to reload"));
-            emit shaderCompileFinished(false, QStringLiteral("No renderer to compile into."),
-                                       QString(), 0);
-            return;
-        }
-        result = renderer->compileReplacement();
+        renderer = createRenderer(wanted);
     }
+    if (!renderer)
+    {
+        // Nothing to build into: the geometry could not be created at all, which is not about the
+        // user's shader. Reported in the same channel as a compile failure so the editor is not left
+        // waiting, and the picture is untouched.
+        GraphicsLog::error(QStringLiteral("compile: buffer '%1' could not be prepared; still rendering "
+                                          "'%2'").arg(wanted, current));
+        emit shaderCompileFinished(false,
+                                   tr("Could not prepare a renderer for buffer \"%1\".").arg(wanted),
+                                   QString(), 0);
+        return;
+    }
+
+    // The compile itself, with no lock held: this is the slow part.
+    result = renderer->buildAndInstall();
 
     if (!result.ok())
     {
-        // The previous program is untouched, so the picture keeps running. The compiler's own words
-        // go back to whoever asked - the shader editor - because a failure the user cannot read is a
-        // failure they will retry blindly.
-        GraphicsLog::info(QStringLiteral("reload: FAILED after %1ms; the previous shader of buffer '%2' "
-                                         "is still in use").arg(t.elapsed()).arg(name));
+        // The promise, in the user's words: the picture does not change. The compiler's own words go
+        // back to whoever asked - the editor, which shows them where the user is looking - because a
+        // failure that only reaches a log file is a failure the user retries blindly.
+        GraphicsLog::warn(QStringLiteral("compile: buffer '%1' did not build; still rendering '%2' "
+                                         "(%3ms)").arg(wanted, current).arg(t.elapsed()));
         emit shaderCompileFinished(false, result.log, result.errorFile, result.errorLine);
         return;
     }
 
-    // Install it. Held only for the swap, so the loop is not stalled by the compile.
+    // It built, so it goes on screen - the only step that touches what the loop reads.
     {
         QMutexLocker lock(&m_rendererMutex);
-        if (GraphicsRenderer* renderer = m_activeRenderer.load(std::memory_order_relaxed))
-            renderer->adoptProgram(std::move(result.program));
+        m_activeRenderer.store(renderer, std::memory_order_relaxed);
+    }
+    {
+        QMutexLocker lock(&m_bufferMutex);
+        m_activeShaderName = wanted;
+        m_requestedShaderName = wanted;
     }
 
-    GraphicsLog::info(QStringLiteral("reload: applied after %1ms (buffer '%2')").arg(t.elapsed()).arg(name));
+    GraphicsLog::info(QStringLiteral("compile: buffer '%1' is on screen (%2ms)").arg(wanted).arg(t.elapsed()));
     emit shaderCompileFinished(true, QString(), QString(), 0);
 }
 
@@ -762,13 +740,7 @@ void GraphicsRenderThread::run()
         const qint64 frameStartNs = frameTimer.nsecsElapsed();
 
         if (m_reloadRequested.exchange(false, std::memory_order_relaxed))
-            applyShaderReload();
-
-        // A switch asked for from the GUI (the menu, or the editor compiling another tab) is applied
-        // here, at a frame boundary, and BEFORE the size request - so a buffer that arrives with the
-        // first frame after a switch is drawn with the current target rather than a half-built one.
-        if (m_switchRequested.exchange(false, std::memory_order_acquire))
-            applyShaderSwitch();
+            applyShaderCompile();
 
         // Applied at the top of the frame, before anything is drawn, so a resize
         // can never land between the clear and the draw. This is the only place

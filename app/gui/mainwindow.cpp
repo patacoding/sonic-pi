@@ -6686,7 +6686,9 @@ void MainWindow::createToolBar()
     // frame. Compiling a shader is not a GUI job and never was.
     graphicsReloadShaderAct = new QAction(tr("Reload Shader"), this);
     connect(graphicsReloadShaderAct, &QAction::triggered, this, [this]() {
-        const bool requested = graphicsRenderThread && graphicsRenderThread->requestShaderReload();
+        // No name: "reload" means the buffer already on screen, which is the whole point of a reload -
+        // it does not choose a buffer, it re-reads the one being rendered.
+        const bool requested = graphicsRenderThread && graphicsRenderThread->requestShaderCompile();
         SonicPi::GraphicsLog::info(
             QStringLiteral("menu: reload shader -> %1")
                 .arg(requested ? QStringLiteral("requested (the render thread will apply it)")
@@ -6984,54 +6986,6 @@ void MainWindow::createToolBar()
 
     graphicsMenu->addSeparator();
     graphicsMenu->addAction(graphicsReloadShaderAct);
-
-    // ---- Which buffer is on screen ---------------------------------------------------------
-    //
-    // A submenu rather than a fixed list: the buffers ARE the *.frag files in the shader directory,
-    // so the list is read from disk every time the menu opens. That is the same rule the editor's tabs
-    // use (GraphicsSettings::shaderNames()), and it is why there is no "add buffer" plumbing here - a
-    // file created by the editor, or dropped in by hand, shows up by itself.
-    //
-    // Switching is live: the render thread brings the buffer up on demand, and a buffer that will not
-    // compile leaves the picture alone and says so in the log. Nothing here compiles or waits.
-    //
-    // This is the temporary door to the feature while the editor has no tabs yet; the tabs (M3) will
-    // do the same thing per buffer, plus editing. Both go through the same one call.
-    graphicsBufferMenu = graphicsMenu->addMenu(tr("Shader Buffer"));
-    graphicsBufferMenu->setToolTipsVisible(true);
-    connect(graphicsBufferMenu, &QMenu::aboutToShow, this, [this]() {
-        graphicsBufferMenu->clear();
-
-        const QString active = graphicsRenderThread ? graphicsRenderThread->shaderName()
-                                                    : SonicPi::GraphicsSettings::defaultShaderName();
-        const QStringList names = SonicPi::GraphicsSettings::shaderNames();
-
-        for (const QString& name : names)
-        {
-            const QString file =
-                SonicPi::GraphicsSettings::fragmentFileName(name);
-            const QString path = SonicPi::GraphicsSettings::shaderPath(file);
-
-            QAction* act = graphicsBufferMenu->addAction(name);
-            act->setCheckable(true);
-            act->setChecked(name.compare(active, Qt::CaseInsensitive) == 0);
-            act->setToolTip(path.isEmpty()
-                                ? tr("%1 - no file yet (%2)")
-                                      .arg(file, SonicPi::GraphicsSettings::writableShaderPath(file))
-                                : path);
-            connect(act, &QAction::triggered, this, [this, name]() {
-                if (!graphicsRenderThread)
-                    return;
-                // Recorded as well as applied: the choice is what the NEXT session starts on, and
-                // writing it here is what makes "come back to the picture I left" true.
-                SonicPi::GraphicsSettings::setActiveShaderName(name);
-                graphicsRenderThread->setActiveShaderName(name);
-            });
-        }
-
-        if (names.isEmpty())
-            graphicsBufferMenu->addAction(tr("(no shader files yet)"))->setEnabled(false);
-    });
 
     // Route Graphics log entries into the log pane.
     //

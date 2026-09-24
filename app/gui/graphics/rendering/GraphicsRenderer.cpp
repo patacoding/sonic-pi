@@ -191,22 +191,41 @@ void GraphicsRenderer::destroy()
     m_program.reset();
 }
 
-bool GraphicsRenderer::initialize(bool fallbackWhenNothingBuilds)
+bool GraphicsRenderer::prepare()
 {
+    // Idempotent: the startup path prepares a renderer and then asks for its shader, so this is reached
+    // twice. Creating a second VAO would leak the first, and the second would be the one bound.
+    if (m_vao)
+        return true;
+
     if (!QOpenGLContext::currentContext())
     {
-        GraphicsLog::error(QStringLiteral("renderer: no current context at initialize"));
+        GraphicsLog::error(QStringLiteral("renderer: no current context at prepare"));
         return false;
     }
 
-    if (!createQuadGeometry())
+    return createQuadGeometry();
+}
+
+GraphicsCompileResult GraphicsRenderer::buildAndInstall()
+{
+    GraphicsCompileResult result = compileReplacement();
+    if (result.ok())
+        adoptProgram(std::move(result.program));
+
+    return result;
+}
+
+bool GraphicsRenderer::initialize(bool fallbackWhenNothingBuilds)
+{
+    if (!prepare())
         return false;
 
     // A shader that will not compile is reported but not fatal, and now it is not a blank output
     // either: at startup there is no previous program to keep, so the choice is a built-in fallback
     // shader or nothing at all. The fallback draws something unmistakably not the user's shader, so
     // "my edit broke it" is visible rather than looking like the feature stopped working.
-    if (!loadShaders())
+    if (!buildAndInstall().ok())
     {
         if (!fallbackWhenNothingBuilds)
         {

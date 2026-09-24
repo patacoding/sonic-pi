@@ -17,8 +17,10 @@
 #include "GraphicsSettings.h"
 #include "GlslLexer.h"
 #include "../ShaderText.h"
+#include "dpi.h"
 #include "sonicpiscintilla.h"
 #include "sonicpitheme.h"
+#include "utils/chrome_metrics.h"
 
 #include <QCloseEvent>
 #include <QDir>
@@ -26,7 +28,10 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
+#include <QHash>
+#include <QInputDialog>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -34,6 +39,8 @@
 #include <QShortcut>
 #include <QSplitter>
 #include <QStringList>
+#include <QTabBar>
+#include <QTabWidget>
 #include <QTextStream>
 #include <QVBoxLayout>
 #include <QVariant>
@@ -47,6 +54,12 @@ namespace SonicPi
 
 namespace
 {
+// The mark on the tab whose buffer is the picture on screen.
+//
+// ASCII, and a suffix rather than a colour: it has to survive every font and colour theme, and it has to
+// be readable in a screenshot. The tooltip on each tab says what it means.
+const QString kOnScreenMark = QStringLiteral(" *");
+
 // Put the editing keys back on THIS editor's Scintilla commands.
 //
 // SonicPiScintilla's constructor calls standardCommands()->clearKeys() and re-adds only the
@@ -129,17 +142,16 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     // supplied by the lexer rather than by the widget. See GlslLexer.h: the font rule is the same
     // one the code buffers use.
     m_lexer = new GlslLexer(m_theme, this);
-    m_editor = new SonicPiScintilla(nullptr, m_theme, QStringLiteral("shader_buffer"), false);
-    m_editor->setLexer(m_lexer);
-    restoreEditingKeys(m_editor);
 
     m_compileButton = new QPushButton(tr("Compile"), this);
-    QPushButton* loadButton = new QPushButton(tr("Load File..."), this);
-    QPushButton* saveButton = new QPushButton(tr("Save File..."), this);
+    QPushButton* newButton = new QPushButton(tr("New Buffer..."), this);
+    QPushButton* loadButton = new QPushButton(tr("Load into Buffer..."), this);
+    QPushButton* saveButton = new QPushButton(tr("Save Buffer As..."), this);
 
     // Named in the tooltip as well as bound, because a shortcut nobody is told about is not a
     // feature. Alt+R is what Sonic Pi's own Run uses, so it needs no explaining.
-    m_compileButton->setToolTip(tr("Write the shader and compile it (Alt+R)"));
+    m_compileButton->setToolTip(tr("Write this buffer and put it on screen (Alt+R)"));
+    newButton->setToolTip(tr("Create a new buffer: one more .frag file in the shader directory"));
 
     m_status = new QLabel(this);
     m_status->setWordWrap(true);
@@ -151,19 +163,38 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     m_report->setReadOnly(true);
     m_report->setLineWrapMode(QPlainTextEdit::NoWrap);
     m_report->setFont(GlslLexer::editorFont(m_theme));
-    m_report->setPlaceholderText(tr("The compiler's output appears here. Build problems are shown "
-                                    "exactly as the driver reported them, including line numbers."));
+    m_report->setPlaceholderText(tr("The compiler's output appears here, for the buffer being edited. "
+                                    "Build problems are shown exactly as the driver reported them, "
+                                    "including line numbers."));
+
+    // ---- THE BUFFERS, AS TABS ---------------------------------------------------------------
+    //
+    // Built the way the audio side's buffers are (mainwindow.cpp, editorTabWidget): a QTabWidget along
+    // the BOTTOM, tabs that cannot be closed or dragged, one editor per buffer. The similarity is the
+    // point - this is the same gesture as switching audio buffers, and it is what makes the feature
+    // usable while performing rather than only while setting up.
+    //
+    // A buffer IS a file in the shader directory, so the tab list is read from disk (rebuildTabs) and
+    // there is no separate registry to keep in step with it.
+    m_tabs = new QTabWidget(this);
+    m_tabs->setTabsClosable(false);
+    m_tabs->setMovable(false);
+    m_tabs->setTabPosition(QTabWidget::South);
+    m_tabs->tabBar()->setFixedHeight(ScaleHeightForDPI(SonicPi::kChromeControlDp));
+    m_tabs->setToolTip(tr("One tab per buffer. The tab marked %1 is the picture on screen; Compile "
+                          "(Alt+R) puts the buffer being edited on screen.").arg(kOnScreenMark));
 
     auto* buttons = new QWidget(this);
     auto* buttonsLayout = new QHBoxLayout(buttons);
     buttonsLayout->setContentsMargins(0, 0, 0, 0);
     buttonsLayout->addWidget(m_compileButton);
+    buttonsLayout->addWidget(newButton);
     buttonsLayout->addWidget(loadButton);
     buttonsLayout->addWidget(saveButton);
     buttonsLayout->addWidget(m_status, 1);
 
     auto* split = new QSplitter(Qt::Vertical, this);
-    split->addWidget(m_editor);
+    split->addWidget(m_tabs);
     split->addWidget(m_report);
     split->setStretchFactor(0, 3);
     split->setStretchFactor(1, 1);
@@ -173,8 +204,14 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     layout->addWidget(split, 1);
 
     connect(m_compileButton, &QPushButton::clicked, this, &ShaderBufferWindow::compile);
+    connect(newButton, &QPushButton::clicked, this, &ShaderBufferWindow::newBuffer);
     connect(loadButton, &QPushButton::clicked, this, &ShaderBufferWindow::loadFromFile);
     connect(saveButton, &QPushButton::clicked, this, &ShaderBufferWindow::saveToFile);
+
+    // Switching tabs is a VIEW action and nothing else: it shows that buffer's text and its last
+    // report, and does not touch what is on screen. Same as the audio side, where switching buffers
+    // neither starts nor stops anything - the picture changes when the user compiles.
+    connect(m_tabs, &QTabWidget::currentChanged, this, [this](int) { showCurrentBuffer(); });
 
     // The render thread's verdict arrives here, queued from another thread.
     connect(m_renderThread, &GraphicsRenderThread::shaderCompileFinished,
@@ -200,6 +237,22 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     runShortcut->setContext(Qt::WidgetWithChildrenShortcut);
     connect(runShortcut, &QShortcut::activated, this, &ShaderBufferWindow::compile);
 
+    // Tab switching from the keyboard, as the code buffers have (Ctrl+Tab / Ctrl+Shift+Tab in the code
+    // menu). This window is top-level, so it gets its own: MainWindow's actions cannot serve it.
+    auto* nextTab = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Tab), this);
+    nextTab->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(nextTab, &QShortcut::activated, this, [this]() {
+        if (m_tabs && m_tabs->count() > 1)
+            m_tabs->setCurrentIndex((m_tabs->currentIndex() + 1) % m_tabs->count());
+    });
+
+    auto* previousTab = new QShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Tab), this);
+    previousTab->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(previousTab, &QShortcut::activated, this, [this]() {
+        if (m_tabs && m_tabs->count() > 1)
+            m_tabs->setCurrentIndex((m_tabs->currentIndex() + m_tabs->count() - 1) % m_tabs->count());
+    });
+
     // The text-size keys the rest of Sonic Pi uses (View -> Code Size Up/Down). MainWindow's own
     // actions cannot serve this window - their shortcuts belong to the main window, so they do not
     // fire while this one has focus, which is exactly when someone wants to resize this text.
@@ -218,7 +271,13 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     setEditorZoom(SonicPiScintilla::kDefaultZoom);
 
     applyTheme();
-    reloadFromDisk();
+
+    // Open on the buffer that is on screen: the file being rendered is the one the user most likely
+    // wants to see, and starting anywhere else would make the picture and the editor disagree for no
+    // reason.
+    const QString onScreen = m_renderThread ? m_renderThread->shaderName()
+                                            : GraphicsSettings::defaultShaderName();
+    rebuildTabs(onScreen);
 }
 
 ShaderBufferWindow::~ShaderBufferWindow() = default;
@@ -254,22 +313,30 @@ void ShaderBufferWindow::applyTheme()
     if (m_report)
         m_report->setFont(GlslLexer::editorFont(m_theme, editorZoom()));
 
-    if (m_editor)
+    // Every tab's editor, not just the visible one: a theme change while a background buffer is being
+    // edited must not leave that buffer in the old colours when the user switches back to it.
+    for (SonicPiScintilla* editor : m_editors)
     {
+        if (!editor)
+            continue;
         // A lexer colour change only takes effect on the text already on screen when the styles are
         // re-applied to it; without this the editor keeps the old colours until it is reloaded.
-        m_editor->recolor();
-        m_editor->setMarginsFont(GlslLexer::editorFont(m_theme));
+        editor->recolor();
+        editor->setMarginsFont(GlslLexer::editorFont(m_theme));
     }
 }
 
 void ShaderBufferWindow::setEditorZoom(int zoom)
 {
-    if (!m_editor)
-        return;
-
-    m_editor->setProperty("zoom", QVariant(zoom));
-    m_editor->zoomTo(zoom);
+    // Every buffer, so the text size is one property of the window rather than of whichever tab
+    // happens to be open - the audio side behaves the same way (one Code Size for all buffers).
+    for (SonicPiScintilla* editor : m_editors)
+    {
+        if (!editor)
+            continue;
+        editor->setProperty("zoom", QVariant(zoom));
+        editor->zoomTo(zoom);
+    }
 
     // The compiler report is shown in the same face and size as the code it is about, so it follows
     // the zoom. Scintilla adds the zoom to the style's point size; editorFont does the same.
@@ -279,13 +346,22 @@ void ShaderBufferWindow::setEditorZoom(int zoom)
 
 int ShaderBufferWindow::editorZoom() const
 {
-    return m_editor ? m_editor->currentZoom() : 0;
+    // The remembered level, not "the current tab's editor": with no tabs yet (construction) or an
+    // unreadable directory, there is still a zoom to report.
+    if (SonicPiScintilla* editor = currentEditor())
+        return editor->currentZoom();
+    for (SonicPiScintilla* editor : m_editors)
+    {
+        if (editor)
+            return editor->currentZoom();
+    }
+    return SonicPiScintilla::kDefaultZoom;
 }
 
 void ShaderBufferWindow::zoomIn()
 {
-    if (m_editor)
-        m_editor->zoomFontIn();
+    if (SonicPiScintilla* editor = currentEditor())
+        editor->zoomFontIn();
 
     // zoomFontIn clamps and stores the level itself, so read it back rather than tracking a second
     // copy that could disagree with the editor.
@@ -294,8 +370,8 @@ void ShaderBufferWindow::zoomIn()
 
 void ShaderBufferWindow::zoomOut()
 {
-    if (m_editor)
-        m_editor->zoomFontOut();
+    if (SonicPiScintilla* editor = currentEditor())
+        editor->zoomFontOut();
 
     setEditorZoom(editorZoom());
 }
@@ -318,52 +394,207 @@ void ShaderBufferWindow::wheelEvent(QWheelEvent* event)
     QWidget::wheelEvent(event);
 }
 
-QString ShaderBufferWindow::shaderFilePath() const
+QString ShaderBufferWindow::bufferFilePath(const QString& shaderName)
 {
     // Through GraphicsSettings, so this is the same file the renderer reads. Resolving it here by a
-    // second route is the mistake that would make editing appear to do nothing.
-    //
-    // The NAME comes from the render thread rather than from a constant in this file: the buffer being
-    // rendered is the buffer being edited, so asking the thing that renders it makes that true by
-    // construction instead of by convention. (When the editor can hold a buffer that is not the one
-    // rendering - M3 - this becomes the editor's own fact and the render thread stops being the right
-    // source. Today there is one buffer, and this is the one that cannot drift.)
-    const QString name = m_renderThread ? m_renderThread->shaderName()
-                                        : GraphicsSettings::defaultShaderName();
-    return GraphicsSettings::writableShaderPath(GraphicsSettings::fragmentFileName(name));
+    // second route is the mistake that would make editing appear to do nothing: one rule (name ->
+    // file name -> path) lives in GraphicsSettings, and this window only supplies the name.
+    return GraphicsSettings::writableShaderPath(GraphicsSettings::fragmentFileName(shaderName));
 }
 
-void ShaderBufferWindow::reloadFromDisk()
+QString ShaderBufferWindow::editingShaderName() const
 {
-    const QString path = shaderFilePath();
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    if (!m_tabs || m_tabs->count() == 0)
+        return QString();
+    return m_tabs->tabText(m_tabs->currentIndex()).remove(kOnScreenMark).trimmed();
+}
+
+SonicPiScintilla* ShaderBufferWindow::currentEditor() const
+{
+    return m_editors.value(editingShaderName(), nullptr);
+}
+
+void ShaderBufferWindow::rebuildTabs(const QString& selectName)
+{
+    // The list IS the directory (GraphicsSettings::shaderNames()), so nothing has to be kept in step.
+    //
+    // Tabs are only ever ADDED here, never removed: a file that disappears from the directory while
+    // the window is open may still have unsaved text in its tab, and silently dropping that would be
+    // data loss dressed up as tidiness.
+    const QStringList names = GraphicsSettings::shaderNames();
+    for (const QString& name : names)
     {
-        m_status->setText(tr("Could not read %1").arg(path));
-        GraphicsLog::error(QStringLiteral("shader buffer: could not read %1").arg(path));
+        if (m_editors.contains(name))
+            continue;
+
+        auto* editor = new SonicPiScintilla(nullptr, m_theme,
+                                            QStringLiteral("shader_%1").arg(name), false);
+        editor->setLexer(m_lexer);
+        restoreEditingKeys(editor);
+        editor->zoomTo(editorZoom());
+
+        // Read the buffer's file into its editor. Missing is a normal state - a buffer created by name
+        // whose file was never written - and it is reported in that buffer's own status, not as a
+        // window-wide failure.
+        QFile file(bufferFilePath(name));
+        if (file.open(QIODevice::ReadOnly | QIODevice::Text))
+        {
+            QTextStream in(&file);
+            editor->setText(in.readAll());
+            file.close();
+        }
+        else
+        {
+            m_statusByBuffer.insert(name, tr("No file yet at %1 - Compile will create it.")
+                                              .arg(bufferFilePath(name)));
+        }
+
+        m_editors.insert(name, editor);
+        m_tabs->addTab(editor, name);
+        GraphicsLog::info(QStringLiteral("shader buffer: tab '%1' -> %2").arg(name,
+                                                                             bufferFilePath(name)));
+    }
+
+    updateTabLabels();
+
+    const QString wanted = selectName.isEmpty() ? editingShaderName() : selectName;
+    selectTab(wanted.isEmpty() ? GraphicsSettings::defaultShaderName() : wanted);
+}
+
+void ShaderBufferWindow::selectTab(const QString& name)
+{
+    for (int i = 0; i < m_tabs->count(); ++i)
+    {
+        if (m_tabs->tabText(i).remove(kOnScreenMark).trimmed().compare(name, Qt::CaseInsensitive) == 0)
+        {
+            m_tabs->setCurrentIndex(i);
+            return;
+        }
+    }
+}
+
+void ShaderBufferWindow::updateTabLabels()
+{
+    const QString onScreen = m_renderThread ? m_renderThread->shaderName()
+                                            : GraphicsSettings::defaultShaderName();
+    for (int i = 0; i < m_tabs->count(); ++i)
+    {
+        const QString name = m_tabs->tabText(i).remove(kOnScreenMark).trimmed();
+        const bool isOnScreen = name.compare(onScreen, Qt::CaseInsensitive) == 0;
+        // The mark is how a performer sees which buffer the picture belongs to without reading the log
+        // or the status line. ASCII on purpose: it survives every font, and the tooltip explains it.
+        m_tabs->setTabText(i, isOnScreen ? name + kOnScreenMark : name);
+        m_tabs->setTabToolTip(i, isOnScreen
+                                     ? tr("%1 - on screen now").arg(name)
+                                     : tr("%1 - press Compile (Alt+R) to put it on screen").arg(name));
+    }
+}
+
+void ShaderBufferWindow::showCurrentBuffer()
+{
+    const QString name = editingShaderName();
+    if (name.isEmpty())
+        return;
+
+    updateTabLabels();
+
+    // This buffer's own report and status, not the last one the window happened to show: two shaders'
+    // diagnostics side by side is how a user fixes the wrong file.
+    m_report->setPlainText(m_reports.value(name));
+    m_status->setText(m_statusByBuffer.value(name));
+}
+
+void ShaderBufferWindow::showBuffer(const QString& shaderName)
+{
+    if (shaderName.isEmpty())
+        return;
+    rebuildTabs(shaderName);
+    selectTab(shaderName);
+}
+
+QString ShaderBufferWindow::newBufferTemplate(const QString& name)
+{
+    return QStringLiteral("// Buffer: %1\n"
+                          "//\n"
+                          "// Alt+R (or Compile) writes this file and puts it on screen.\n"
+                          "\n"
+                          "#version 330 core\n"
+                          "\n"
+                          "in vec2 v_uv;\n"
+                          "layout(location = 0) out vec4 FragColor;\n"
+                          "\n"
+                          "void main()\n"
+                          "{\n"
+                          "    FragColor = vec4(v_uv, 0.5, 1.0);\n"
+                          "}\n").arg(name);
+}
+
+void ShaderBufferWindow::newBuffer()
+{
+    bool ok = false;
+    const QString typed = QInputDialog::getText(this, tr("New Buffer"),
+                                                tr("Name (the buffer is the file <name>.frag):"),
+                                                QLineEdit::Normal, QString(), &ok);
+    if (!ok)
+        return;   // cancelled, which is not an error
+
+    // A name becomes a file name, so it is validated as one. Silently accepting "my/shader" or a name
+    // with a colon would write somewhere the tab list does not look, and the buffer would appear to
+    // vanish.
+    const QString name = typed.trimmed();
+    if (name.isEmpty())
+        return;
+    if (name.contains(QRegularExpression(QStringLiteral("[\\\\/:*?\"<>|]"))))
+    {
+        m_status->setText(tr("A buffer name cannot contain \\ / : * ? \" < > |"));
         return;
     }
 
-    QTextStream in(&file);
-    const QString text = in.readAll();
+    if (m_editors.contains(name))
+    {
+        selectTab(name);
+        return;
+    }
+
+    const QString path = bufferFilePath(name);
+    if (QFile::exists(path))
+    {
+        // The file is already there (made by hand, or by an earlier session): adopt it rather than
+        // overwrite it. Overwriting is the one thing a "new buffer" must never do.
+        GraphicsLog::info(QStringLiteral("shader buffer: buffer '%1' already has a file; opening it")
+                              .arg(name));
+        rebuildTabs(name);
+        selectTab(name);
+        return;
+    }
+
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
+    {
+        m_status->setText(tr("Could not create %1").arg(path));
+        GraphicsLog::error(QStringLiteral("shader buffer: could not create %1").arg(path));
+        return;
+    }
+    {
+        QTextStream out(&file);
+        out << newBufferTemplate(name);
+    }
     file.close();
 
-    m_editor->setText(text);
-    showCompileReport(true, QString(), QString(), 0);
-    m_status->setText(tr("Loaded %1").arg(path));
-    // The buffer's name as well as its path: with a second buffer coming, "which one is this" is the
-    // first thing a log reader needs, and the name is the identity the rest of the feature uses.
-    GraphicsLog::info(QStringLiteral("shader buffer: editing buffer '%1' -> %2 (%3 bytes)")
-                          .arg(m_renderThread ? m_renderThread->shaderName()
-                                              : GraphicsSettings::defaultShaderName(),
-                               path)
-                          .arg(text.size()));
+    GraphicsLog::info(QStringLiteral("shader buffer: created buffer '%1' -> %2").arg(name, path));
+    rebuildTabs(name);
+    selectTab(name);
 }
 
 void ShaderBufferWindow::compile()
 {
-    const QString path = shaderFilePath();
-    const QString text = m_editor->text();
+    const QString name = editingShaderName();
+    SonicPiScintilla* editor = currentEditor();
+    if (name.isEmpty() || !editor)
+        return;
+
+    const QString path = bufferFilePath(name);
+    const QString text = editor->text();
 
     // Written first, because the render thread reads the file rather than receiving the text. That is
     // deliberate: there is one source of truth - the file - so a compile always describes what is on
@@ -381,11 +612,17 @@ void ShaderBufferWindow::compile()
     }
     file.close();
 
-    m_status->setText(tr("Compiling..."));
-    GraphicsLog::info(QStringLiteral("shader buffer: wrote %1 (%2 bytes), asking the render thread to compile")
-                          .arg(path).arg(text.size()));
+    // Which buffer this verdict will be about. Kept because the user may switch tabs while the compile
+    // is in flight, and a report filed against the wrong buffer is worse than no report.
+    m_compilingShaderName = name;
 
-    if (!m_renderThread->requestShaderReload())
+    m_status->setText(tr("Compiling %1...").arg(name));
+    GraphicsLog::info(QStringLiteral("shader buffer: wrote buffer '%1' -> %2 (%3 bytes); asking the render "
+                                     "thread to compile and show it").arg(name, path).arg(text.size()));
+
+    // The render thread compiles it AND puts it on screen - one operation, because for a picture there
+    // is nothing useful in between. A buffer that will not build leaves the current picture alone.
+    if (!m_renderThread->requestShaderCompile(name))
     {
         // No running loop means nothing will ever answer, so the window must say so rather than sit
         // on "Compiling..." forever. That state would be indistinguishable from a compile that takes
@@ -399,7 +636,22 @@ void ShaderBufferWindow::compile()
 void ShaderBufferWindow::compileFinished(bool ok, const QString& compilerLog,
                                          const QString& errorFile, int errorLine)
 {
-    showCompileReport(ok, compilerLog, errorFile, errorLine);
+    // Filed against the buffer the request named, which is not necessarily the tab on screen now.
+    const QString name = m_compilingShaderName.isEmpty()
+                             ? (m_renderThread ? m_renderThread->shaderName()
+                                               : GraphicsSettings::defaultShaderName())
+                             : m_compilingShaderName;
+
+    // The picture follows the buffer that compiled, so the mark on the tabs has to move with it.
+    if (ok && m_renderThread)
+        updateTabLabels();
+
+    // Remembered so that "which buffer is on screen" survives the next session: written only when the
+    // compile succeeded, because a buffer that did not build never reached the screen.
+    if (ok && name == m_compilingShaderName)
+        GraphicsSettings::setActiveShaderName(name);
+
+    showCompileReport(ok, compilerLog, errorFile, errorLine, name);
 }
 
 // Import a fragment shader from an arbitrary file.
@@ -443,12 +695,15 @@ bool ShaderBufferWindow::importFrom(const QString& fileName)
     const QString text = in.readAll();
     file.close();
 
-    m_editor->setText(text);
+    SonicPiScintilla* editor = currentEditor();
+    if (editor)
+        editor->setText(text);
     // The report is cleared because it describes the PREVIOUS contents. Leaving a stale compiler error
     // beside freshly imported code would point at a line that no longer means anything.
     showCompileReport(true, QString(), QString(), 0);
-    m_status->setText(tr("Loaded %1 into the buffer. Press Compile to render it.").arg(fileName));
-    GraphicsLog::info(QStringLiteral("shader buffer: imported %1 (%2 bytes)").arg(fileName).arg(text.size()));
+    m_status->setText(tr("Loaded %1 into this buffer. Press Compile to put it on screen.").arg(fileName));
+    GraphicsLog::info(QStringLiteral("shader buffer: imported %1 (%2 bytes) into buffer '%3'")
+                          .arg(fileName).arg(text.size()).arg(editingShaderName()));
     return true;
 }
 
@@ -491,7 +746,8 @@ bool ShaderBufferWindow::exportTo(const QString& chosenName)
     }
     {
         QTextStream out(&file);
-        out << m_editor->text();
+        SonicPiScintilla* editor = currentEditor();
+        out << (editor ? editor->text() : QString());
     }
     file.close();
 
@@ -501,12 +757,19 @@ bool ShaderBufferWindow::exportTo(const QString& chosenName)
 }
 
 void ShaderBufferWindow::showCompileReport(bool ok, const QString& compilerLog,
-                                           const QString& errorFile, int errorLine)
+                                           const QString& errorFile, int errorLine,
+                                           const QString& shaderName)
 {
+    // Which buffer this report is about: the one named, or - for the window's own messages, like "the
+    // render loop is not running" - whichever buffer is being edited.
+    const QString name = shaderName.isEmpty() ? editingShaderName() : shaderName;
+
     if (ok && compilerLog.isEmpty())
     {
-        m_report->clear();
-        m_status->setText(tr("Compiled. The output is showing this shader."));
+        m_reports.insert(name, QString());
+        m_statusByBuffer.insert(name, tr("On screen. %1 is the picture now.").arg(name));
+        if (name == editingShaderName())
+            showCurrentBuffer();
         return;
     }
 
@@ -520,7 +783,7 @@ void ShaderBufferWindow::showCompileReport(bool ok, const QString& compilerLog,
     //
     // No position is a normal outcome, not a failure to parse: some diagnostics name none, and
     // inventing one would be worse than saying only the file.
-    const QString ownFile = ShaderText::diagnosticName(shaderFilePath(),
+    const QString ownFile = ShaderText::diagnosticName(bufferFilePath(name),
                                                        GraphicsSettings::shaderDirectoryPath());
     const QString file = errorFile.isEmpty() ? ownFile : errorFile;
     const QString where = errorLine > 0 ? QStringLiteral("%1:%2").arg(file).arg(errorLine) : file;
@@ -534,34 +797,59 @@ void ShaderBufferWindow::showCompileReport(bool ok, const QString& compilerLog,
     // The compiler's text is shown verbatim below the location. It is not reformatted, not summarised
     // and not translated: a driver's diagnostic is the single most useful thing in this window, and
     // paraphrasing it would lose the part that matters.
-    m_report->setPlainText(errorLine > 0 ? QStringLiteral("%1\n\n%2").arg(where, compilerLog)
+    m_reports.insert(name, errorLine > 0 ? QStringLiteral("%1\n\n%2").arg(where, compilerLog)
                                          : compilerLog);
+
+    // The picture is NOT lost, and the status says so in those words: "still rendering X" is the
+    // reassurance the user needs when their edit was refused, and it is the sentence that turns a wall
+    // of compiler errors from "the feature broke" into "this buffer did not build".
+    const QString onScreen = m_renderThread ? m_renderThread->shaderName()
+                                            : GraphicsSettings::defaultShaderName();
 
     if (errorLine > 0 && !inThisDocument)
     {
-        m_status->setText(ok ? tr("Compiled with warnings. First at %1, which is not this file.")
-                                 .arg(where)
-                             : tr("Compile FAILED at %1, which is not this file. The previous shader "
-                                  "is still rendering - fix the error below and compile again.")
-                                   .arg(where));
+        m_statusByBuffer.insert(name,
+                                ok ? tr("Compiled with warnings. First at %1, which is not this buffer.")
+                                         .arg(where)
+                                   : tr("Compile FAILED at %1, which is not this buffer. Still "
+                                        "rendering %2 - fix the error below and compile again.")
+                                         .arg(where, onScreen));
     }
     else if (errorLine > 0)
     {
-        m_status->setText(ok ? tr("Compiled with warnings. First at %1.").arg(where)
-                             : tr("Compile FAILED at %1. The previous shader is still rendering - "
-                                  "fix the error below and compile again.").arg(where));
+        m_statusByBuffer.insert(name,
+                                ok ? tr("Compiled with warnings. First at %1.").arg(where)
+                                   : tr("Compile FAILED at %1. Still rendering %2 - fix the error "
+                                        "below and compile again.").arg(where, onScreen));
+    }
+    else
+    {
+        m_statusByBuffer.insert(name,
+                                ok ? tr("Compiled with warnings.")
+                                   : tr("Compile FAILED in %1. Still rendering %2 - fix the error below "
+                                        "and compile again.").arg(file, onScreen));
+    }
 
+    if (name != editingShaderName())
+    {
+        // Another buffer's report. Kept for when that tab is opened, and mentioned now rather than
+        // silently filed: a compile the user asked for that produces nothing visible reads as a compile
+        // that never happened.
+        showCurrentBuffer();
+        m_status->setText(tr("Buffer %1: %2").arg(name, m_statusByBuffer.value(name)));
+        return;
+    }
+
+    m_report->setPlainText(m_reports.value(name));
+    m_status->setText(m_statusByBuffer.value(name));
+
+    if (errorLine > 0 && inThisDocument)
+    {
         // The cursor is also put on the line, because after asking for a compile the first thing
         // wanted is to see what it complained about. That is a convenience riding on top of the
         // report, not the mechanism: jumpToLine() checks the document and does nothing if the line
         // does not exist, and the report above says where to look either way.
         jumpToLine(errorLine);
-    }
-    else
-    {
-        m_status->setText(ok ? tr("Compiled with warnings.")
-                             : tr("Compile FAILED in %1. The previous shader is still rendering - fix "
-                                  "the error below and compile again.").arg(file));
     }
 }
 
@@ -571,16 +859,20 @@ void ShaderBufferWindow::jumpToLine(int line)
     if (line <= 0)
         return;
 
+    SonicPiScintilla* editor = currentEditor();
+    if (!editor)
+        return;
+
     // 1-based from the compiler, 0-based here. Checked against the document rather than trusted: a
     // diagnostic naming a line past the end would put the cursor at the end of the file, which reads
     // as the editor having jumped somewhere wrong.
     const int index = line - 1;
-    if (index < 0 || index >= m_editor->lines())
+    if (index < 0 || index >= editor->lines())
         return;
 
-    m_editor->setCursorPosition(index, 0);
-    m_editor->ensureLineVisible(index);
-    m_editor->setFocus();
+    editor->setCursorPosition(index, 0);
+    editor->ensureLineVisible(index);
+    editor->setFocus();
 }
 
 void ShaderBufferWindow::closeEvent(QCloseEvent* e)
