@@ -131,6 +131,10 @@ protected:
     // event reach MainWindow, whose handler zooms the current AUDIO buffer whichever window the
     // pointer is over.
     void wheelEvent(QWheelEvent* event) override;
+    // The tab bar's wheel: turn it into "previous/next buffer". Handled here rather than left to Qt, so
+    // the behaviour is OURS to state - the bar is a list that can overflow, and a wheel over it should
+    // walk the buffers rather than depend on whether the tabs happen to fit.
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     // Show the compiler's output, prefixed with where the problem is (file:line). Empty text with ok
@@ -172,6 +176,10 @@ private:
     // Re-label the tabs: the buffer that is on screen gets the mark, and every tab's tooltip says what
     // pressing Compile would do. Called whenever the picture or the current tab changes.
     void updateTabLabels();
+    // The window title names the buffer being edited, and says when that buffer is the picture. The window
+    // is meant to sit OVER the output during a performance, so "which buffer is this" has to be answerable
+    // without reading the tab bar under it.
+    void updateWindowTitle();
     // Show the CURRENT tab's own report and status line. Called on every tab change and after a verdict,
     // because a report belongs to a buffer and must not be left beside another buffer's code.
     void showCurrentBuffer();
@@ -183,6 +191,13 @@ private:
     // on disk and comes back the next time the window is built (the list IS the directory), which is also
     // why closing needs no "are you sure" about losing a shader: nothing is lost, only un-edited.
     void closeBuffer(const QString& shaderName);
+
+    // Rename a buffer: the name IS the file name, so this renames the file too.
+    //
+    // Without it a mistyped name is permanent from inside the application, which is the wrong shape for an
+    // editor whose whole model is "a buffer is a file". If the renamed buffer is the one on screen it is
+    // recompiled under its new name, so the picture keeps following the file it came from.
+    void renameBuffer(const QString& oldName);
     // A minimal valid shader for a new buffer. Valid on purpose: a new buffer that shows a blank output
     // with a compile error teaches the wrong thing about what just happened.
     static QString newBufferTemplate(const QString& name);

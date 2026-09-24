@@ -186,6 +186,18 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     m_tabs->setMovable(false);
     m_tabs->setTabPosition(QTabWidget::South);
     m_tabs->tabBar()->setFixedHeight(ScaleHeightForDPI(SonicPi::kChromeControlDp));
+
+    // MANY BUFFERS HAVE TO STAY NAVIGABLE. The tab bar is a strip that overflows, and there are three ways
+    // out, all of them explicit rather than inherited from a default:
+    //   * the scroll buttons (below), which are the visible affordance;
+    //   * the wheel over the tab bar (eventFilter), which is the fast one;
+    //   * Ctrl+Tab / Ctrl+Shift+Tab (shortcuts below), which needs no mouse at all.
+    // Tabs are kept to their text width and elided rather than stretched, so more of them fit before any
+    // of this is needed.
+    m_tabs->tabBar()->setUsesScrollButtons(true);
+    m_tabs->tabBar()->setExpanding(false);
+    m_tabs->setElideMode(Qt::ElideRight);
+    m_tabs->tabBar()->installEventFilter(this);
     m_tabs->setToolTip(tr("One tab per buffer. The tab marked %1 is the picture on screen; Compile "
                           "(Ctrl+Return) puts the buffer being edited on screen. The x closes the tab - "
                           "the shader file stays on disk.").arg(kOnScreenMark));
@@ -235,6 +247,14 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
         closeBuffer(m_tabs->tabText(index).remove(kOnScreenMark).trimmed());
     });
 
+    // Double-click a tab to rename the buffer - which renames its FILE, because the name is the file name.
+    // Double-click is where every tabbed editor puts rename, so it needs no button and no explaining.
+    connect(m_tabs->tabBar(), &QTabBar::tabBarDoubleClicked, this, [this](int index) {
+        if (!m_tabs || index < 0 || index >= m_tabs->count())
+            return;
+        renameBuffer(m_tabs->tabText(index).remove(kOnScreenMark).trimmed());
+    });
+
     // The render thread's verdict arrives here, queued from another thread.
     connect(m_renderThread, &GraphicsRenderThread::shaderCompileFinished,
             this, &ShaderBufferWindow::compileFinished);
@@ -279,6 +299,35 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
         new QShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Minus), this);
     zoomOutShortcut->setContext(Qt::WidgetWithChildrenShortcut);
     connect(zoomOutShortcut, &QShortcut::activated, this, &ShaderBufferWindow::zoomOut);
+
+    // Ctrl+W closes the current buffer's tab, exactly as the x on it does - including the question about
+    // uncompiled edits, because a keyboard route to a destructive action must not be the quiet one.
+    auto* closeShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_W), this);
+    closeShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(closeShortcut, &QShortcut::activated, this, [this]() {
+        const QString name = editingShaderName();
+        if (!name.isEmpty())
+            closeBuffer(name);
+    });
+
+    // Ctrl+1 .. Ctrl+9: put the Nth buffer on screen, without touching the mouse.
+    //
+    // This is the live-coding gesture the whole feature is for: prepare several shaders, then cut between
+    // them with one hand while the other is on the audio side. It compiles as well as selects, because
+    // putting a buffer on screen IS compiling it (see GraphicsRenderThread::requestShaderCompile) - and a
+    // cut that sometimes showed a stale program would be worse than no cut at all.
+    for (int digit = 1; digit <= 9; ++digit)
+    {
+        auto* selectShortcut =
+            new QShortcut(QKeySequence(Qt::CTRL | (Qt::Key_0 + digit)), this);
+        selectShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(selectShortcut, &QShortcut::activated, this, [this, digit]() {
+            if (!m_tabs || digit > m_tabs->count())
+                return;
+            selectTab(m_tabs->tabText(digit - 1).remove(kOnScreenMark).trimmed());
+            compile();
+        });
+    }
 
     // Start at the code buffers' default rather than Scintilla's 0, so the text is the size of the
     // buffer beside it from the moment the window opens. MainWindow may override this with the
@@ -409,6 +458,26 @@ void ShaderBufferWindow::wheelEvent(QWheelEvent* event)
     QWidget::wheelEvent(event);
 }
 
+bool ShaderBufferWindow::eventFilter(QObject* watched, QEvent* event)
+{
+    // Installed on the tab bar only, and it handles one thing: the wheel. Turning it into "previous /
+    // next buffer" is deliberate rather than inherited, because a bar that overflows needs a fast way
+    // along it that does not require hitting a small arrow, and because the behaviour should not depend on
+    // whether the tabs happen to fit (which is what Qt's own handling keys off).
+    if (m_tabs && watched == m_tabs->tabBar() && event->type() == QEvent::Wheel)
+    {
+        auto* wheel = static_cast<QWheelEvent*>(event);
+        const int step = wheel->angleDelta().y() > 0 ? -1 : 1;
+        if (m_tabs->count() > 1)
+            m_tabs->setCurrentIndex((m_tabs->currentIndex() + step + m_tabs->count())
+                                    % m_tabs->count());
+        wheel->accept();
+        return true;
+    }
+
+    return QWidget::eventFilter(watched, event);
+}
+
 QString ShaderBufferWindow::bufferFilePath(const QString& shaderName)
 {
     // Through GraphicsSettings, so this is the same file the renderer reads. Resolving it here by a
@@ -447,6 +516,12 @@ void ShaderBufferWindow::rebuildTabs(const QString& selectName)
         editor->setLexer(m_lexer);
         restoreEditingKeys(editor);
         editor->zoomTo(editorZoom());
+
+        // Scintilla's OWN auto-indentation, not SonicPiScintilla's `autoIndent` flag - that one does not
+        // indent anything itself, it emits bufferNewlineAndIndent for Sonic Pi's Ruby side to answer (the
+        // main window connects that to the API). Nothing answers it here, so turning it on would make the
+        // Return key do nothing at all. This call keeps the work local, which is what a GLSL editor needs.
+        editor->setAutoIndent(true);
 
         // Read the buffer's file into its editor. Missing is a normal state - a buffer created by name
         // whose file was never written - and it is reported in that buffer's own status, not as a
@@ -505,6 +580,22 @@ void ShaderBufferWindow::updateTabLabels()
     }
 }
 
+void ShaderBufferWindow::updateWindowTitle()
+{
+    const QString name = editingShaderName();
+    if (name.isEmpty())
+    {
+        setWindowTitle(tr("Sonic Pi - Shader Buffer"));
+        return;
+    }
+
+    const QString onScreen = m_renderThread ? m_renderThread->shaderName()
+                                            : GraphicsSettings::defaultShaderName();
+    setWindowTitle(name.compare(onScreen, Qt::CaseInsensitive) == 0
+                       ? tr("Sonic Pi - Shader Buffer - %1 (on screen)").arg(name)
+                       : tr("Sonic Pi - Shader Buffer - %1").arg(name));
+}
+
 void ShaderBufferWindow::showCurrentBuffer()
 {
     const QString name = editingShaderName();
@@ -512,6 +603,7 @@ void ShaderBufferWindow::showCurrentBuffer()
         return;
 
     updateTabLabels();
+    updateWindowTitle();
 
     // This buffer's own report and status, not the last one the window happened to show: two shaders'
     // diagnostics side by side is how a user fixes the wrong file.
@@ -627,6 +719,94 @@ void ShaderBufferWindow::closeBuffer(const QString& shaderName)
         selectTab(editingShaderName());
     else
         showCurrentBuffer();
+}
+
+void ShaderBufferWindow::renameBuffer(const QString& oldName)
+{
+    if (oldName.isEmpty())
+        return;
+
+    bool ok = false;
+    const QString typed = QInputDialog::getText(this, tr("Rename Buffer"),
+                                                tr("New name (the buffer is the file <name>.frag):"),
+                                                QLineEdit::Normal, oldName, &ok);
+    if (!ok)
+        return;   // cancelled, which is not an error
+
+    const QString name = typed.trimmed();
+    if (name.isEmpty() || name == oldName)
+        return;
+    if (name.contains(QRegularExpression(QStringLiteral("[\\\\/:*?\"<>|]"))))
+    {
+        m_status->setText(tr("A buffer name cannot contain \\ / : * ? \" < > |"));
+        return;
+    }
+    if (m_editors.contains(name))
+    {
+        m_status->setText(tr("There is already a buffer called %1").arg(name));
+        return;
+    }
+
+    const QString oldPath = bufferFilePath(oldName);
+    const QString newPath = bufferFilePath(name);
+    if (QFile::exists(newPath))
+    {
+        // Refused rather than merged: the whole model is "one name, one file", and quietly taking over a
+        // file somebody else's buffer is about would be the worst possible reading of "rename".
+        m_status->setText(tr("%1 already exists").arg(newPath));
+        GraphicsLog::warn(QStringLiteral("shader buffer: cannot rename '%1' to '%2': the file exists")
+                              .arg(oldName, newPath));
+        return;
+    }
+
+    // The FILE first: the name means the file, and a tab renamed without its file would be a buffer whose
+    // text comes from somewhere else on the next window rebuild.
+    if (QFile::exists(oldPath) && !QFile::rename(oldPath, newPath))
+    {
+        m_status->setText(tr("Could not rename %1").arg(oldPath));
+        GraphicsLog::error(QStringLiteral("shader buffer: could not rename %1 to %2")
+                               .arg(oldPath, newPath));
+        return;
+    }
+    GraphicsLog::info(QStringLiteral("shader buffer: renamed '%1' to '%2' (%3 -> %4)")
+                          .arg(oldName, name, oldPath, newPath));
+
+    // Everything remembered about the buffer moves with it: the editor, its report, its status. The editor
+    // widget itself is kept, because it holds the text the user is looking at.
+    SonicPiScintilla* editor = m_editors.take(oldName);
+    if (editor)
+    {
+        m_editors.insert(name, editor);
+        const int index = m_tabs->indexOf(editor);
+        if (index >= 0)
+            m_tabs->setTabText(index, name);
+    }
+    if (m_reports.contains(oldName))
+        m_reports.insert(name, m_reports.take(oldName));
+    if (m_statusByBuffer.contains(oldName))
+        m_statusByBuffer.insert(name, m_statusByBuffer.take(oldName));
+
+    // The render thread knows buffers by name. If this was the picture, ask for it under the new name: the
+    // program is rebuilt from the renamed file, so the picture keeps following the file it came from. If it
+    // was not, the old entry is dropped (it is not the active one, so the request is honoured).
+    if (m_renderThread)
+    {
+        const bool wasOnScreen =
+            m_renderThread->shaderName().compare(oldName, Qt::CaseInsensitive) == 0;
+        if (wasOnScreen)
+        {
+            m_compilingShaderName = name;
+            GraphicsSettings::setActiveShaderName(name);
+            if (!m_renderThread->requestShaderCompile(name))
+                GraphicsLog::warn(QStringLiteral("shader buffer: rename could not ask for '%1' to be "
+                                                 "recompiled (no running loop)").arg(name));
+        }
+        m_renderThread->requestShaderForget(oldName);
+    }
+
+    updateTabLabels();
+    selectTab(name);
+    m_status->setText(tr("Renamed to %1 (%2)").arg(name, newPath));
 }
 
 void ShaderBufferWindow::newBuffer()
