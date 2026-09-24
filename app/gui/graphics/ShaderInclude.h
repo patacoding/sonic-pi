@@ -352,6 +352,15 @@ inline Result expand(const QString& source, const QString& rootPath, const Resol
                     // Back to the root's own numbering. Emitted for a skip as well as for an
                     // expansion, because a skipped directive still disappears from the output and the
                     // driver would otherwise number everything after it one line early.
+                    //
+                    // A file whose text does not end with a newline leaves its last line unterminated,
+                    // and the directive would then be read as part of that line: "preprocessor
+                    // directive cannot be preceded by another token". Found by running the real
+                    // renderer against a library saved without a final newline, which is a normal
+                    // thing for an editor to do - and a case the in-memory probe had missed, because
+                    // every file in a test tends to end the same tidy way. Both are covered now.
+                    if (!out.isEmpty() && !out.endsWith(QLatin1Char('\n')))
+                        out += QLatin1Char('\n');
                     out += QStringLiteral("#line %1 %2\n").arg(lineNumber + 1).arg(sourceString);
                     continue;
                 }
