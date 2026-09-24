@@ -210,9 +210,14 @@ bool GraphicsRenderer::prepare()
 GraphicsCompileResult GraphicsRenderer::buildAndInstall()
 {
     GraphicsCompileResult result = compileReplacement();
-    if (result.ok())
-        adoptProgram(std::move(result.program));
+    if (!result.ok())
+        return result;
 
+    // The renderer takes ownership, so `program` is null from here on - hence `installed`. The
+    // alternative (returning a bare bool, or a log string) would put the log and the outcome in two
+    // places, which is the pairing this struct exists to prevent.
+    adoptProgram(std::move(result.program));
+    result.installed = true;
     return result;
 }
 

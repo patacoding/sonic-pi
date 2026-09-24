@@ -60,9 +60,16 @@ constexpr int kUnmatchedReportIntervalMs = 10000;
 // reporting "failed" without the log, or a log without its outcome, are both bugs waiting to happen.
 struct GraphicsCompileResult
 {
-    std::unique_ptr<QOpenGLShaderProgram> program;   // null when the build failed
+    std::unique_ptr<QOpenGLShaderProgram> program;   // null when the build failed, OR when installed
     QString log;                                     // the compiler's output; empty on success
     QString fragmentPath;                            // the file that was read, for the message
+
+    // Set by buildAndInstall(): the program is now IN USE by the renderer, which is why `program` above
+    // is null. Without this flag "installed" and "failed" are the same struct - both have a null
+    // program - and reading ok() after install() therefore reports a success as a failure. That is not
+    // hypothetical: it silently installed the built-in fallback over a shader that had compiled, and
+    // told the editor that every successful compile had failed.
+    bool installed = false;
 
     // Where the first diagnostic points, named in terms of FILES rather than the source string
     // numbers the driver was given, and empty/0 when no diagnostic named a position.
@@ -74,7 +81,7 @@ struct GraphicsCompileResult
     QString errorFile;
     int errorLine = 0;
 
-    bool ok() const { return program != nullptr; }
+    bool ok() const { return program != nullptr || installed; }
 };
 
 // The shader program and the geometry that draws with it. No render target.

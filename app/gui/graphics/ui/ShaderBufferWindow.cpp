@@ -203,7 +203,14 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     layout->addWidget(buttons);
     layout->addWidget(split, 1);
 
-    connect(m_compileButton, &QPushButton::clicked, this, &ShaderBufferWindow::compile);
+    // Which trigger fired, in the log. Three ways in - button, Ctrl+Return, Alt+R - and "the key did
+    // nothing" is otherwise indistinguishable from "the key never reached this window": the editor
+    // widget sits between the two, and whether it swallows a chord is its business, not something to
+    // assume. One line per press settles it.
+    connect(m_compileButton, &QPushButton::clicked, this, [this]() {
+        GraphicsLog::info(QStringLiteral("shader buffer: compile by button (%1)").arg(editingShaderName()));
+        compile();
+    });
     connect(newButton, &QPushButton::clicked, this, &ShaderBufferWindow::newBuffer);
     connect(loadButton, &QPushButton::clicked, this, &ShaderBufferWindow::loadFromFile);
     connect(saveButton, &QPushButton::clicked, this, &ShaderBufferWindow::saveToFile);
@@ -226,7 +233,11 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     // is Alt+R on Windows and Linux and Command+R on macOS - spelled here the same way.
     auto* compileShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Return), this);
     compileShortcut->setContext(Qt::WidgetWithChildrenShortcut);
-    connect(compileShortcut, &QShortcut::activated, this, &ShaderBufferWindow::compile);
+    connect(compileShortcut, &QShortcut::activated, this, [this]() {
+        GraphicsLog::info(QStringLiteral("shader buffer: compile by Ctrl+Return (%1)")
+                              .arg(editingShaderName()));
+        compile();
+    });
 
 #if defined(Q_OS_MAC)
     const int runKey = Qt::CTRL | Qt::Key_R;
@@ -235,7 +246,11 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
 #endif
     auto* runShortcut = new QShortcut(QKeySequence(runKey), this);
     runShortcut->setContext(Qt::WidgetWithChildrenShortcut);
-    connect(runShortcut, &QShortcut::activated, this, &ShaderBufferWindow::compile);
+    connect(runShortcut, &QShortcut::activated, this, [this]() {
+        GraphicsLog::info(QStringLiteral("shader buffer: compile by Alt+R (%1)")
+                              .arg(editingShaderName()));
+        compile();
+    });
 
     // Tab switching from the keyboard, as the code buffers have (Ctrl+Tab / Ctrl+Shift+Tab in the code
     // menu). This window is top-level, so it gets its own: MainWindow's actions cannot serve it.
@@ -768,6 +783,21 @@ void ShaderBufferWindow::showCompileReport(bool ok, const QString& compilerLog,
     {
         m_reports.insert(name, QString());
         m_statusByBuffer.insert(name, tr("On screen. %1 is the picture now.").arg(name));
+        if (name == editingShaderName())
+            showCurrentBuffer();
+        return;
+    }
+
+    // A failure with no compiler output at all is a contradiction, not a shader problem: the driver
+    // always says something when a build fails. Saying so is better than an empty "FAILED" beside an
+    // empty report pane, which is what a verdict/outcome mismatch looked like from the outside.
+    if (!ok && compilerLog.trimmed().isEmpty() && errorLine == 0)
+    {
+        const QString text = tr("The renderer reported a failed build but gave no compiler output. "
+                                "This is a bug in the graphics feature, not in this shader - see "
+                                "graphics.log.");
+        m_reports.insert(name, text);
+        m_statusByBuffer.insert(name, text);
         if (name == editingShaderName())
             showCurrentBuffer();
         return;
