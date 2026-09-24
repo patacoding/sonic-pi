@@ -32,6 +32,7 @@
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -176,12 +177,18 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     // A buffer IS a file in the shader directory, so the tab list is read from disk (rebuildTabs) and
     // there is no separate registry to keep in step with it.
     m_tabs = new QTabWidget(this);
-    m_tabs->setTabsClosable(false);
+    // Closable, UNLIKE the audio buffers, and deliberately so: a shader buffer is a file in a directory
+    // the user controls, so a buffer can be got out of the way as well as made, and a list that can only
+    // grow has no way back. The audio side's ten buffers are a fixed set of documents; these are whatever
+    // the directory holds - which is the whole of the difference, and the reason this window no longer
+    // copies that one blindly. Nothing is deleted from disk by closing a tab.
+    m_tabs->setTabsClosable(true);
     m_tabs->setMovable(false);
     m_tabs->setTabPosition(QTabWidget::South);
     m_tabs->tabBar()->setFixedHeight(ScaleHeightForDPI(SonicPi::kChromeControlDp));
     m_tabs->setToolTip(tr("One tab per buffer. The tab marked %1 is the picture on screen; Compile "
-                          "(Ctrl+Return) puts the buffer being edited on screen.").arg(kOnScreenMark));
+                          "(Ctrl+Return) puts the buffer being edited on screen. The x closes the tab - "
+                          "the shader file stays on disk.").arg(kOnScreenMark));
 
     auto* buttons = new QWidget(this);
     auto* buttonsLayout = new QHBoxLayout(buttons);
@@ -218,6 +225,15 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     // report, and does not touch what is on screen. Same as the audio side, where switching buffers
     // neither starts nor stops anything - the picture changes when the user compiles.
     connect(m_tabs, &QTabWidget::currentChanged, this, [this](int) { showCurrentBuffer(); });
+
+    // The x on a tab CLOSES THE TAB - it does not delete anything. The name is read from the tab rather
+    // than from the index, because the index can shift while a confirmation dialog is open (a compile
+    // finishing, another tab closing) and acting on the wrong buffer would be a mistake either way.
+    connect(m_tabs, &QTabWidget::tabCloseRequested, this, [this](int index) {
+        if (!m_tabs || index < 0 || index >= m_tabs->count())
+            return;
+        closeBuffer(m_tabs->tabText(index).remove(kOnScreenMark).trimmed());
+    });
 
     // The render thread's verdict arrives here, queued from another thread.
     connect(m_renderThread, &GraphicsRenderThread::shaderCompileFinished,
@@ -526,6 +542,91 @@ QString ShaderBufferWindow::newBufferTemplate(const QString& name)
                           "{\n"
                           "    FragColor = vec4(v_uv, 0.5, 1.0);\n"
                           "}\n").arg(name);
+}
+
+void ShaderBufferWindow::closeBuffer(const QString& shaderName)
+{
+    if (shaderName.isEmpty())
+        return;
+
+    const QString path = bufferFilePath(shaderName);
+    SonicPiScintilla* editor = m_editors.value(shaderName, nullptr);
+    const QString onScreen = m_renderThread ? m_renderThread->shaderName()
+                                            : GraphicsSettings::defaultShaderName();
+
+    // The one thing that CAN be lost by closing: text edited in this tab and never compiled - because the
+    // file is the compiled state, and anything typed since is only in the editor. The file is read back
+    // and compared rather than a dirty flag being tracked, so the question is about the bytes on disk
+    // instead of about a flag that could have drifted.
+    if (editor)
+    {
+        QFile file(path);
+        QString onDisk;
+        if (file.open(QIODevice::ReadOnly | QIODevice::Text))
+        {
+            QTextStream in(&file);
+            onDisk = in.readAll();
+            file.close();
+        }
+
+        if (editor->text() != onDisk)
+        {
+            QMessageBox confirm(this);
+            confirm.setIcon(QMessageBox::Warning);
+            confirm.setWindowTitle(tr("Close Buffer"));
+            confirm.setText(tr("Buffer \"%1\" has edits that have not been compiled.").arg(shaderName));
+            confirm.setInformativeText(tr("Closing the tab discards them. The file is not touched:\n%1")
+                                           .arg(path));
+            QPushButton* closeButton = confirm.addButton(tr("Close and discard"), QMessageBox::DestructiveRole);
+            confirm.addButton(QMessageBox::Cancel);
+            confirm.setDefaultButton(QMessageBox::Cancel);
+            confirm.exec();
+            if (confirm.clickedButton() != closeButton)
+                return;   // cancelled, which is not an error
+        }
+    }
+
+    GraphicsLog::info(QStringLiteral("shader buffer: closed buffer '%1' (file left alone: %2)")
+                          .arg(shaderName, path));
+
+    // The compiled program belongs to the render thread, so the release is a request like every other
+    // change that touches GL. The file stays, so the program can be rebuilt from it at any time.
+    if (m_renderThread)
+        m_renderThread->requestShaderForget(shaderName);
+
+    // The tab, its editor, and everything remembered about it.
+    if (editor)
+    {
+        const int index = m_tabs->indexOf(editor);
+        if (index >= 0)
+            m_tabs->removeTab(index);
+        m_editors.remove(shaderName);
+        editor->deleteLater();
+    }
+    m_reports.remove(shaderName);
+    m_statusByBuffer.remove(shaderName);
+
+    // A closed tab must not leave the picture unrepresented: the tab bar shows which buffer is on screen,
+    // and if that buffer has no tab the mark has nowhere to live. So closing the buffer that IS the
+    // picture puts `default` on screen - and the status says so, because a picture that changes while the
+    // user was doing something else to the editor would otherwise be a mystery.
+    if (shaderName.compare(onScreen, Qt::CaseInsensitive) == 0)
+    {
+        const QString fallback = GraphicsSettings::defaultShaderName();
+        if (m_renderThread && m_renderThread->requestShaderCompile(fallback))
+        {
+            m_status->setText(tr("Closed %1 - it was the picture, so %2 is on screen now. "
+                                 "%3 is still on disk.").arg(shaderName, fallback, path));
+            GraphicsLog::info(QStringLiteral("shader buffer: '%1' was the picture; asked for '%2'")
+                                  .arg(shaderName, fallback));
+        }
+    }
+
+    updateTabLabels();
+    if (m_tabs->count() > 0)
+        selectTab(editingShaderName());
+    else
+        showCurrentBuffer();
 }
 
 void ShaderBufferWindow::newBuffer()

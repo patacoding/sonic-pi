@@ -328,6 +328,56 @@ QString GraphicsRenderThread::shaderName() const
     return m_activeShaderName;
 }
 
+bool GraphicsRenderThread::requestShaderForget(const QString& shaderName)
+{
+    if (shaderName.isEmpty())
+        return false;
+    if (!m_loopRunning.load(std::memory_order_relaxed))
+    {
+        GraphicsLog::warn(QStringLiteral("forget requested but the render loop is not running"));
+        return false;
+    }
+
+    {
+        QMutexLocker lock(&m_bufferMutex);
+        m_forgetShaderName = shaderName;
+    }
+    m_forgetRequested.store(true, std::memory_order_release);
+    return true;
+}
+
+void GraphicsRenderThread::applyShaderForget()
+{
+    QString name;
+    {
+        QMutexLocker lock(&m_bufferMutex);
+        name = m_forgetShaderName;
+    }
+    if (name.isEmpty())
+        return;
+
+    QMutexLocker lock(&m_rendererMutex);
+
+    const auto found = m_renderers.find(name);
+    if (found == m_renderers.end())
+        return;   // never compiled, so there is nothing to drop
+
+    // The one refusal: the program being drawn with right now. The tab may be closed, but the program in
+    // memory is what the picture IS, and dropping it would take the picture away for no reason. It goes
+    // when something else goes on screen.
+    if (found->second.get() == m_activeRenderer.load(std::memory_order_relaxed))
+    {
+        GraphicsLog::info(QStringLiteral("buffer: '%1' is still the picture, so its program is kept; it "
+                                         "will be dropped when another buffer goes on screen").arg(name));
+        return;
+    }
+
+    // Destroying GL objects needs the context current - which is exactly where this runs.
+    m_renderers.erase(found);
+    GraphicsLog::info(QStringLiteral("buffer: '%1' released (%2 renderer(s) alive)")
+                          .arg(name).arg(m_renderers.size()));
+}
+
 GraphicsRenderer* GraphicsRenderThread::createRenderer(const QString& shaderName)
 {
     // Called with m_rendererMutex held and the context current (see the note in the header).
@@ -741,6 +791,12 @@ void GraphicsRenderThread::run()
 
         if (m_reloadRequested.exchange(false, std::memory_order_relaxed))
             applyShaderCompile();
+
+        // Buffers whose files are gone, applied after any compile in the same frame: a compile can make
+        // a previously-active buffer droppable, and dropping before it would be the one case this
+        // refuses for no reason.
+        if (m_forgetRequested.exchange(false, std::memory_order_acquire))
+            applyShaderForget();
 
         // Applied at the top of the frame, before anything is drawn, so a resize
         // can never land between the clear and the draw. This is the only place

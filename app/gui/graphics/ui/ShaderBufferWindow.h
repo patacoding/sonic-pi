@@ -177,6 +177,12 @@ private:
     void showCurrentBuffer();
     // Create a new buffer: ask for a name, write a minimal shader to its file, and open it in a tab.
     void newBuffer();
+    // Close a buffer's tab: the tab, its editor, its report, and its compiled program.
+    //
+    // THE FILE IS NOT TOUCHED. Closing a tab is an editor action, not a file operation - the shader stays
+    // on disk and comes back the next time the window is built (the list IS the directory), which is also
+    // why closing needs no "are you sure" about losing a shader: nothing is lost, only un-edited.
+    void closeBuffer(const QString& shaderName);
     // A minimal valid shader for a new buffer. Valid on purpose: a new buffer that shows a blank output
     // with a compile error teaches the wrong thing about what just happened.
     static QString newBufferTemplate(const QString& name);

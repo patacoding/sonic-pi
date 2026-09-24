@@ -179,6 +179,19 @@ public:
     // the user is looking. Returns false when there is no running loop to apply it to.
     bool requestShaderCompile(const QString& shaderName = QString());
 
+    // Drop a buffer's renderer, because the buffer is no longer open in the editor.
+    //
+    // The FILE is not touched - only the compiled program, which can be rebuilt from the file at any time.
+    // Applied at the top of a frame like the other requests. The one case it refuses is a buffer whose
+    // program is the picture on screen: that program is still being drawn with, so it is kept until
+    // something else goes on screen, and the log says so rather than leaving a silent exception.
+    //
+    // This exists because "a renderer is never evicted" (see m_renderers) was written when nothing could
+    // stop being open. Now that a tab can be closed, unbounded growth would be a real leak rather than a
+    // theoretical one - and the invariant that made the atomic pointer safe (entries are never destroyed
+    // while the thread runs) is preserved by only ever dropping a buffer that is NOT the active one.
+    bool requestShaderForget(const QString& shaderName);
+
     // Result of the Phase 0 framebuffer readback check. False if the check did
     // not run, so a caller cannot mistake "not attempted" for "passed".
     bool renderVerified() const { return m_renderVerified; }
@@ -334,6 +347,10 @@ private:
     mutable QMutex m_bufferMutex;
     QString m_activeShaderName = GraphicsSettings::defaultShaderName();
     QString m_requestedShaderName = GraphicsSettings::defaultShaderName();
+    // The buffer whose renderer should be dropped, and the flag that says one is waiting. Guarded by the
+    // same mutex as the names above.
+    QString m_forgetShaderName;
+    std::atomic<bool> m_forgetRequested{false};
 
     // Bring up the renderer for a buffer, creating it if this is the first time it has been needed.
     //
@@ -349,6 +366,9 @@ private:
     // built, make it the one being drawn with. A buffer that fails leaves the picture alone and sends the
     // compiler's own words back to whoever asked.
     void applyShaderCompile();
+
+    // Apply a pending forget request: destroy that buffer's renderer, unless it is the one on screen.
+    void applyShaderForget();
 
     // The two render targets, alternating.
     //
