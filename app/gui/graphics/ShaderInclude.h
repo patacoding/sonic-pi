@@ -193,6 +193,38 @@ inline int countLines(const QString& text)
     return text.endsWith(QLatin1Char('\n')) ? newlines : newlines + 1;
 }
 
+// The line of an entry point definition in `text`, or 0 when there is none.
+//
+// WHY THIS IS A RULE AND NOT A STYLE POINT. A root shader and a shared library are told apart by one
+// thing the user decided: the library has no entry point, only utility functions. That is what makes
+// "check a library, install a root" possible at all - and it is checked here, at the include, because
+// the alternative is the driver's own wording for the same mistake:
+//
+//     ERROR: 0:9: 'main' : function already has a body
+//
+// (measured - tools/settings-probe/gl-main-probe.cpp). True, but it says nothing about libraries, and
+// it points into the concatenated source rather than at the line the user wrote. This function lets the
+// report say which file, which line, and why.
+//
+// Comment state is tracked because a library may well *discuss* main in a comment, and a `//` or `/* */`
+// line is not a definition. The pattern is strict for the same reason: GLSL's entry point is declared
+// `void main(...)`, so a line has to begin with that to match.
+inline int entryPointLine(const QString& text)
+{
+    static const QRegularExpression re(QStringLiteral("^\\s*void\\s+main\\s*\\("));
+
+    const QStringList lines = text.split(QLatin1Char('\n'));
+    bool inComment = false;
+    for (int i = 0; i < lines.size(); ++i)
+    {
+        const bool wasInComment = inComment;
+        inComment = detail::startsOrEndsInsideComment(lines.at(i), inComment);
+        if (!wasInComment && re.match(lines.at(i)).hasMatch())
+            return i + 1;
+    }
+    return 0;
+}
+
 // Expand every include in `source`, in place, depth first.
 //
 // Rules, each with a reason:
@@ -357,6 +389,24 @@ inline Result expand(const QString& source, const QString& rootPath, const Resol
                                                               "the shader being compiled, so an included "
                                                               "file must not have one.").arg(found.path));
                         return false;
+                    }
+
+                    // The other thing an included file must not be: a program. A library is utility
+                    // functions; the entry point belongs to the shader that includes it (see
+                    // entryPointLine above for why the driver's own message is not enough).
+                    if (!duplicate)
+                    {
+                        const int entryPoint = entryPointLine(found.text);
+                        if (entryPoint > 0)
+                        {
+                            result.error = failure(
+                                file, lineNumber,
+                                QStringLiteral("\"%1\" defines an entry point (line %2: void main). An "
+                                               "included file is a shared library and must be utility "
+                                               "functions only - the entry point belongs to the shader "
+                                               "that includes it.").arg(found.path).arg(entryPoint));
+                            return false;
+                        }
                     }
 
                     if (!duplicate)
