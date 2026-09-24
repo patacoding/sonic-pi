@@ -148,9 +148,8 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     QPushButton* loadButton = new QPushButton(tr("Load into Buffer..."), this);
     QPushButton* saveButton = new QPushButton(tr("Save Buffer As..."), this);
 
-    // Named in the tooltip as well as bound, because a shortcut nobody is told about is not a
-    // feature. Alt+R is what Sonic Pi's own Run uses, so it needs no explaining.
-    m_compileButton->setToolTip(tr("Write this buffer and put it on screen (Alt+R)"));
+    // Named in the tooltip as well as bound, because a shortcut nobody is told about is not a feature.
+    m_compileButton->setToolTip(tr("Write this buffer and put it on screen (Ctrl+Return)"));
     newButton->setToolTip(tr("Create a new buffer: one more .frag file in the shader directory"));
 
     m_status = new QLabel(this);
@@ -182,7 +181,7 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     m_tabs->setTabPosition(QTabWidget::South);
     m_tabs->tabBar()->setFixedHeight(ScaleHeightForDPI(SonicPi::kChromeControlDp));
     m_tabs->setToolTip(tr("One tab per buffer. The tab marked %1 is the picture on screen; Compile "
-                          "(Alt+R) puts the buffer being edited on screen.").arg(kOnScreenMark));
+                          "(Ctrl+Return) puts the buffer being edited on screen.").arg(kOnScreenMark));
 
     auto* buttons = new QWidget(this);
     auto* buttonsLayout = new QHBoxLayout(buttons);
@@ -203,7 +202,7 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     layout->addWidget(buttons);
     layout->addWidget(split, 1);
 
-    // Which trigger fired, in the log. Three ways in - button, Ctrl+Return, Alt+R - and "the key did
+    // Which trigger fired, in the log. Two ways in - the button and Ctrl+Return - and "the key did
     // nothing" is otherwise indistinguishable from "the key never reached this window": the editor
     // widget sits between the two, and whether it swallows a chord is its business, not something to
     // assume. One line per press settles it.
@@ -223,31 +222,16 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     // The render thread's verdict arrives here, queued from another thread.
     connect(m_renderThread, &GraphicsRenderThread::shaderCompileFinished,
             this, &ShaderBufferWindow::compileFinished);
-    // Compile keys. Ctrl+Return matches the audio editor's Run and the habit of every shader tool.
+
+    // ---- THE COMPILE KEY: Ctrl+Return, and only that ---------------------------------------
     //
-    // Alt+R is Sonic Pi's own Run binding, and it is here because the semantics are the SAME as in an
-    // audio buffer: take what is in the buffer and put it into effect. Someone who has just been
-    // running code with Alt+R should not have to learn a second key for the shader beside it.
-    //
-    // "Meta" in Sonic Pi's shortcut table is the platform's command modifier, so the table's Meta+R
-    // is Alt+R on Windows and Linux and Command+R on macOS - spelled here the same way.
+    // Ctrl+Return matches the audio editor's Run and the habit of every shader tool. This window claims
+    // one chord and nothing else: it is a different place doing a different thing, and the main window's
+    // own keys are none of its business.
     auto* compileShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Return), this);
     compileShortcut->setContext(Qt::WidgetWithChildrenShortcut);
     connect(compileShortcut, &QShortcut::activated, this, [this]() {
         GraphicsLog::info(QStringLiteral("shader buffer: compile by Ctrl+Return (%1)")
-                              .arg(editingShaderName()));
-        compile();
-    });
-
-#if defined(Q_OS_MAC)
-    const int runKey = Qt::CTRL | Qt::Key_R;
-#else
-    const int runKey = Qt::ALT | Qt::Key_R;
-#endif
-    auto* runShortcut = new QShortcut(QKeySequence(runKey), this);
-    runShortcut->setContext(Qt::WidgetWithChildrenShortcut);
-    connect(runShortcut, &QShortcut::activated, this, [this]() {
-        GraphicsLog::info(QStringLiteral("shader buffer: compile by Alt+R (%1)")
                               .arg(editingShaderName()));
         compile();
     });
@@ -501,7 +485,7 @@ void ShaderBufferWindow::updateTabLabels()
         m_tabs->setTabText(i, isOnScreen ? name + kOnScreenMark : name);
         m_tabs->setTabToolTip(i, isOnScreen
                                      ? tr("%1 - on screen now").arg(name)
-                                     : tr("%1 - press Compile (Alt+R) to put it on screen").arg(name));
+                                     : tr("%1 - press Compile (Ctrl+Return) to put it on screen").arg(name));
     }
 }
 
@@ -531,7 +515,7 @@ QString ShaderBufferWindow::newBufferTemplate(const QString& name)
 {
     return QStringLiteral("// Buffer: %1\n"
                           "//\n"
-                          "// Alt+R (or Compile) writes this file and puts it on screen.\n"
+                          "// Ctrl+Return (or Compile) writes this file and puts it on screen.\n"
                           "\n"
                           "#version 330 core\n"
                           "\n"

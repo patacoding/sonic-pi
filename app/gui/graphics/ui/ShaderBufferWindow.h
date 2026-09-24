@@ -88,10 +88,8 @@ public:
     // Write the CURRENT TAB's text to that buffer's file and ask the render thread to compile it and put
     // it on screen. The reply arrives at compileFinished().
     //
-    // Bound to Alt+R as well as the Compile button, the same key Sonic Pi's own Run uses: the semantics
-    // are the same as an audio buffer's Run - take what is in the buffer and put it into effect. For a
-    // picture "into effect" also means "on screen", which is why one key does both here: there is only
-    // one output, so a buffer that has compiled but is not shown is work nobody can see.
+    // Bound to Ctrl+Return as well as the Compile button - the audio editor's Run key, and the habit of
+    // every shader tool.
     void compile();
 
     // Show the window on one buffer, creating its tab if it is not there yet, and make it current.
