@@ -302,7 +302,8 @@ void GraphicsRenderThread::applyShaderReload()
         if (!m_gfxRenderer)
         {
             GraphicsLog::warn(QStringLiteral("reload: no renderer to reload"));
-            emit shaderCompileFinished(false, QStringLiteral("No renderer to compile into."));
+            emit shaderCompileFinished(false, QStringLiteral("No renderer to compile into."),
+                                       QString(), 0);
             return;
         }
         result = m_gfxRenderer->compileReplacement();
@@ -315,7 +316,7 @@ void GraphicsRenderThread::applyShaderReload()
         // failure they will retry blindly.
         GraphicsLog::info(QStringLiteral("reload: FAILED after %1ms; the previous shader is still in use")
                               .arg(t.elapsed()));
-        emit shaderCompileFinished(false, result.log);
+        emit shaderCompileFinished(false, result.log, result.errorFile, result.errorLine);
         return;
     }
 
@@ -327,7 +328,7 @@ void GraphicsRenderThread::applyShaderReload()
     }
 
     GraphicsLog::info(QStringLiteral("reload: applied after %1ms").arg(t.elapsed()));
-    emit shaderCompileFinished(true, QString());
+    emit shaderCompileFinished(true, QString(), QString(), 0);
 }
 
 void GraphicsRenderThread::installDebugLogger()

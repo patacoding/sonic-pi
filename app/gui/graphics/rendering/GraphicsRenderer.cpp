@@ -20,6 +20,9 @@
 // tested on their own in tools/settings-probe/shader-include-check.cpp rather than through a build of
 // this application (docs/dev-discipline.md 4.1).
 #include "graphics/ShaderInclude.h"
+// Turning the driver's source string numbers back into file names, and the same rules for naming a
+// file in a report. Pure text, so tools/settings-probe/shader-text-check.cpp covers it.
+#include "graphics/ShaderText.h"
 
 #include <QDir>
 #include <QFile>
@@ -280,7 +283,8 @@ QString GraphicsRenderer::resolveShaderPath(const QString& fileName) const
     return path;
 }
 
-bool GraphicsRenderer::readExpandedShader(const QString& path, QString* text, QString* error) const
+bool GraphicsRenderer::readExpandedShader(const QString& path, QString* text, QString* error,
+                                          QHash<int, QString>* fileBySourceString) const
 {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly))
@@ -330,6 +334,8 @@ bool GraphicsRenderer::readExpandedShader(const QString& path, QString* text, QS
     }
 
     *text = expanded.text;
+    if (fileBySourceString)
+        *fileBySourceString = expanded.fileBySourceString;
     return true;
 }
 
@@ -360,13 +366,15 @@ GraphicsCompileResult GraphicsRenderer::buildProgram(const QString& vertexFile,
     // measurements apply here).
     QString vertSource;
     QString fragSource;
-    if (!readExpandedShader(vert, &vertSource, &result.log))
+    QHash<int, QString> vertSourceStrings;
+    QHash<int, QString> fragSourceStrings;
+    if (!readExpandedShader(vert, &vertSource, &result.log, &vertSourceStrings))
     {
         GraphicsLog::error(QStringLiteral("renderer: could not prepare the vertex shader %1\n%2")
                                .arg(vert, result.log));
         return result;
     }
-    if (!readExpandedShader(frag, &fragSource, &result.log))
+    if (!readExpandedShader(frag, &fragSource, &result.log, &fragSourceStrings))
     {
         // An include that cannot be resolved is a failure of the same kind as a syntax error, so it
         // travels the same way: named, explained, and without touching the running program. The
@@ -382,25 +390,44 @@ GraphicsCompileResult GraphicsRenderer::buildProgram(const QString& vertexFile,
         return result;
     }
 
+    // The driver's words, with the source string numbers it was given turned back into file names.
+    //
+    // Which table belongs to which half: a vertex failure can only be about the vertex shader and a
+    // fragment failure only about the fragment one, because the two are compiled separately. A LINK
+    // failure is the one message that can mention either, and the two halves number their includes
+    // independently - so it is attributed against the fragment's table, on the grounds that a link
+    // diagnostic with a position at all is rare and a vertex shader with includes rarer still. The
+    // driver's text is passed through unchanged either way; only the position is renamed.
+    const auto attributed = [](const QString& driverLog, const QString& root,
+                               const QHash<int, QString>& sourceStrings) {
+        return ShaderText::attributeDiagnostics(driverLog, root, sourceStrings,
+                                                GraphicsSettings::shaderDirectoryPath());
+    };
+    const auto record = [&result](const ShaderText::Attribution& attribution) {
+        result.log = attribution.log;
+        result.errorFile = attribution.file;
+        result.errorLine = attribution.line;
+    };
+
     auto program = std::make_unique<QOpenGLShaderProgram>();
 
     if (!program->addShaderFromSourceCode(QOpenGLShader::Vertex, vertSource))
     {
-        result.log = program->log();
+        record(attributed(program->log(), vert, vertSourceStrings));
         GraphicsLog::error(QStringLiteral("renderer: vertex shader failed to compile (%1)\n%2")
                                .arg(vert, result.log));
         return result;
     }
     if (!program->addShaderFromSourceCode(QOpenGLShader::Fragment, fragSource))
     {
-        result.log = program->log();
+        record(attributed(program->log(), frag, fragSourceStrings));
         GraphicsLog::error(QStringLiteral("renderer: fragment shader failed to compile (%1)\n%2")
                                .arg(frag, result.log));
         return result;
     }
     if (!program->link())
     {
-        result.log = program->log();
+        record(attributed(program->log(), frag, fragSourceStrings));
         GraphicsLog::error(QStringLiteral("renderer: shader program failed to link\n%1")
                                .arg(result.log));
         return result;

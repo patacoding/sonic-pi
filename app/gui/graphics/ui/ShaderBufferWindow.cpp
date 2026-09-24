@@ -345,7 +345,7 @@ void ShaderBufferWindow::reloadFromDisk()
     file.close();
 
     m_editor->setText(text);
-    showCompileReport(true, QString());
+    showCompileReport(true, QString(), QString(), 0);
     m_status->setText(tr("Loaded %1").arg(path));
     GraphicsLog::info(QStringLiteral("shader buffer: loaded %1 (%2 bytes)").arg(path).arg(text.size()));
 }
@@ -381,13 +381,15 @@ void ShaderBufferWindow::compile()
         // on "Compiling..." forever. That state would be indistinguishable from a compile that takes
         // minutes.
         showCompileReport(false, tr("The render loop is not running, so nothing was compiled. "
-                                    "The file has been saved."));
+                                    "The file has been saved."),
+                          QString(), 0);
     }
 }
 
-void ShaderBufferWindow::compileFinished(bool ok, const QString& compilerLog)
+void ShaderBufferWindow::compileFinished(bool ok, const QString& compilerLog,
+                                         const QString& errorFile, int errorLine)
 {
-    showCompileReport(ok, compilerLog);
+    showCompileReport(ok, compilerLog, errorFile, errorLine);
 }
 
 // Import a fragment shader from an arbitrary file.
@@ -434,7 +436,7 @@ bool ShaderBufferWindow::importFrom(const QString& fileName)
     m_editor->setText(text);
     // The report is cleared because it describes the PREVIOUS contents. Leaving a stale compiler error
     // beside freshly imported code would point at a line that no longer means anything.
-    showCompileReport(true, QString());
+    showCompileReport(true, QString(), QString(), 0);
     m_status->setText(tr("Loaded %1 into the buffer. Press Compile to render it.").arg(fileName));
     GraphicsLog::info(QStringLiteral("shader buffer: imported %1 (%2 bytes)").arg(fileName).arg(text.size()));
     return true;
@@ -488,7 +490,8 @@ bool ShaderBufferWindow::exportTo(const QString& chosenName)
     return true;
 }
 
-void ShaderBufferWindow::showCompileReport(bool ok, const QString& compilerLog)
+void ShaderBufferWindow::showCompileReport(bool ok, const QString& compilerLog,
+                                           const QString& errorFile, int errorLine)
 {
     if (ok && compilerLog.isEmpty())
     {
@@ -499,17 +502,24 @@ void ShaderBufferWindow::showCompileReport(bool ok, const QString& compilerLog)
 
     // WHERE the problem is, in terms this window can name: the file, and the line inside it.
     //
-    // The driver's own text says "0:5", where 0 means "the shader you compiled" and 5 is the line -
-    // correct, but it takes knowing the convention to read. Naming the file and the line is the whole
-    // of what this report owes the user, which is why there is no "Go to Error" button: moving the
-    // cursor for them is machinery (a button to keep enabled, disabled, and meaningful) that buys
-    // nothing the line number did not already give.
+    // The driver's own text says "1:11", where 1 is a source string number the renderer assigned to an
+    // included file and 11 is the line inside that file. Turning that number back into a name needs
+    // the table the expander produced, so it happens in the renderer and what arrives here is already
+    // "lib/noise.frag:11" (ShaderText::attributeDiagnostics). Naming the file and the line is the whole
+    // of what this report owes the user, which is why there is no "Go to Error" button.
     //
-    // No line is a normal outcome, not a failure to parse: some diagnostics name none, and inventing
-    // one would be worse than saying only the file.
-    const int errorLine = ShaderText::firstErrorLine(compilerLog);
-    const QString file = QFileInfo(shaderFilePath()).fileName();
+    // No position is a normal outcome, not a failure to parse: some diagnostics name none, and
+    // inventing one would be worse than saying only the file.
+    const QString ownFile = ShaderText::diagnosticName(shaderFilePath(),
+                                                       GraphicsSettings::shaderDirectoryPath());
+    const QString file = errorFile.isEmpty() ? ownFile : errorFile;
     const QString where = errorLine > 0 ? QStringLiteral("%1:%2").arg(file).arg(errorLine) : file;
+
+    // The one decision the line number alone cannot make: is that line in the document this window is
+    // showing? A diagnostic inside an included library points at a line of a file this editor is not
+    // displaying, so moving the cursor would put it on an unrelated line of THIS file - the failure
+    // ShaderText has refused to guess its way into from the start (docs/shader-includes-plan.md 4).
+    const bool inThisDocument = errorLine > 0 && file == ownFile;
 
     // The compiler's text is shown verbatim below the location. It is not reformatted, not summarised
     // and not translated: a driver's diagnostic is the single most useful thing in this window, and
@@ -517,7 +527,15 @@ void ShaderBufferWindow::showCompileReport(bool ok, const QString& compilerLog)
     m_report->setPlainText(errorLine > 0 ? QStringLiteral("%1\n\n%2").arg(where, compilerLog)
                                          : compilerLog);
 
-    if (errorLine > 0)
+    if (errorLine > 0 && !inThisDocument)
+    {
+        m_status->setText(ok ? tr("Compiled with warnings. First at %1, which is not this file.")
+                                 .arg(where)
+                             : tr("Compile FAILED at %1, which is not this file. The previous shader "
+                                  "is still rendering - fix the error below and compile again.")
+                                   .arg(where));
+    }
+    else if (errorLine > 0)
     {
         m_status->setText(ok ? tr("Compiled with warnings. First at %1.").arg(where)
                              : tr("Compile FAILED at %1. The previous shader is still rendering - "

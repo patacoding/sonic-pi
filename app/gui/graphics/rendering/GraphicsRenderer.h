@@ -61,6 +61,16 @@ struct GraphicsCompileResult
     QString log;                                     // the compiler's output; empty on success
     QString fragmentPath;                            // the file that was read, for the message
 
+    // Where the first diagnostic points, named in terms of FILES rather than the source string
+    // numbers the driver was given, and empty/0 when no diagnostic named a position.
+    //
+    // Carried out of here rather than re-parsed by the editor, because the map from a source string
+    // number to a file exists in this function, for this compile, and nowhere else. The editor needs
+    // it for one decision: whether the line it is being told about is a line of ITS document, or of
+    // an included library it cannot scroll to (docs/shader-includes-plan.md 4).
+    QString errorFile;
+    int errorLine = 0;
+
     bool ok() const { return program != nullptr; }
 };
 
@@ -250,8 +260,10 @@ private:
     //
     // Returns false with `error` set, in the same shape as a compiler diagnostic
     // ("file:line: what"), so a failure here reaches the user through exactly the channel a
-    // compile failure does.
-    bool readExpandedShader(const QString& path, QString* text, QString* error) const;
+    // compile failure does. `fileBySourceString` receives the table the diagnostics will need to be
+    // attributed: which source string number each inlined file was given.
+    bool readExpandedShader(const QString& path, QString* text, QString* error,
+                            QHash<int, QString>* fileBySourceString = nullptr) const;
 
     // Look up the uniform locations this renderer feeds.
     //

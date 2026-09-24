@@ -242,7 +242,14 @@ signals:
     // itself. Compiling on the GUI thread would mean using the wrong context - the failure that
     // already cost this feature a rewrite - so the request goes one way and the verdict comes back
     // this way.
-    void shaderCompileFinished(bool ok, const QString& compilerLog);
+    //
+    // `errorFile` and `errorLine` say where the first diagnostic points, with the file named rather
+    // than numbered, because only the renderer can do that translation: the map from a source string
+    // number to a file belongs to the compile that produced it. The editor needs it for one decision
+    // it cannot make from the text - whether the line it is being told about is a line of the document
+    // it is showing. Empty and 0 when no diagnostic named a position.
+    void shaderCompileFinished(bool ok, const QString& compilerLog, const QString& errorFile,
+                               int errorLine);
 
 protected:
     void run() override;

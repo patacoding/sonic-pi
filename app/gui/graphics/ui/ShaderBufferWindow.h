@@ -115,7 +115,11 @@ signals:
 
 public slots:
     // The render thread's verdict. Connected to GraphicsRenderThread::shaderCompileFinished.
-    void compileFinished(bool ok, const QString& compilerLog);
+    //
+    // `errorFile` is named the way ShaderText::diagnosticName() names files - relative to the shader
+    // directory when it is inside it - which is what makes it comparable with this window's own file.
+    void compileFinished(bool ok, const QString& compilerLog, const QString& errorFile,
+                         int errorLine);
 
 protected:
     void closeEvent(QCloseEvent* e) override;
@@ -127,14 +131,16 @@ protected:
 private:
     // Show the compiler's output, prefixed with where the problem is (file:line). Empty text with ok
     // true clears the report.
-    void showCompileReport(bool ok, const QString& compilerLog);
+    void showCompileReport(bool ok, const QString& compilerLog, const QString& errorFile,
+                           int errorLine);
     // Put the cursor on `line` (1-based) and make sure it is visible. No-op for a line number that is
     // not in the document, because a diagnostic referring to a line the editor does not have would
     // otherwise move the cursor somewhere arbitrary and look like a bug.
     //
     // A convenience only: the report names the file and the line, so nothing is lost when this does
-    // nothing. It is also what has to learn about includes - a diagnostic inside an included library
-    // is not a line in this document at all (docs/shader-includes-plan.md 4).
+    // nothing. It is also what had to learn about includes - a diagnostic inside an included library
+    // is not a line in this document at all, so the caller compares files before asking
+    // (docs/shader-includes-plan.md 4).
     void jumpToLine(int line);
     // The file this window edits, resolved through GraphicsSettings so it is the same file the
     // renderer reads. Empty when it could not be produced.
