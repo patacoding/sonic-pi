@@ -24,6 +24,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPlainTextEdit>
@@ -137,8 +138,6 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     restoreEditingKeys(m_editor);
 
     m_compileButton = new QPushButton(tr("Compile"), this);
-    m_jumpButton = new QPushButton(tr("Go to Error"), this);
-    m_jumpButton->setEnabled(false);
     QPushButton* loadButton = new QPushButton(tr("Load File..."), this);
     QPushButton* saveButton = new QPushButton(tr("Save File..."), this);
 
@@ -163,7 +162,6 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     auto* buttonsLayout = new QHBoxLayout(buttons);
     buttonsLayout->setContentsMargins(0, 0, 0, 0);
     buttonsLayout->addWidget(m_compileButton);
-    buttonsLayout->addWidget(m_jumpButton);
     buttonsLayout->addWidget(loadButton);
     buttonsLayout->addWidget(saveButton);
     buttonsLayout->addWidget(m_status, 1);
@@ -179,7 +177,6 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     layout->addWidget(split, 1);
 
     connect(m_compileButton, &QPushButton::clicked, this, &ShaderBufferWindow::compile);
-    connect(m_jumpButton, &QPushButton::clicked, this, [this]() { jumpToLine(m_errorLine); });
     connect(loadButton, &QPushButton::clicked, this, &ShaderBufferWindow::loadFromFile);
     connect(saveButton, &QPushButton::clicked, this, &ShaderBufferWindow::saveToFile);
 
@@ -496,38 +493,47 @@ void ShaderBufferWindow::showCompileReport(bool ok, const QString& compilerLog)
     if (ok && compilerLog.isEmpty())
     {
         m_report->clear();
-        m_errorLine = 0;
-        m_jumpButton->setEnabled(false);
         m_status->setText(tr("Compiled. The output is showing this shader."));
         return;
     }
 
-    // The compiler's text is shown verbatim. It is not reformatted, not summarised and not
-    // translated: a driver's diagnostic with a line number is the single most useful thing in this
-    // window, and paraphrasing it would lose the part that matters.
-    m_report->setPlainText(compilerLog);
+    // WHERE the problem is, in terms this window can name: the file, and the line inside it.
+    //
+    // The driver's own text says "0:5", where 0 means "the shader you compiled" and 5 is the line -
+    // correct, but it takes knowing the convention to read. Naming the file and the line is the whole
+    // of what this report owes the user, which is why there is no "Go to Error" button: moving the
+    // cursor for them is machinery (a button to keep enabled, disabled, and meaningful) that buys
+    // nothing the line number did not already give.
+    //
+    // No line is a normal outcome, not a failure to parse: some diagnostics name none, and inventing
+    // one would be worse than saying only the file.
+    const int errorLine = ShaderText::firstErrorLine(compilerLog);
+    const QString file = QFileInfo(shaderFilePath()).fileName();
+    const QString where = errorLine > 0 ? QStringLiteral("%1:%2").arg(file).arg(errorLine) : file;
 
-    // A line number is offered when one can be recognised, and its absence is not an error: some
-    // diagnostics name none, and inventing one would put the cursor somewhere arbitrary and look like
-    // a bug in the editor rather than a limitation of the message.
-    m_errorLine = ShaderText::firstErrorLine(compilerLog);
-    m_jumpButton->setEnabled(m_errorLine > 0);
+    // The compiler's text is shown verbatim below the location. It is not reformatted, not summarised
+    // and not translated: a driver's diagnostic is the single most useful thing in this window, and
+    // paraphrasing it would lose the part that matters.
+    m_report->setPlainText(errorLine > 0 ? QStringLiteral("%1\n\n%2").arg(where, compilerLog)
+                                         : compilerLog);
 
-    if (m_errorLine > 0)
+    if (errorLine > 0)
     {
-        m_status->setText(ok ? tr("Compiled with warnings. First at line %1.").arg(m_errorLine)
-                             : tr("Compile FAILED at line %1. The previous shader is still rendering - "
-                                  "fix the error below and compile again.").arg(m_errorLine));
-        // Jumped to immediately rather than only on request: the user asked for a compile, and the
-        // first thing they want is to see the offending line. The button remains for going back after
-        // scrolling away.
-        jumpToLine(m_errorLine);
+        m_status->setText(ok ? tr("Compiled with warnings. First at %1.").arg(where)
+                             : tr("Compile FAILED at %1. The previous shader is still rendering - "
+                                  "fix the error below and compile again.").arg(where));
+
+        // The cursor is also put on the line, because after asking for a compile the first thing
+        // wanted is to see what it complained about. That is a convenience riding on top of the
+        // report, not the mechanism: jumpToLine() checks the document and does nothing if the line
+        // does not exist, and the report above says where to look either way.
+        jumpToLine(errorLine);
     }
     else
     {
         m_status->setText(ok ? tr("Compiled with warnings.")
-                             : tr("Compile FAILED. The previous shader is still rendering - fix the "
-                                  "error below and compile again."));
+                             : tr("Compile FAILED in %1. The previous shader is still rendering - fix "
+                                  "the error below and compile again.").arg(file));
     }
 }
 

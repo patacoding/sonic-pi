@@ -125,11 +125,16 @@ protected:
     void wheelEvent(QWheelEvent* event) override;
 
 private:
-    // Show the compiler's output. Empty text with ok true clears the report.
+    // Show the compiler's output, prefixed with where the problem is (file:line). Empty text with ok
+    // true clears the report.
     void showCompileReport(bool ok, const QString& compilerLog);
     // Put the cursor on `line` (1-based) and make sure it is visible. No-op for a line number that is
     // not in the document, because a diagnostic referring to a line the editor does not have would
     // otherwise move the cursor somewhere arbitrary and look like a bug.
+    //
+    // A convenience only: the report names the file and the line, so nothing is lost when this does
+    // nothing. It is also what has to learn about includes - a diagnostic inside an included library
+    // is not a line in this document at all (docs/shader-includes-plan.md 4).
     void jumpToLine(int line);
     // The file this window edits, resolved through GraphicsSettings so it is the same file the
     // renderer reads. Empty when it could not be produced.
@@ -149,10 +154,6 @@ private:
     QPlainTextEdit* m_report = nullptr;
     QLabel* m_status = nullptr;
     QPushButton* m_compileButton = nullptr;
-    // Enabled only when a line number was found, so a button that cannot work is not offered.
-    QPushButton* m_jumpButton = nullptr;
-    // The line the current report refers to, or 0 when the diagnostic named none.
-    int m_errorLine = 0;
 };
 
 } // namespace SonicPi
