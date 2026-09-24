@@ -71,6 +71,15 @@ struct Source
 // shipped with the source".
 using Resolver = std::function<Source(const QString& name, const QString& includingPath)>;
 
+// One file that was inlined: which one, and how much of it arrived. The two travel together
+// because a log line that named a file without saying how much of it was taken would not answer
+// "did the whole library come in?" - which is the question a reader has.
+struct Included
+{
+    QString path;
+    int lines = 0;
+};
+
 struct Result
 {
     bool ok = false;
@@ -78,9 +87,9 @@ struct Result
     QString text;
     // One line, for the user, when ok is false.
     QString error;
-    // Resolved paths, in the order they were first inlined. For the log line, and for the reader who
+    // What was inlined, in the order it was first inlined. For the log line, and for the reader who
     // wants to know what a shader actually pulled in.
-    QStringList included;
+    QList<Included> included;
     // The file behind each source-string number the driver will report. 0 is not in here: it is the
     // root, which the caller already knows.
     QHash<int, QString> fileBySourceString;
@@ -157,6 +166,16 @@ inline bool startsOrEndsInsideComment(const QString& line, bool inComment)
 }
 
 } // namespace detail
+
+// How many lines a file has, the way an editor counts them: a trailing newline ends the last line
+// rather than starting an empty one, and an empty file has none.
+inline int countLines(const QString& text)
+{
+    if (text.isEmpty())
+        return 0;
+    const int newlines = text.count(QLatin1Char('\n'));
+    return text.endsWith(QLatin1Char('\n')) ? newlines : newlines + 1;
+}
 
 // Expand every include in `source`, in place, depth first.
 //
@@ -315,7 +334,7 @@ inline Result expand(const QString& source, const QString& rootPath, const Resol
                         expanded.insert(found.path);
 
                         const int assigned = nextSourceString++;
-                        result.included << found.path;
+                        result.included.append(Included{ found.path, countLines(found.text) });
                         result.fileBySourceString.insert(assigned, found.path);
 
                         // The lines of the included file are numbered from 1 in the driver's

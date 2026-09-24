@@ -242,6 +242,17 @@ private:
     // Returns an empty string if neither contains the file.
     QString resolveShaderPath(const QString& fileName) const;
 
+    // Read a shader file and inline its `#include` directives, returning the source to compile.
+    //
+    // The driver has no include of its own (see graphics/ShaderInclude.h), so what is compiled is not
+    // what is on disk. One file, one expansion, and one line in the log naming what came in - the
+    // answer to "which library did that function come from" should not need a debugger.
+    //
+    // Returns false with `error` set, in the same shape as a compiler diagnostic
+    // ("file:line: what"), so a failure here reaches the user through exactly the channel a
+    // compile failure does.
+    bool readExpandedShader(const QString& path, QString* text, QString* error) const;
+
     // Look up the uniform locations this renderer feeds.
     //
     // Called once per successful link rather than per frame: glGetUniformLocation is

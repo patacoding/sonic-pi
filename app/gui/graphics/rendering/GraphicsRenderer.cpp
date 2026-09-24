@@ -16,6 +16,11 @@
 #include "GraphicsSettings.h"
 #include "GraphicsTarget.h"
 
+// The `#include` expander. Header-only, GL-free and widget-free, so the rules it implements are
+// tested on their own in tools/settings-probe/shader-include-check.cpp rather than through a build of
+// this application (docs/dev-discipline.md 4.1).
+#include "graphics/ShaderInclude.h"
+
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -25,6 +30,7 @@
 #include <QOpenGLFramebufferObjectFormat>
 #include <QOpenGLBuffer>
 #include <QOpenGLShaderProgram>
+#include <QStringList>
 #include <QVector2D>
 #include <QVector3D>
 #include <QVector4D>
@@ -274,6 +280,59 @@ QString GraphicsRenderer::resolveShaderPath(const QString& fileName) const
     return path;
 }
 
+bool GraphicsRenderer::readExpandedShader(const QString& path, QString* text, QString* error) const
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly))
+    {
+        *error = QObject::tr("Could not read %1: %2").arg(path, file.errorString());
+        return false;
+    }
+    const QString source = QString::fromUtf8(file.readAll());
+
+    // A name inside a directive resolves by exactly the same rule as the shader itself - the user's
+    // copy first, then the shipped one - because a library is edited in the same way and lives in the
+    // same place. A second search path here would eventually disagree with the first, and the symptom
+    // would be an edit to a library that has no effect.
+    const auto resolve = [](const QString& name, const QString&) -> ShaderInclude::Source {
+        ShaderInclude::Source found;
+        const QString resolved = GraphicsSettings::shaderPath(name);
+        if (resolved.isEmpty())
+            return found;   // found == false: the expander reports what it could not find
+        QFile included(resolved);
+        if (!included.open(QIODevice::ReadOnly))
+            return found;
+        found.found = true;
+        found.path = resolved;
+        found.text = QString::fromUtf8(included.readAll());
+        return found;
+    };
+
+    const ShaderInclude::Result expanded = ShaderInclude::expand(source, path, resolve);
+    if (!expanded.ok)
+    {
+        *error = expanded.error;
+        return false;
+    }
+
+    // One line per shader that has includes, saying what came in and how much of it. Silence when a
+    // shader has none: the common case is a shader with no libraries, and a line per reload about
+    // nothing is how a log stops being read. The counts are there because "did the whole library
+    // arrive?" is otherwise unanswerable without opening the file.
+    if (!expanded.included.isEmpty())
+    {
+        QStringList parts;
+        parts.reserve(expanded.included.size());
+        for (const ShaderInclude::Included& included : expanded.included)
+            parts << QStringLiteral("%1 (%2 lines)").arg(included.path).arg(included.lines);
+        GraphicsLog::info(QStringLiteral("shader: %1 includes  %2")
+                              .arg(path, parts.join(QStringLiteral("  "))));
+    }
+
+    *text = expanded.text;
+    return true;
+}
+
 GraphicsCompileResult GraphicsRenderer::buildProgram(const QString& vertexFile,
                                                      const QString& fragmentFile)
 {
@@ -294,16 +353,45 @@ GraphicsCompileResult GraphicsRenderer::buildProgram(const QString& vertexFile,
         return result;
     }
 
+    // Read and expand BEFORE Qt sees anything, because what the driver must compile is the file with
+    // its libraries inlined - not the file on disk. Source code rather than a file name, which is the
+    // only difference this makes to Qt; the shader text is then handled exactly as before
+    // (tools/settings-probe/gl-line-directive-probe.cpp compiles the same way, which is why its
+    // measurements apply here).
+    QString vertSource;
+    QString fragSource;
+    if (!readExpandedShader(vert, &vertSource, &result.log))
+    {
+        GraphicsLog::error(QStringLiteral("renderer: could not prepare the vertex shader %1\n%2")
+                               .arg(vert, result.log));
+        return result;
+    }
+    if (!readExpandedShader(frag, &fragSource, &result.log))
+    {
+        // An include that cannot be resolved is a failure of the same kind as a syntax error, so it
+        // travels the same way: named, explained, and without touching the running program. The
+        // directories are appended here rather than in the expander because the expander has no
+        // search path of its own - it is handed a resolver - and a user who cannot find a file needs
+        // to see where it was looked for.
+        result.log = QObject::tr("%1\n\nLooked in:\n  %2\n  %3")
+                         .arg(result.log,
+                              GraphicsSettings::shaderDirectoryPath(),
+                              QStringLiteral(GRAPHICS_SHADER_DIR) + QLatin1Char('/'));
+        GraphicsLog::error(
+            QStringLiteral("renderer: could not expand the includes in %1\n%2").arg(frag, result.log));
+        return result;
+    }
+
     auto program = std::make_unique<QOpenGLShaderProgram>();
 
-    if (!program->addShaderFromSourceFile(QOpenGLShader::Vertex, vert))
+    if (!program->addShaderFromSourceCode(QOpenGLShader::Vertex, vertSource))
     {
         result.log = program->log();
         GraphicsLog::error(QStringLiteral("renderer: vertex shader failed to compile (%1)\n%2")
                                .arg(vert, result.log));
         return result;
     }
-    if (!program->addShaderFromSourceFile(QOpenGLShader::Fragment, frag))
+    if (!program->addShaderFromSourceCode(QOpenGLShader::Fragment, fragSource))
     {
         result.log = program->log();
         GraphicsLog::error(QStringLiteral("renderer: fragment shader failed to compile (%1)\n%2")
@@ -434,11 +522,19 @@ bool GraphicsRenderer::installFallbackShader()
     // The vertex half comes from the shipped tree rather than a literal, because the quad's attribute
     // locations have to match the geometry this renderer already built - and that contract lives in
     // passthrough.vert. If even that is unreadable, there is nothing sensible left to do.
+    //
+    // Read and expanded through the same path as the normal load. Not because a fallback shader pair
+    // is likely to have includes, but because "how a shader file is turned into source" must have one
+    // answer: two would eventually differ, and this is the code path nobody exercises.
     const QString vert = resolveShaderPath(QStringLiteral("passthrough.vert"));
-    if (vert.isEmpty() || !program->addShaderFromSourceFile(QOpenGLShader::Vertex, vert))
+    QString vertSource;
+    QString vertError;
+    if (vert.isEmpty() || !readExpandedShader(vert, &vertSource, &vertError)
+        || !program->addShaderFromSourceCode(QOpenGLShader::Vertex, vertSource))
     {
         GraphicsLog::error(QStringLiteral("renderer: the fallback shader could not be built either; "
-                                          "the output will be a flat clear colour"));
+                                          "the output will be a flat clear colour (%1)")
+                               .arg(vertError.isEmpty() ? program->log() : vertError));
         return false;
     }
     if (!program->addShaderFromSourceCode(QOpenGLShader::Fragment, kFallbackFragmentShader)
