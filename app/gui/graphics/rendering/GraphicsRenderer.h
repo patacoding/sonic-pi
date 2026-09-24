@@ -81,6 +81,16 @@ struct GraphicsCompileResult
     QString errorFile;
     int errorLine = 0;
 
+    // What this compile actually READ: the buffer's own #include chain, in the order it was inlined, each
+    // entry named the way a report names files ("lib/noise.frag (18 lines)"). Empty means the buffer has
+    // no includes at all - which is itself the answer to a question worth answering.
+    //
+    // Carried out of here because a SUCCESSFUL build is otherwise silent, and silence is the wrong answer
+    // to what a library asks: "did my edit reach the picture?" There is nowhere else to ask it - library
+    // files are never checked on their own (docs/shader-includes-plan.md 3.2.1), so this compile is a
+    // library's only chance to be seen, and a library that is not in this list was not compiled at all.
+    QStringList includedShaders;
+
     bool ok() const { return program != nullptr || installed; }
 };
 
@@ -310,7 +320,8 @@ private:
     // compile failure does. `fileBySourceString` receives the table the diagnostics will need to be
     // attributed: which source string number each inlined file was given.
     bool readExpandedShader(const QString& path, QString* text, QString* error,
-                            QHash<int, QString>* fileBySourceString = nullptr) const;
+                            QHash<int, QString>* fileBySourceString = nullptr,
+                            QStringList* includedShaders = nullptr) const;
 
     // Look up the uniform locations this renderer feeds.
     //

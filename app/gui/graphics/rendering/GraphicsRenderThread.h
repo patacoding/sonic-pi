@@ -277,8 +277,13 @@ signals:
     // number to a file belongs to the compile that produced it. The editor needs it for one decision
     // it cannot make from the text - whether the line it is being told about is a line of the document
     // it is showing. Empty and 0 when no diagnostic named a position.
+    //
+    // `includedShaders` is what the compile READ: the #include chain, in the order it was inlined, each
+    // entry named the way a report names files. It arrives on success as well as failure, because a
+    // successful build is otherwise silent - and since library files are never checked on their own, this
+    // list is the only place a library's presence or absence is ever visible.
     void shaderCompileFinished(bool ok, const QString& compilerLog, const QString& errorFile,
-                               int errorLine);
+                               int errorLine, const QStringList& includedShaders);
 
 protected:
     void run() override;

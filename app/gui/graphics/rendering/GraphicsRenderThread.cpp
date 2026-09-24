@@ -448,7 +448,7 @@ void GraphicsRenderThread::applyShaderCompile()
                                           "'%2'").arg(wanted, current));
         emit shaderCompileFinished(false,
                                    tr("Could not prepare a renderer for buffer \"%1\".").arg(wanted),
-                                   QString(), 0);
+                                   QString(), 0, QStringList());
         return;
     }
 
@@ -459,10 +459,13 @@ void GraphicsRenderThread::applyShaderCompile()
     {
         // The promise, in the user's words: the picture does not change. The compiler's own words go
         // back to whoever asked - the editor, which shows them where the user is looking - because a
-        // failure that only reaches a log file is a failure the user retries blindly.
+        // failure that only reaches a log file is a failure the user retries blindly. What WAS read comes
+        // with them: a failure inside a library is only readable next to the fact that the library was
+        // read at all.
         GraphicsLog::warn(QStringLiteral("compile: buffer '%1' did not build; still rendering '%2' "
                                          "(%3ms)").arg(wanted, current).arg(t.elapsed()));
-        emit shaderCompileFinished(false, result.log, result.errorFile, result.errorLine);
+        emit shaderCompileFinished(false, result.log, result.errorFile, result.errorLine,
+                                   result.includedShaders);
         return;
     }
 
@@ -478,7 +481,7 @@ void GraphicsRenderThread::applyShaderCompile()
     }
 
     GraphicsLog::info(QStringLiteral("compile: buffer '%1' is on screen (%2ms)").arg(wanted).arg(t.elapsed()));
-    emit shaderCompileFinished(true, QString(), QString(), 0);
+    emit shaderCompileFinished(true, QString(), QString(), 0, result.includedShaders);
 }
 
 void GraphicsRenderThread::installDebugLogger()

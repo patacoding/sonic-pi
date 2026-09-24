@@ -122,8 +122,9 @@ public slots:
     //
     // `errorFile` is named the way ShaderText::diagnosticName() names files - relative to the shader
     // directory when it is inside it - which is what makes it comparable with this window's own file.
+    // `includedShaders` is what the compile read: the #include chain, for the report.
     void compileFinished(bool ok, const QString& compilerLog, const QString& errorFile,
-                         int errorLine);
+                         int errorLine, const QStringList& includedShaders);
 
 protected:
     void closeEvent(QCloseEvent* e) override;
@@ -144,7 +145,8 @@ private:
     // switching tabs brings that buffer's report back with it. One shared pane would show a stale error
     // from another shader beside code it has nothing to do with.
     void showCompileReport(bool ok, const QString& compilerLog, const QString& errorFile,
-                           int errorLine, const QString& shaderName = QString());
+                           int errorLine, const QString& shaderName = QString(),
+                           const QStringList& includedShaders = QStringList());
     // Put the cursor on `line` (1-based) and make sure it is visible. No-op for a line number that is
     // not in the document, because a diagnostic referring to a line the editor does not have would
     // otherwise move the cursor somewhere arbitrary and look like a bug.

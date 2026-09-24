@@ -914,7 +914,8 @@ void ShaderBufferWindow::compile()
 }
 
 void ShaderBufferWindow::compileFinished(bool ok, const QString& compilerLog,
-                                         const QString& errorFile, int errorLine)
+                                         const QString& errorFile, int errorLine,
+                                         const QStringList& includedShaders)
 {
     // Filed against the buffer the request named, which is not necessarily the tab on screen now.
     const QString name = m_compilingShaderName.isEmpty()
@@ -931,7 +932,7 @@ void ShaderBufferWindow::compileFinished(bool ok, const QString& compilerLog,
     if (ok && name == m_compilingShaderName)
         GraphicsSettings::setActiveShaderName(name);
 
-    showCompileReport(ok, compilerLog, errorFile, errorLine, name);
+    showCompileReport(ok, compilerLog, errorFile, errorLine, name, includedShaders);
 }
 
 // Import a fragment shader from an arbitrary file.
@@ -1038,7 +1039,8 @@ bool ShaderBufferWindow::exportTo(const QString& chosenName)
 
 void ShaderBufferWindow::showCompileReport(bool ok, const QString& compilerLog,
                                            const QString& errorFile, int errorLine,
-                                           const QString& shaderName)
+                                           const QString& shaderName,
+                                           const QStringList& includedShaders)
 {
     // Which buffer this report is about: the one named, or - for the window's own messages, like "the
     // render loop is not running" - whichever buffer is being edited.
@@ -1046,7 +1048,18 @@ void ShaderBufferWindow::showCompileReport(bool ok, const QString& compilerLog,
 
     if (ok && compilerLog.isEmpty())
     {
-        m_reports.insert(name, QString());
+        // WHAT THE COMPILE READ, on success. Not decoration: a successful build says nothing about where
+        // the code came from, and since a library file is never checked on its own, this list is the only
+        // place a library's presence - or its absence - can be seen. "I edited lib/noise.frag and the
+        // picture changed" and "I edited a library this buffer does not include" look identical without
+        // it.
+        const QString what = includedShaders.isEmpty()
+                                 ? tr("%1\n  no #include in this buffer: nothing else was compiled.")
+                                       .arg(GraphicsSettings::fragmentFileName(name))
+                                 : tr("%1\n  includes: %2")
+                                       .arg(GraphicsSettings::fragmentFileName(name),
+                                            includedShaders.join(QStringLiteral(", ")));
+        m_reports.insert(name, what);
         m_statusByBuffer.insert(name, tr("On screen. %1 is the picture now.").arg(name));
         if (name == editingShaderName())
             showCurrentBuffer();
@@ -1092,8 +1105,14 @@ void ShaderBufferWindow::showCompileReport(bool ok, const QString& compilerLog,
     // The compiler's text is shown verbatim below the location. It is not reformatted, not summarised
     // and not translated: a driver's diagnostic is the single most useful thing in this window, and
     // paraphrasing it would lose the part that matters.
-    m_reports.insert(name, errorLine > 0 ? QStringLiteral("%1\n\n%2").arg(where, compilerLog)
-                                         : compilerLog);
+    //
+    // What the compile READ is appended when there was anything to read: on a failure it says which
+    // libraries were inlined before it went wrong, which is how a diagnostic attributed to one library is
+    // told apart from a mistake in the buffer itself.
+    QString text = errorLine > 0 ? QStringLiteral("%1\n\n%2").arg(where, compilerLog) : compilerLog;
+    if (!includedShaders.isEmpty())
+        text += QStringLiteral("\n\nincludes: %1").arg(includedShaders.join(QStringLiteral(", ")));
+    m_reports.insert(name, text);
 
     // The picture is NOT lost, and the status says so in those words: "still rendering X" is the
     // reassurance the user needs when their edit was refused, and it is the sentence that turns a wall

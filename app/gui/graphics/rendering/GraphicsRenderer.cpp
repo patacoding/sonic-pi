@@ -324,7 +324,8 @@ QString GraphicsRenderer::resolveShaderPath(const QString& fileName) const
 }
 
 bool GraphicsRenderer::readExpandedShader(const QString& path, QString* text, QString* error,
-                                          QHash<int, QString>* fileBySourceString) const
+                                          QHash<int, QString>* fileBySourceString,
+                                          QStringList* includedShaders) const
 {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly))
@@ -397,6 +398,21 @@ bool GraphicsRenderer::readExpandedShader(const QString& path, QString* text, QS
                               .arg(path, parts.join(QStringLiteral("  "))));
     }
 
+    // The same list for the REPORT, named relative to the shader directory rather than by absolute path:
+    // the log wants the unambiguous path, the window wants the name the user types in the directive.
+    // The counts travel with it (see GraphicsCompileResult::includedShaders for why this is carried at
+    // all).
+    if (includedShaders)
+    {
+        includedShaders->clear();
+        includedShaders->reserve(expanded.included.size());
+        for (const ShaderInclude::Included& included : expanded.included)
+            includedShaders->append(QStringLiteral("%1 (%2 lines)")
+                                        .arg(ShaderText::diagnosticName(
+                                                 included.path, GraphicsSettings::shaderDirectoryPath()))
+                                        .arg(included.lines));
+    }
+
     *text = expanded.text;
     if (fileBySourceString)
         *fileBySourceString = expanded.fileBySourceString;
@@ -438,7 +454,8 @@ GraphicsCompileResult GraphicsRenderer::buildProgram(const QString& vertexFile,
                                .arg(vert, result.log));
         return result;
     }
-    if (!readExpandedShader(frag, &fragSource, &result.log, &fragSourceStrings))
+    if (!readExpandedShader(frag, &fragSource, &result.log, &fragSourceStrings,
+                            &result.includedShaders))
     {
         // An include that cannot be resolved is a failure of the same kind as a syntax error, so it
         // travels the same way: named, explained, and without touching the running program.
