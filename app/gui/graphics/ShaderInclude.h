@@ -60,15 +60,31 @@ namespace ShaderInclude
 struct Source
 {
     bool found = false;
-    QString path;   // identity used for de-duplication and in the report; may be a bare name
+    // Identity used for de-duplication and in the report. It should be the CANONICAL path of the file,
+    // because two spellings of one file ("lib/a.frag" and "./lib/a.frag", or a difference of case on
+    // Windows) are one file and would otherwise be inlined twice - which is a redefinition error that
+    // reads as if the user wrote the same function twice.
+    QString path;
     QString text;
+    // Why not, when the resolver can say something more specific than "cannot find" - an absolute path,
+    // say, which is never used here. The expander prefixes this with the file and line, so the user is
+    // told where the mistake is written and what is wrong with it.
+    QString error;
 };
 
-// Resolve the name written in the directive, relative to the file that wrote it.
+// Resolve the name written in a directive.
 //
-// The caller owns the search path; the expander knows nothing about directories. In the application
-// this is GraphicsSettings::shaderPath(), which already means "the user's copy first, then the copy
-// shipped with the source".
+// THE RULE, and there is only one: a name is a path RELATIVE TO THE FILE BEING COMPILED (the root of
+// the expansion), and nothing else is searched. Not the including file's own directory, not a search
+// path, not the source tree. One base directory, stated in the report whenever resolution fails, and
+// the user is left to organise the files - which is the whole of the design (KISS: the directory IS
+// the library).
+//
+// `includingPath` is passed for the message, not for the lookup: with one base directory it cannot
+// change the answer, and it is what lets the report name the file that wrote the directive.
+//
+// The expander itself knows nothing about directories: reading files is the caller's job, which is
+// what lets the probe run the whole thing in memory (docs/dev-discipline.md 4.1).
 using Resolver = std::function<Source(const QString& name, const QString& includingPath)>;
 
 // One file that was inlined: which one, and how much of it arrived. The two travel together
@@ -225,6 +241,17 @@ inline Result expand(const QString& source, const QString& rootPath, const Resol
     QStringList stack;
     stack << rootPath;
 
+    // Every refusal below reports the same three things: WHERE the directive is written, WHAT is wrong
+    // with it, and the CHAIN of includes that led there. The chain is not decoration: with libraries
+    // including other libraries, "cannot find lib/noise.frag" is a question about which file to open
+    // and fix, and the answer is the last name in the chain.
+    const auto failure = [&stack](const QString& file, int line, const QString& what) {
+        return QStringLiteral("%1:%2: %3\n  include chain: %4")
+            .arg(file)
+            .arg(line)
+            .arg(what, stack.join(QStringLiteral(" -> ")));
+    };
+
     // Depth-first, writing into `out`. Returns false with result.error set on the first problem.
     std::function<bool(const QString&, const QString&, int, bool)> expandInto;
 
@@ -254,9 +281,9 @@ inline Result expand(const QString& source, const QString& rootPath, const Resol
                 {
                     // Meant as an include, is not one. Saying so beats handing the driver an unknown
                     // directive and reporting whatever it makes of that.
-                    result.error = QStringLiteral("%1:%2: #include needs a file name in quotes, as in "
-                                                  "#include \"common.frag\"")
-                                       .arg(file).arg(lineNumber);
+                    result.error = failure(file, lineNumber,
+                                           QStringLiteral("#include needs a file name in quotes, as in "
+                                                          "#include \"common.frag\""));
                     return false;
                 }
 
@@ -267,8 +294,8 @@ inline Result expand(const QString& source, const QString& rootPath, const Resol
 
                     if (name.isEmpty())
                     {
-                        result.error = QStringLiteral("%1:%2: #include needs a file name")
-                                           .arg(file).arg(lineNumber);
+                        result.error = failure(file, lineNumber,
+                                               QStringLiteral("#include needs a file name"));
                         return false;
                     }
 
@@ -276,28 +303,33 @@ inline Result expand(const QString& source, const QString& rootPath, const Resol
                     // requires it first, and an expansion above it would break that quietly.
                     if (isRoot && rootVersionLine > 0 && lineNumber < rootVersionLine)
                     {
-                        result.error = QStringLiteral(
-                                           "%1:%2: #include comes before #version. GLSL requires "
-                                           "#version to be the first thing in the shader, so move the "
-                                           "include below it.")
-                                           .arg(file).arg(lineNumber);
+                        result.error = failure(file, lineNumber,
+                                               QStringLiteral("#include comes before #version. GLSL "
+                                                              "requires #version to be the first thing "
+                                                              "in the shader, so move the include below "
+                                                              "it."));
                         return false;
                     }
 
                     const Source found = resolve(name, file);
                     if (!found.found)
                     {
-                        result.error = QStringLiteral("%1:%2: cannot find \"%3\"")
-                                           .arg(file).arg(lineNumber).arg(name);
+                        // A resolver that can say something specific (an absolute path, say) is
+                        // preferred over the generic message: it is the difference between "I cannot
+                        // find it" and "this is not how files are named here".
+                        result.error = failure(file, lineNumber,
+                                               found.error.isEmpty()
+                                                   ? QStringLiteral("cannot find \"%1\"").arg(name)
+                                                   : found.error);
                         return false;
                     }
 
                     // A directive that closes with the other delimiter is a typo, not a lookup.
                     if (delimiter == QLatin1String("<") && !line.contains(QLatin1Char('>')))
                     {
-                        result.error = QStringLiteral("%1:%2: #include \"%3\" is missing its closing "
-                                                      "bracket")
-                                           .arg(file).arg(lineNumber).arg(name);
+                        result.error = failure(file, lineNumber,
+                                               QStringLiteral("#include \"%1\" is missing its closing "
+                                                              "bracket").arg(name));
                         return false;
                     }
 
@@ -319,11 +351,11 @@ inline Result expand(const QString& source, const QString& rootPath, const Resol
 
                     if (!duplicate && detail::versionDirective().match(found.text).hasMatch())
                     {
-                        result.error = QStringLiteral(
-                                           "%1:%2: \"%3\" contains a #version directive. GLSL allows "
-                                           "only one, and it belongs to the shader being compiled, so "
-                                           "an included file must not have one.")
-                                           .arg(file).arg(lineNumber).arg(found.path);
+                        result.error = failure(file, lineNumber,
+                                               QStringLiteral("\"%1\" contains a #version directive. "
+                                                              "GLSL allows only one, and it belongs to "
+                                                              "the shader being compiled, so an included "
+                                                              "file must not have one.").arg(found.path));
                         return false;
                     }
 

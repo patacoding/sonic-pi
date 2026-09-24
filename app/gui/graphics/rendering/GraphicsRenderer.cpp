@@ -294,20 +294,44 @@ bool GraphicsRenderer::readExpandedShader(const QString& path, QString* text, QS
     }
     const QString source = QString::fromUtf8(file.readAll());
 
-    // A name inside a directive resolves by exactly the same rule as the shader itself - the user's
-    // copy first, then the shipped one - because a library is edited in the same way and lives in the
-    // same place. A second search path here would eventually disagree with the first, and the symptom
-    // would be an edit to a library that has no effect.
-    const auto resolve = [](const QString& name, const QString&) -> ShaderInclude::Source {
+    // THE ONE RULE for `#include`: a name is a path relative to the file being compiled, and nothing
+    // else is searched. Not the including file's own directory, not a search path, not the shipped copy
+    // of anything. One base directory, named in the report whenever resolution fails, so "where is it
+    // looking?" is never something the user has to guess.
+    //
+    // Handing file layout to the user is the point (KISS): the directory IS the library, one name means
+    // one file, and there is no second place anything could come from.
+    const QDir rootDirectory = QFileInfo(path).absoluteDir();
+
+    const auto resolve = [rootDirectory](const QString& name,
+                                         const QString&) -> ShaderInclude::Source {
         ShaderInclude::Source found;
-        const QString resolved = GraphicsSettings::shaderPath(name);
-        if (resolved.isEmpty())
+
+        // Said specifically rather than left to the generic "cannot find": an absolute path is not a
+        // missing file, it is a misunderstanding of the rule, and the message should state the rule.
+        if (QDir::isAbsolutePath(name))
+        {
+            found.error = QObject::tr("\"%1\" is an absolute path. #include takes a path relative to "
+                                      "the file being compiled.").arg(name);
+            return found;
+        }
+
+        const QString candidate = rootDirectory.absoluteFilePath(name);
+        const QFileInfo info(candidate);
+        if (!info.exists() || !info.isFile())
             return found;   // found == false: the expander reports what it could not find
-        QFile included(resolved);
+
+        QFile included(candidate);
         if (!included.open(QIODevice::ReadOnly))
             return found;
+
         found.found = true;
-        found.path = resolved;
+        // The canonical path is the identity, so two spellings of one file - "lib/a.frag" and
+        // "./lib/a.frag", or a difference of case on Windows - are recognised as one file and inlined
+        // once. Without it the second spelling looks like a second file, and the driver reports a
+        // redefinition of functions the user wrote only once.
+        const QString canonical = info.canonicalFilePath();
+        found.path = canonical.isEmpty() ? candidate : canonical;
         found.text = QString::fromUtf8(included.readAll());
         return found;
     };
@@ -377,14 +401,13 @@ GraphicsCompileResult GraphicsRenderer::buildProgram(const QString& vertexFile,
     if (!readExpandedShader(frag, &fragSource, &result.log, &fragSourceStrings))
     {
         // An include that cannot be resolved is a failure of the same kind as a syntax error, so it
-        // travels the same way: named, explained, and without touching the running program. The
-        // directories are appended here rather than in the expander because the expander has no
-        // search path of its own - it is handed a resolver - and a user who cannot find a file needs
-        // to see where it was looked for.
-        result.log = QObject::tr("%1\n\nLooked in:\n  %2\n  %3")
-                         .arg(result.log,
-                              GraphicsSettings::shaderDirectoryPath(),
-                              QStringLiteral(GRAPHICS_SHADER_DIR) + QLatin1Char('/'));
+        // travels the same way: named, explained, and without touching the running program.
+        //
+        // The directory is appended here rather than in the expander, because the expander has no
+        // search path of its own - it is handed a resolver. It is a single directory now, and saying
+        // which one it is the whole answer to "where was it looking?".
+        result.log = QObject::tr("%1\n  #include paths are relative to: %2")
+                         .arg(result.log, QFileInfo(frag).absolutePath());
         GraphicsLog::error(
             QStringLiteral("renderer: could not expand the includes in %1\n%2").arg(frag, result.log));
         return result;
