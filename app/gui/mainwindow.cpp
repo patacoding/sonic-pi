@@ -2737,8 +2737,13 @@ void MainWindow::honourPrefs()
     // Make sure the editable shader exists before anything asks to open or compile it. Done once at
     // boot rather than on first use, so the file the editor writes and the renderer reads exists
     // before either has a chance to disagree about which one that is.
+    //
+    // The file comes from the buffer's NAME, and the name is asked of the render thread - the same
+    // place the editor asks - so "the file I am editing" and "the file being rendered" cannot end up
+    // being two different files.
     if (graphicsRenderThread)
-        SonicPi::GraphicsSettings::ensureShaderFile(QStringLiteral("default.frag"));
+        SonicPi::GraphicsSettings::ensureShaderFile(SonicPi::GraphicsSettings::fragmentFileName(
+            graphicsRenderThread->shaderName()));
 
     changeShowAutoCompletion();
     changeShowCompletionHelp();
@@ -4147,7 +4152,8 @@ void MainWindow::showShaderBuffer()
             return;
         }
 
-        const QString seeded = SonicPi::GraphicsSettings::ensureShaderFile(QStringLiteral("default.frag"));
+        const QString seeded = SonicPi::GraphicsSettings::ensureShaderFile(
+            SonicPi::GraphicsSettings::fragmentFileName(graphicsRenderThread->shaderName()));
         if (seeded.isEmpty())
             SonicPi::GraphicsLog::warn(QStringLiteral("shader buffer: no shader file could be produced; "
                                                       "the editor will show whatever it can read"));

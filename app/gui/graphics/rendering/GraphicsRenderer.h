@@ -34,6 +34,9 @@
 // For GraphicsOsc::Target, the mapping from a GL type to what OSC may drive it with. Widget-free
 // and GL-free, and exercised on its own by tools/settings-probe/uniform-introspect.cpp.
 #include "graphics/osc/GraphicsUniformMessage.h"
+// For the buffer's name-to-file rule. Widget-free and GL-free: the same module the editor uses, so
+// the renderer and the editor cannot disagree about which file a name means.
+#include "GraphicsSettings.h"
 
 class QOpenGLFramebufferObject;
 
@@ -108,6 +111,18 @@ public:
     // Builds the quad geometry and loads the shader files. Requires a current
     // context. Returns false and logs why on failure.
     bool initialize();
+
+    // Which buffer this renderer compiles.
+    //
+    // The name travels IN rather than being written into the compile, because which buffer this is
+    // should not be the renderer's private knowledge: it decides the fragment file that is read
+    // ("<name>.frag"), it is what the log lines name - so a picture showing the wrong buffer can be
+    // told apart from one showing the right buffer twice - and it is exactly what a second buffer
+    // would have to change.
+    //
+    // Set before initialize(). The default is the buffer a fresh session renders.
+    void setShaderName(const QString& name);
+    QString shaderName() const { return m_shaderName; }
 
     // Release the GL objects now, while the caller can still make the owning
     // context current. Calling this is optional - the destructor does the same -
@@ -350,6 +365,9 @@ private:
     QElapsedTimer m_unmatchedTimer;
 
     std::unique_ptr<QOpenGLShaderProgram>     m_program;
+    // Which buffer is compiled: the identity that decides the fragment file, and nothing else about
+    // the pipeline. A second buffer is a second renderer, not a second copy of this.
+    QString m_shaderName = GraphicsSettings::defaultShaderName();
     // Holds the quad's attribute bindings. A core-profile draw call needs one bound
     // even when the shader derives its own coordinates: without it glDrawArrays
     // raises GL_INVALID_OPERATION (0x502).

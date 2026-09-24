@@ -158,6 +158,14 @@ public:
     bool contextIsValid() const { return m_contextOk; }
     QString rendererName() const { return m_renderer; }
 
+    // Which buffer this thread renders, and therefore which file the renderer compiles and the editor
+    // opens. The thread is the live answer to "what is on screen" - the configured name is only where a
+    // session starts - so anything that needs to agree with the picture asks here.
+    //
+    // Must be set before start(): the renderer is created on the thread and takes the name with it.
+    void setShaderName(const QString& name);
+    QString shaderName() const { return m_shaderName; }
+
     // Result of the Phase 0 framebuffer readback check. False if the check did
     // not run, so a caller cannot mistake "not attempted" for "passed".
     bool renderVerified() const { return m_renderVerified; }
@@ -368,6 +376,11 @@ private:
     // that draws.
     QString m_renderer;
     QString m_version;
+
+    // Which buffer is being rendered. Set before start(), read from anywhere: written once at setup,
+    // read by the GUI to name the file it edits, so a plain member is enough (M2's switching will have
+    // to make it atomic or guarded, and that is a change worth making only when it is needed).
+    QString m_shaderName = GraphicsSettings::defaultShaderName();
 
     // Loop state. Written by the render thread, read by anyone.
     std::atomic<bool>      m_reloadRequested{false};

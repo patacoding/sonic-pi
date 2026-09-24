@@ -55,6 +55,13 @@ int toByte(float v)
     return int(std::lround(double(v) * 255.0));
 }
 
+// The vertex half is shared by every buffer.
+//
+// It is the quad and the attribute locations the pipeline already built against - a contract, not
+// something a buffer owns. Only the fragment carries the buffer's name, which is what makes the name
+// mean one thing: a buffer is a fragment shader.
+constexpr const char* kVertexShaderFile = "passthrough.vert";
+
 // GRAPHICS_SHADER_DIR is defined by CMake for every target in this directory, so the same fallback
 // definition is repeated here only for the case where this file is compiled without it. The shader
 // PATHS themselves are owned by GraphicsSettings, which is what resolveShaderPath() delegates to.
@@ -486,20 +493,30 @@ std::unique_ptr<QOpenGLShaderProgram> GraphicsRenderer::buildSelfTestProgram()
     return program;
 }
 
+void GraphicsRenderer::setShaderName(const QString& name)
+{
+    // An empty name would compile an empty file name and report a missing file that the user never
+    // asked for, so it falls back rather than propagating the mistake.
+    m_shaderName = name.isEmpty() ? GraphicsSettings::defaultShaderName() : name;
+}
+
 GraphicsCompileResult GraphicsRenderer::compileReplacement()
 {
-    const QString vertexFile = QStringLiteral("passthrough.vert");
-    const QString fragmentFile = QStringLiteral("default.frag");
+    // Both halves come from names rather than from literals written here: the buffer's own name for the
+    // fragment, and the shared name for the vertex. This is what "the identity travels" means in
+    // practice - a second buffer changes the name, not this function.
+    const QString vertexFile = QString::fromLatin1(kVertexShaderFile);
+    const QString fragmentFile = GraphicsSettings::fragmentFileName(m_shaderName);
 
     GraphicsCompileResult result = buildProgram(vertexFile, fragmentFile);
     if (!result.ok())
     {
-        // Names the file and states that the previous program survives, so a compile failure cannot
-        // be mistaken for a reload that never arrived. The same explanation goes to the user through
-        // the returned log; this is the record.
+        // Names the buffer and the file, and states that the previous program survives, so a compile
+        // failure cannot be mistaken for a reload that never arrived. The same explanation goes to the
+        // user through the returned log; this is the record.
         GraphicsLog::error(QStringLiteral("shader load FAILED; keeping the previous program. "
-                                          "fragment file was: %1")
-                               .arg(result.fragmentPath));
+                                          "buffer was: %1  fragment file was: %2")
+                               .arg(m_shaderName, result.fragmentPath));
         return result;
     }
 
@@ -509,7 +526,8 @@ GraphicsCompileResult GraphicsRenderer::compileReplacement()
     // compare these against the file on disk. Two rounds of explaining "editing has no effect" would
     // have been settled by these two numbers.
     const QFileInfo fragInfo(result.fragmentPath);
-    GraphicsLog::info(QStringLiteral("shader: compiled  fragment=%1  bytes=%2  mtime=%3")
+    GraphicsLog::info(QStringLiteral("shader: compiled  buffer=%1  fragment=%2  bytes=%3  mtime=%4")
+                          .arg(m_shaderName)
                           .arg(result.fragmentPath)
                           .arg(fragInfo.size())
                           .arg(fragInfo.lastModified().toString(QStringLiteral("HH:mm:ss.zzz"))));
@@ -526,8 +544,10 @@ void GraphicsRenderer::adoptProgram(std::unique_ptr<QOpenGLShaderProgram> progra
     // locations that belong to it must never be out of step - the failure that made
     // the picture freeze while every log line said the reload had succeeded.
     m_program = std::move(program);
-    m_vertexPath = resolveShaderPath(QStringLiteral("passthrough.vert"));
-    m_fragmentPath = resolveShaderPath(QStringLiteral("default.frag"));
+    // Resolved from the same two names the compile used, so the paths reported to the user cannot
+    // describe a different file from the one that was built.
+    m_vertexPath = resolveShaderPath(QString::fromLatin1(kVertexShaderFile));
+    m_fragmentPath = resolveShaderPath(GraphicsSettings::fragmentFileName(m_shaderName));
     cacheUniformLocations();
 }
 
@@ -576,7 +596,7 @@ bool GraphicsRenderer::installFallbackShader()
     // Read and expanded through the same path as the normal load. Not because a fallback shader pair
     // is likely to have includes, but because "how a shader file is turned into source" must have one
     // answer: two would eventually differ, and this is the code path nobody exercises.
-    const QString vert = resolveShaderPath(QStringLiteral("passthrough.vert"));
+    const QString vert = resolveShaderPath(QString::fromLatin1(kVertexShaderFile));
     QString vertSource;
     QString vertError;
     if (vert.isEmpty() || !readExpandedShader(vert, &vertSource, &vertError)

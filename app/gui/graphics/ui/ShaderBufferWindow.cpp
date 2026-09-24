@@ -47,10 +47,6 @@ namespace SonicPi
 
 namespace
 {
-// The fragment shader is the one this feature renders, and it is the file the renderer reads. Named
-// here as a constant so the window and the renderer cannot ask for different files.
-const char* kFragmentShaderFile = "default.frag";
-
 // Put the editing keys back on THIS editor's Scintilla commands.
 //
 // SonicPiScintilla's constructor calls standardCommands()->clearKeys() and re-adds only the
@@ -326,7 +322,15 @@ QString ShaderBufferWindow::shaderFilePath() const
 {
     // Through GraphicsSettings, so this is the same file the renderer reads. Resolving it here by a
     // second route is the mistake that would make editing appear to do nothing.
-    return GraphicsSettings::writableShaderPath(QString::fromLatin1(kFragmentShaderFile));
+    //
+    // The NAME comes from the render thread rather than from a constant in this file: the buffer being
+    // rendered is the buffer being edited, so asking the thing that renders it makes that true by
+    // construction instead of by convention. (When the editor can hold a buffer that is not the one
+    // rendering - M3 - this becomes the editor's own fact and the render thread stops being the right
+    // source. Today there is one buffer, and this is the one that cannot drift.)
+    const QString name = m_renderThread ? m_renderThread->shaderName()
+                                        : GraphicsSettings::defaultShaderName();
+    return GraphicsSettings::writableShaderPath(GraphicsSettings::fragmentFileName(name));
 }
 
 void ShaderBufferWindow::reloadFromDisk()
@@ -347,7 +351,13 @@ void ShaderBufferWindow::reloadFromDisk()
     m_editor->setText(text);
     showCompileReport(true, QString(), QString(), 0);
     m_status->setText(tr("Loaded %1").arg(path));
-    GraphicsLog::info(QStringLiteral("shader buffer: loaded %1 (%2 bytes)").arg(path).arg(text.size()));
+    // The buffer's name as well as its path: with a second buffer coming, "which one is this" is the
+    // first thing a log reader needs, and the name is the identity the rest of the feature uses.
+    GraphicsLog::info(QStringLiteral("shader buffer: editing buffer '%1' -> %2 (%3 bytes)")
+                          .arg(m_renderThread ? m_renderThread->shaderName()
+                                              : GraphicsSettings::defaultShaderName(),
+                               path)
+                          .arg(text.size()));
 }
 
 void ShaderBufferWindow::compile()

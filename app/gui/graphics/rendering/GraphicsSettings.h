@@ -108,6 +108,30 @@ bool parseFrameRateHz(const QString& text, int* hzOut);
 // settings that already belong to this feature.
 QString shaderDirectoryPath();
 
+// ---------------------------------------------------------------------------------------------
+// The buffer's NAME, which is its identity.
+//
+// A buffer is its file, so the name is the file's stem: "default" is default.frag. That is what makes
+// the name worth carrying around instead of the path - `graphics/buffer/default/uniform` says which
+// buffer in a way a path never would - and it keeps one question from becoming two: "which buffer am
+// I editing" and "which file is on disk" have the same answer by construction.
+//
+// The name travels: main() reads the configured one, the render thread holds what is actually being
+// rendered, the renderer compiles it, and the editor opens it. This module owns the name-to-file rule
+// because it already owns the paths; a rule resolved in two places is the failure described above.
+// ---------------------------------------------------------------------------------------------
+
+// The name of the buffer a fresh session renders. With one buffer this is the whole story; when there
+// are several, the stored choice replaces it (graphics-multi-buffer-plan.md, M2/M3).
+inline QString defaultShaderName()
+{
+    return QStringLiteral("default");
+}
+
+// "default" -> "default.frag". The one place the extension is applied, so a name and its file cannot
+// disagree.
+QString fragmentFileName(const QString& shaderName);
+
 // The file to READ for a given role. The user's copy when it exists, otherwise the shipped copy, and
 // an empty string when neither is present.
 QString shaderPath(const QString& fileName);

@@ -217,6 +217,16 @@ int main(int argc, char* argv[])
             gfxThread->setTargetFps(cap);
         }
         gfxThread->setSharedFrameSlot(&gfxSharedFrame);
+        // WHICH BUFFER IS RENDERED, decided here and nowhere else.
+        //
+        // The graphics feature's "document" is a buffer, and a buffer is its file (name = stem, so
+        // "default" is default.frag). The name is handed to the render thread, which is the live answer
+        // to "what is on screen": the renderer compiles it, and the shader editor opens it by asking the
+        // same thread. One decision, one holder, no second place where a file name could be guessed.
+        //
+        // With one buffer the choice is constant; when there are several, this is where the stored
+        // choice is read (graphics-multi-buffer-plan.md, M2/M3).
+        gfxThread->setShaderName(SonicPi::GraphicsSettings::defaultShaderName());
         QObject::connect(gfxThread, &SonicPi::GraphicsRenderThread::contextReady,
                          &app, [](bool ok) {
                              if (!ok)

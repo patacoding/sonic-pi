@@ -269,6 +269,17 @@ QString shaderDirectoryPath()
     return home + QStringLiteral("/.sonic-pi/graphics/shaders");
 }
 
+QString fragmentFileName(const QString& shaderName)
+{
+    // A name that already looks like a file is not double-suffixed: callers pass a name, but the
+    // editor's own import path can hand over a file name, and "default.frag.frag" would be a file
+    // nobody can find.
+    if (shaderName.endsWith(QStringLiteral(".frag")))
+        return shaderName;
+
+    return shaderName + QStringLiteral(".frag");
+}
+
 QString writableShaderPath(const QString& fileName)
 {
     return shaderDirectoryPath() + QLatin1Char('/') + fileName;

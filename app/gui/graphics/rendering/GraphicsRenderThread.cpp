@@ -244,6 +244,10 @@ bool GraphicsRenderThread::applyRenderTargetSizeRequest()
     if (!m_gfxRenderer)
     {
         m_gfxRenderer = std::make_unique<GraphicsRenderer>();
+        // The buffer's identity is handed to the renderer here, where it is created: the renderer
+        // compiles the name it is given, so "which buffer is on screen" has one answer on this thread
+        // rather than one per place that builds a file name.
+        m_gfxRenderer->setShaderName(m_shaderName);
         if (!m_gfxRenderer->initialize())
         {
             GraphicsLog::error(QStringLiteral("renderer: could not be initialised"));
@@ -274,9 +278,25 @@ bool GraphicsRenderThread::applyRenderTargetSizeRequest()
     return true;
 }
 
+void GraphicsRenderThread::setShaderName(const QString& name)
+{
+    // A name is not just a label: it decides which fragment file is compiled, so an empty one would ask
+    // for a file called ".frag". Falling back keeps the failure to a missing default shader, which is
+    // reported, rather than to a name nobody can read.
+    m_shaderName = name.isEmpty() ? GraphicsSettings::defaultShaderName() : name;
+
+    // Recorded, because "which buffer is this picture" is otherwise a question only the screen answers -
+    // and with a second buffer coming, a log that names it is how a picture showing the wrong one is
+    // told apart from a reload that never happened.
+    GraphicsLog::info(QStringLiteral("buffer: active = '%1' (%2)")
+                          .arg(m_shaderName, GraphicsSettings::shaderPath(
+                                                 GraphicsSettings::fragmentFileName(m_shaderName))));
+}
+
 void GraphicsRenderThread::applyShaderReload()
 {
-    GraphicsLog::info(QStringLiteral("reload: applying on the render thread"));
+    GraphicsLog::info(QStringLiteral("reload: applying on the render thread (buffer '%1')")
+                          .arg(m_shaderName));
 
     QElapsedTimer t;
     t.start();
