@@ -42,6 +42,13 @@ constexpr int kSpoutSettleWindows = 10;
 // is how a number becomes a claim. A receiver appearing or going away changes what this costs.
 constexpr double kSpoutRelogMs = 2.0;
 
+// ...but a move has to LAST to be worth a line. The window averages on this machine swing between about
+// 1.6 and 5.3 ms with nothing changing but the machine's mood, so "log when it moves by 2 ms" on its own
+// would be a line a second - which is the thing this file refuses to do with frame rates, for the same
+// reason: a log of per-second numbers stops being read. Half a minute of a different value is a change;
+// one window of it is noise.
+constexpr int kSpoutRelogWindows = 30;
+
 QString glString(QOpenGLFunctions* f, unsigned name)
 {
     const auto* s = f->glGetString(name);
@@ -1419,12 +1426,14 @@ void GraphicsRenderThread::run()
                 // a receiver appearing or going away is exactly what would move it.
                 const bool settled = m_spoutMeasuredWindows >= kSpoutSettleWindows && m_spoutReadbackCount > 0;
                 const bool moved = m_spoutFirstMeasurementLogged
-                                   && qAbs(readbackAvg - m_spoutLoggedMs) > kSpoutRelogMs;
+                                   && qAbs(readbackAvg - m_spoutLoggedMs) > kSpoutRelogMs
+                                   && m_spoutMeasuredWindows - m_spoutLoggedWindow >= kSpoutRelogWindows;
                 if (settled && (!m_spoutFirstMeasurementLogged || moved))
                 {
                     const bool first = !m_spoutFirstMeasurementLogged;
                     m_spoutFirstMeasurementLogged = true;
                     m_spoutLoggedMs = readbackAvg;
+                    m_spoutLoggedWindow = m_spoutMeasuredWindows;
                     GraphicsLog::info(QStringLiteral("spout: read-back costs %1 ms a frame (queueing the "
                                                      "copy %2 ms, waiting for the pixels %3 ms, handing "
                                                      "them to the sender %4 ms, releasing the buffer %5 ms%6); "
@@ -1463,6 +1472,7 @@ void GraphicsRenderThread::run()
                 m_spoutFirstMeasurementLogged = false;
                 m_spoutMeasuredWindows = 0;
                 m_spoutLoggedMs = -1.0;
+                m_spoutLoggedWindow = 0;
                 m_spoutDropping = false;
             }
 

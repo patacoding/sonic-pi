@@ -461,6 +461,8 @@ private:
     int m_spoutMeasuredWindows = 0;
     // The figure that was last written to the log, so a later move can be reported as a move.
     double m_spoutLoggedMs = -1.0;
+    // When it was written, so a move has to persist before it earns a line of its own.
+    int m_spoutLoggedWindow = 0;
 
     // The window's Spout figures, published to GraphicsFrameStats once a second.
     std::atomic<quint64> m_spoutSentWindow{0};
