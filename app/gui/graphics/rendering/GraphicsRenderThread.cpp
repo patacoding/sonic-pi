@@ -13,6 +13,7 @@
 
 #include "GraphicsRenderThread.h"
 #include "GraphicsLog.h"
+#include "GraphicsPacer.h"
 #include "GraphicsSettings.h"
 
 #include <QElapsedTimer>
@@ -99,10 +100,12 @@ GraphicsRenderThread::~GraphicsRenderThread()
 void GraphicsRenderThread::shutdown()
 {
     // Order matters: set the flag first so a loop that is about to check it sees
-    // the request, then wake the pacer so it does not sit out the rest of a frame
-    // interval, then interrupt as a third signal for anything else waiting.
+    // the request, then interrupt as a second signal for anything else waiting.
+    //
+    // The pacing sleep is NOT woken any more, and does not need to be: it is now a sleep of at most one
+    // frame interval (see GraphicsPacer), so the loop notices the flag within that - 6.9ms at 144Hz,
+    // 16.7ms at 60Hz, against a shutdown that waits five seconds for the thread.
     m_loopRunning.store(false, std::memory_order_relaxed);
-    m_paceWait.wakeAll();
 
     if (!isRunning())
         return;
@@ -970,7 +973,27 @@ void GraphicsRenderThread::run()
     // A non-monotonic QElapsedTimer reading is treated as a clock change rather
     // than a negative sleep: QElapsedTimer is monotonic, so this is defensive,
     // but a negative wait would throw.
+    // 2026-09-25, the same hazard from the other end: the spin covers a sleep error only when the spin
+    // window is LARGER than that error, and the window is min(2ms, interval/8) - so it shrinks as the
+    // requested rate rises. Measured from the running application (Spout off, one 60s window each):
+    //
+    //     asked   interval   spin window   measured   outcome
+    //      60Hz   16.67 ms   2.00 ms        59.9 fps  met exactly
+    //     125Hz    8.00 ms   1.00 ms       114.8 fps  9% short
+    //     144Hz    6.94 ms   0.87 ms       128.5 fps  11% short
+    //     165Hz    6.06 ms   0.76 ms       142.1 fps  14% short
+    //
+    // A sleep late by about a millisecond a frame (what the process's timer resolution gives the wait this
+    // used to make) is absorbed at 60Hz and not at the rest. So the wait itself is now GraphicsPacer,
+    // which sleeps on a high-resolution waitable timer where the platform has one - measured overshoot
+    // 1.24ms at 144Hz against 5.31ms for the old wait, in a process whose timer resolution has not been
+    // raised at all - and the spin stays as what covers the small error that remains.
     constexpr qint64 kSpinWindowMs = 2;
+
+    // How this loop sleeps, and therefore what the user's "144Hz" is being measured against. Its
+    // description goes in the startup line below, because "the render loop did not meet the rate you
+    // asked for" has at least two very different causes and which wait is in use is the first of them.
+    GraphicsPacer pacer;
 
     m_loopRunning.store(true, std::memory_order_relaxed);
 
@@ -1009,13 +1032,36 @@ void GraphicsRenderThread::run()
     m_frameCapHz.store(capHz, std::memory_order_relaxed);
 
     GraphicsLog::info(QStringLiteral("render loop: started, cap %1Hz, interval %2ns, spin %3us, "
-                                     "priority=lowest")
+                                     "sleeping on the %4, priority=lowest")
                           .arg(capHz)
                           .arg(intervalNs)
-                          .arg(spinWindowNs / 1000));
+                          .arg(spinWindowNs / 1000)
+                          .arg(pacer.description()));
 
     quint64 windowFrames = 0;
     double  windowWorstMs = 0.0;
+    // The minute's accumulators, for the summary line at the bottom of this file's reporting.
+    //
+    // Three rates have to agree with each other for this feature to be believable - what the user asked
+    // for, what the loop is actually running at, and what the sender is actually sending - and the overlay
+    // shows them one second at a time, which is right for WATCHING and useless for CHECKING: you cannot
+    // compare three numbers that are only ever on screen for a second, and nothing records them. So the
+    // same figures also go to the log together, from the same window, once a minute - which is bounded,
+    // and is why there is still no per-second line.
+    QElapsedTimer summaryTimer;
+    summaryTimer.start();
+    quint64 summarySeconds = 0;
+    quint64 summaryFrames = 0;
+    double  summaryWorstSecondFps = 0.0;
+    bool    summaryHaveFps = false;
+    double  summaryWorstFrameMs = 0.0;
+    qint64  summaryWaitUs = 0;
+    double  summaryGpuMsSum = 0.0;
+    int     summaryGpuCount = 0;
+    quint64 summarySent = 0;
+    quint64 summaryDropped = 0;
+    double  summaryReadbackMsSum = 0.0;
+    int     summaryReadbackCount = 0;
     // How long this loop spent waiting for the consumer to release a target, over the
     // last report window. This is the whole cost of the handoff, and the design says it
     // should be in the microseconds: the fence being waited on was placed a frame
@@ -1092,6 +1138,21 @@ void GraphicsRenderThread::run()
             windowWorstMs = 0.0;
             windowWaitUs = 0;
             windowWaitWorstUs = 0;
+            // The minute's summary starts again too: a rate is only a target for the frames that were
+            // paced to it, so a summary spanning a rate change would average two different questions.
+            summaryTimer.restart();
+            summarySeconds = 0;
+            summaryFrames = 0;
+            summaryWorstSecondFps = 0.0;
+            summaryHaveFps = false;
+            summaryWorstFrameMs = 0.0;
+            summaryWaitUs = 0;
+            summaryGpuMsSum = 0.0;
+            summaryGpuCount = 0;
+            summarySent = 0;
+            summaryDropped = 0;
+            summaryReadbackMsSum = 0.0;
+            summaryReadbackCount = 0;
             lastFrameStartNs = frameStartNs;
             GraphicsLog::info(QStringLiteral("render loop: rate changed to %1Hz "
                                              "(interval %2ns, spin %3us); pacing restarted")
@@ -1291,6 +1352,12 @@ void GraphicsRenderThread::run()
             const double fps = double(windowFrames) / secs;
             const double waitAvgUs = windowFrames ? double(windowWaitUs) / double(windowFrames) : 0.0;
 
+            // Copied out before the resets at the end of this block: the minute's summary is built from
+            // these, and by then the accumulators they come from are gone.
+            const quint64 framesThisSecond = windowFrames;
+            const double worstMsThisSecond = windowWorstMs;
+            double gpuAvgThisSecond = -1.0;
+
             m_fps.store(fps, std::memory_order_relaxed);
             m_worstFrameMs.store(windowWorstMs, std::memory_order_relaxed);
 
@@ -1311,6 +1378,7 @@ void GraphicsRenderThread::run()
                     windowGpuMsWorst = qMax(windowGpuMsWorst, gpuNow);
                 }
                 const double avg = windowGpuCount > 0 ? windowGpuMsSum / double(windowGpuCount) : -1.0;
+                gpuAvgThisSecond = avg;
                 activeRenderer->setGpuFrameAverages(avg,
                                                     windowGpuCount > 0 ? windowGpuMsWorst : -1.0);
             }
@@ -1381,6 +1449,9 @@ void GraphicsRenderThread::run()
             // the LOG gets only what is new - one measurement when publishing starts, and a warning when
             // frames begin to be dropped (which means a receiver is behind, and the picture being sent is
             // no longer the picture being drawn).
+            quint64 sentThisSecond = 0;
+            quint64 droppedThisSecond = 0;
+            double readbackThisSecond = -1.0;
             if (m_spoutPublishing.load(std::memory_order_relaxed))
             {
                 quint64 sent = 0;
@@ -1391,10 +1462,13 @@ void GraphicsRenderThread::run()
                     sent = m_spoutPublisher->takeSentCount();
                     dropped = m_spoutPublisher->takeDroppedCount();
                 }
+                sentThisSecond = sent;
+                droppedThisSecond = dropped;
 
                 const double readbackAvg = m_spoutReadbackCount > 0
                                                ? m_spoutReadbackMsSum / double(m_spoutReadbackCount)
                                                : -1.0;
+                readbackThisSecond = readbackAvg;
                 const double issueAvg = m_spoutReadbackCount > 0
                                             ? m_spoutIssueMsSum / double(m_spoutReadbackCount)
                                             : 0.0;
@@ -1484,6 +1558,89 @@ void GraphicsRenderThread::run()
             windowGpuMsWorst = 0.0;
             windowGpuCount = 0;
             reportTimer.restart();
+
+            // The minute's summary, and the only place the three rates meet.
+            //
+            // Built from this window's own figures rather than from a second set of counters, so the
+            // numbers in the line are the numbers the overlay was showing during that minute - taken
+            // before the resets above, which is why they are copied out first. The WORST second is in it
+            // because an average hides the thing a user who asked for 144Hz cares about: whether every
+            // second met it, or only most of them did.
+            ++summarySeconds;
+            summaryFrames += framesThisSecond;
+            if (!summaryHaveFps || fps < summaryWorstSecondFps)
+            {
+                summaryWorstSecondFps = fps;
+                summaryHaveFps = true;
+            }
+            summaryWorstFrameMs = qMax(summaryWorstFrameMs, worstMsThisSecond);
+            summaryWaitUs += qint64(waitAvgUs * double(framesThisSecond));
+            summarySent += sentThisSecond;
+            summaryDropped += droppedThisSecond;
+            if (readbackThisSecond >= 0.0)
+            {
+                summaryReadbackMsSum += readbackThisSecond;
+                ++summaryReadbackCount;
+            }
+            if (gpuAvgThisSecond >= 0.0)
+            {
+                summaryGpuMsSum += gpuAvgThisSecond;
+                ++summaryGpuCount;
+            }
+
+            if (summaryTimer.elapsed() >= 60000 && summaryFrames > 0)
+            {
+                const double summarySecs = double(summaryTimer.elapsed()) / 1000.0;
+                const double summaryFps = double(summaryFrames) / summarySecs;
+                const double frameMsAvg = 1000.0 / summaryFps;
+                const double waitMsAvg = double(summaryWaitUs) / double(summaryFrames) / 1000.0;
+
+                GraphicsLog::info(
+                    QStringLiteral("render loop: %1 fps of %2 target (%3s, %4 frames, worst second %5); "
+                                   "frame %6 ms avg / %7 ms worst; consumer wait %8 ms avg; gpu %9 ms avg")
+                        .arg(summaryFps, 0, 'f', 1)
+                        .arg(capHz)
+                        .arg(summarySecs, 0, 'f', 1)
+                        .arg(summaryFrames)
+                        .arg(summaryWorstSecondFps, 0, 'f', 1)
+                        .arg(frameMsAvg, 0, 'f', 2)
+                        .arg(summaryWorstFrameMs, 0, 'f', 2)
+                        .arg(waitMsAvg, 0, 'f', 2)
+                        .arg(summaryGpuCount > 0
+                                 ? QString::number(summaryGpuMsSum / double(summaryGpuCount), 'f', 2)
+                                 : QStringLiteral("-")));
+
+                if (summarySent > 0 || summaryDropped > 0)
+                {
+                    GraphicsLog::info(
+                        QStringLiteral("spout: %1 fps sent (%2 frames, %3 dropped, %4/s) over the same "
+                                       "%5s; read-back %6 ms avg")
+                            .arg(double(summarySent) / summarySecs, 0, 'f', 1)
+                            .arg(summarySent)
+                            .arg(summaryDropped)
+                            .arg(double(summaryDropped) / summarySecs, 0, 'f', 1)
+                            .arg(summarySecs, 0, 'f', 1)
+                            .arg(summaryReadbackCount > 0
+                                     ? QString::number(summaryReadbackMsSum
+                                                           / double(summaryReadbackCount),
+                                                       'f', 2)
+                                     : QStringLiteral("-")));
+                }
+
+                summaryTimer.restart();
+                summarySeconds = 0;
+                summaryFrames = 0;
+                summaryWorstSecondFps = 0.0;
+                summaryHaveFps = false;
+                summaryWorstFrameMs = 0.0;
+                summaryWaitUs = 0;
+                summaryGpuMsSum = 0.0;
+                summaryGpuCount = 0;
+                summarySent = 0;
+                summaryDropped = 0;
+                summaryReadbackMsSum = 0.0;
+                summaryReadbackCount = 0;
+            }
         }
 
         if (frameLimit > 0 && totalFrames >= quint64(frameLimit))
@@ -1529,11 +1686,7 @@ void GraphicsRenderThread::run()
         const qint64 spinStartNs = nextDeadlineNs - spinWindowNs;
         const qint64 sleepNs = spinStartNs - nowNs;
         if (sleepNs > 0)
-        {
-            QMutexLocker lock(&m_paceMutex);
-            // Woken early by shutdown(); the loop condition is re-checked anyway.
-            m_paceWait.wait(&m_paceMutex, static_cast<unsigned long>(sleepNs / 1000000 + 1));
-        }
+            pacer.wait(sleepNs);
 
         while (m_loopRunning.load(std::memory_order_relaxed)
                && frameTimer.nsecsElapsed() < nextDeadlineNs)

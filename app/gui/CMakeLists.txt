@@ -105,6 +105,8 @@ set(GRAPHICS_SOURCES
     ${QTAPP_ROOT}/graphics/rendering/GraphicsFrame.h
     ${QTAPP_ROOT}/graphics/rendering/GraphicsLog.cpp
     ${QTAPP_ROOT}/graphics/rendering/GraphicsLog.h
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsPacer.cpp
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsPacer.h
     ${QTAPP_ROOT}/graphics/rendering/GraphicsRenderer.cpp
     ${QTAPP_ROOT}/graphics/rendering/GraphicsRenderer.h
     ${QTAPP_ROOT}/graphics/rendering/GraphicsSharedFrame.h

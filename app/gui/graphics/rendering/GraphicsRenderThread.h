@@ -577,11 +577,6 @@ private:
     std::atomic<int>       m_requestedHeight{-1};
     std::atomic<int>       m_actualWidth{0};
     std::atomic<int>       m_actualHeight{0};
-
-    // Used to sleep until the next frame deadline and to be woken immediately on
-    // shutdown, so stopping never waits out a whole frame interval.
-    QMutex         m_paceMutex;
-    QWaitCondition m_paceWait;
 };
 
 } // namespace SonicPi

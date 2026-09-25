@@ -154,9 +154,13 @@ void GraphicsPreviewWindow::refreshFpsOverlay()
     // read-back costs. The drop count is the one to watch - a receiver that is behind shows a picture
     // that is no longer the newest frame. Absent entirely when not publishing, so the overlay is the size
     // it always was for anyone not using this.
+    //
+    // One decimal on the sent rate, like the frame rate above it: the two are meant to be compared (the
+    // sender cannot send more frames than the loop produced), and whole numbers make a 0.5 fps difference
+    // invisible. The minute summary in the log carries the same figures.
     const QString spoutText = s.spoutPublishing
                                   ? QStringLiteral("spout %1 fps, %2 dropped, read-back %3 ms")
-                                        .arg(s.spoutSentPerSec)
+                                        .arg(QString::number(s.spoutSentPerSec, 'f', 1))
                                         .arg(s.spoutDroppedPerSec)
                                         .arg(s.spoutReadbackMs >= 0.0
                                                  ? QString::number(s.spoutReadbackMs, 'f', 2)
