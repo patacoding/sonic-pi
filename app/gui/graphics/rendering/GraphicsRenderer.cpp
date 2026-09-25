@@ -50,6 +50,20 @@ namespace
 // covers the rounding without being loose enough to hide a wrong colour.
 constexpr int kChannelTolerance = 2;
 
+// The four frame values, which the FRAME LOOP owns: it sets them every frame, OSC may not set them, and
+// since ShaderText::withBuiltinUniforms they are declared for every shader.
+//
+// One function rather than the comparison written out wherever it is needed, because there are two
+// questions asked about this set - "may OSC set it?" (applyDynamicUniforms) and "may it be listed as
+// OSC-addressable?" (buildDynamicUniforms) - and two lists of four names would eventually disagree about
+// one of them. ShaderText.h has the same four names as declarations; that is the pair that has to match,
+// and graphics-uniforms.md 1.1 is the contract they both serve.
+bool isFrameValueName(const QString& name)
+{
+    return name == QLatin1String("iTime") || name == QLatin1String("iTimeDelta")
+           || name == QLatin1String("iFrame") || name == QLatin1String("iResolution");
+}
+
 int toByte(float v)
 {
     return int(std::lround(double(v) * 255.0));
@@ -470,6 +484,36 @@ GraphicsCompileResult GraphicsRenderer::buildProgram(const QString& vertexFile,
         return result;
     }
 
+    // The frame values the shader is allowed to use without declaring them: iTime, iTimeDelta, iFrame and
+    // iResolution, named and typed exactly as ShaderToy names and types them (docs/graphics-uniforms.md
+    // 1). The fragment half only: the vertex half is a fixed passthrough that uses none of them, and
+    // declaring uniforms in a stage that cannot use them is noise in the driver's view of the program.
+    //
+    // This is where "a ShaderToy shader runs unchanged" becomes true. Until it existed, the four values
+    // were pushed to uniforms the shader had to declare itself - which a ShaderToy shader does not do,
+    // because ShaderToy declares them for you. The gap was found by the user pasting `iTime` into a
+    // shader and being told it was undefined.
+    //
+    // A name the shader declares itself is left alone rather than declared twice (see ShaderText.h), so
+    // this cannot break a shader written before it existed. Reported either way, because "which of the
+    // four is mine and which is the framework's" is exactly the kind of thing that should not have to be
+    // deduced from a compile error.
+    {
+        const ShaderText::BuiltinUniforms builtins = ShaderText::withBuiltinUniforms(fragSource);
+        fragSource = builtins.text;
+        if (!builtins.declared.isEmpty())
+        {
+            GraphicsLog::info(QStringLiteral("shader: declared %1 for the shader (ShaderToy-style frame "
+                                             "values; a shader that declares one itself keeps its own)")
+                                  .arg(builtins.declared.join(QStringLiteral(", "))));
+        }
+        if (!builtins.leftToShader.isEmpty())
+        {
+            GraphicsLog::info(QStringLiteral("shader: %1 declared by the shader itself")
+                                  .arg(builtins.leftToShader.join(QStringLiteral(", "))));
+        }
+    }
+
     // The driver's words, with the source string numbers it was given turned back into file names.
     //
     // Which table belongs to which half: a vertex failure can only be about the vertex shader and a
@@ -684,7 +728,8 @@ void GraphicsRenderer::cacheUniformLocations()
     if (any)
     {
         GraphicsLog::info(QStringLiteral("shader uniforms: iTime=%1 iTimeDelta=%2 iFrame=%3 iResolution=%4 "
-                                         "(-1 means the shader does not declare it)")
+                                         "(-1 means the shader does not use it, not that it is missing: "
+                                         "the linker drops a uniform nothing references)")
                               .arg(m_uniforms.time)
                               .arg(m_uniforms.timeDelta)
                               .arg(m_uniforms.frame)
@@ -726,6 +771,7 @@ void GraphicsRenderer::buildDynamicUniforms()
 
     QVector<char> name(int(maxLength) + 1, '\0');
     QStringList addressable;
+    QStringList loopOwned;
 
     for (GLint i = 0; i < active; ++i)
     {
@@ -736,6 +782,18 @@ void GraphicsRenderer::buildDynamicUniforms()
                               name.data());
 
         const QString uniformName = QString::fromLatin1(name.constData(), written);
+
+        // The four frame values are the loop's, not the user's. They are in the program like any other
+        // uniform - and since they are now declared for every shader (ShaderText::withBuiltinUniforms)
+        // they turn up here routinely - but a message addressed to one of them is refused
+        // (applyDynamicUniforms), so keeping them in this list would have the report promise control the
+        // user does not have. Named separately below instead, and left out of the registry the OSC side
+        // looks names up in - the refusal happens before that lookup, so nothing is lost.
+        if (isFrameValueName(uniformName))
+        {
+            loopOwned << uniformName;
+            continue;
+        }
 
         DynamicUniform entry;
         entry.location = m_program->uniformLocation(uniformName);
@@ -759,19 +817,32 @@ void GraphicsRenderer::buildDynamicUniforms()
     // One line per link. This is the list a user needs when a name "does not work": it is the
     // driver's answer to what the shader actually declares, which is not the same as what its
     // source says (declared-but-unused uniforms are absent).
+    //
+    // The loop's own four are named separately rather than listed as addressable: they ARE active
+    // uniforms, but an OSC message addressed to one of them is refused, and a report that listed them
+    // would be promising control the user does not have.
+    QString loopNote;
+    if (!loopOwned.isEmpty())
+    {
+        loopNote = QStringLiteral("; %1 %2 the frame loop's own (set every frame, never by OSC)")
+                       .arg(loopOwned.join(QStringLiteral(", ")),
+                            loopOwned.size() == 1 ? QStringLiteral("is") : QStringLiteral("are"));
+    }
+
     if (addressable.isEmpty())
     {
         GraphicsLog::info(QStringLiteral("shader declares no OSC-addressable uniforms "
-                                         "(%1 active in total); osc \"/graphics/uniform\" values "
+                                         "(%1 active in total)%2; osc \"/graphics/uniform\" values "
                                          "will have nowhere to go")
-                              .arg(active));
+                              .arg(active)
+                              .arg(loopNote));
     }
     else
     {
-        GraphicsLog::info(QStringLiteral("shader uniforms addressable by OSC (%1 of %2 active): %3")
+        GraphicsLog::info(QStringLiteral("shader uniforms addressable by OSC (%1 of %2 active): %3%4")
                               .arg(addressable.size())
                               .arg(active)
-                              .arg(addressable.join(QStringLiteral(", "))));
+                              .arg(addressable.join(QStringLiteral(", ")), loopNote));
     }
 }
 
@@ -792,8 +863,7 @@ void GraphicsRenderer::applyDynamicUniforms(const GraphicsFrame& frame)
         // The four built-ins are the loop's to set. Refused rather than allowed, because a value
         // overwritten every frame by the renderer would look like "my OSC control does nothing" -
         // and allowed would also mean a race between the two writers, frame by frame.
-        if (value.name == QLatin1String("iTime") || value.name == QLatin1String("iTimeDelta")
-            || value.name == QLatin1String("iFrame") || value.name == QLatin1String("iResolution"))
+        if (isFrameValueName(value.name))
         {
             if (!m_reportedBuiltins.contains(value.name))
             {
@@ -940,19 +1010,24 @@ void GraphicsRenderer::applyUniforms(const GraphicsFrame& frame)
     if (!m_program || !m_program->isLinked())
         return;
 
-    // A shader that declares none of these is perfectly valid - the ramp the
-    // default shader draws is static - so this is reported once, as information,
-    // and not repeated every frame. It is worth saying out loud because "my
-    // uniform has no effect" is otherwise indistinguishable from "my shader
-    // declared it but nothing is setting it".
+    // A shader that uses none of these is perfectly valid - the ramp the default
+    // shader draws is static - so this is reported once, as information, and not repeated every frame. It
+    // is worth saying out loud because "my uniform has no effect" is otherwise indistinguishable from
+    // "my shader declared it but nothing is setting it".
+    //
+    // The wording is about USE rather than declaration, because since the four are declared FOR the shader
+    // (ShaderText::withBuiltinUniforms) every shader now has all four declared: a shader that merely does
+    // not reference them ends up in exactly this state, and telling its author that it "declares none of"
+    // them would be false.
     const bool anyBuiltin = m_uniforms.time >= 0 || m_uniforms.timeDelta >= 0
                             || m_uniforms.frame >= 0 || m_uniforms.resolution >= 0;
 
     if (!anyBuiltin && !m_reportedNoUniforms)
     {
         m_reportedNoUniforms = true;
-        GraphicsLog::info(QStringLiteral("shader declares none of iTime/iTimeDelta/iFrame/iResolution; "
-                                         "the frame values are not being used"));
+        GraphicsLog::info(QStringLiteral("shader: none of iTime/iTimeDelta/iFrame/iResolution is used by "
+                                         "this shader; the frame values are not being sent (they are "
+                                         "declared for you either way)"));
     }
 
     // Uniform1f takes a float, and the shader's uniform is a float, so the

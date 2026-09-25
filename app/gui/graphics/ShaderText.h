@@ -116,7 +116,208 @@ inline PositionText positionAt(const QString& textAfterPrefix)
     return PositionText();
 }
 
+// The source with comments blanked out, newlines and length kept.
+//
+// Only ever used to ask "does this shader say X in code?", a question a comment must not be able to
+// answer: a shader with `// uniform float iTime;` commented out still has to be given iTime, and a
+// shader whose only mention of iTime is in its explanatory header must still work.
+//
+// A character-for-character scan rather than a regular expression, because the two comment forms nest
+// the only way they can nest (`//` inside `/* */` is not a thing, but `/*` inside `//` is text) and a
+// regex for that is a puzzle. GLSL has no string literals, so there is no third case a `//` could be
+// hiding in.
+inline QString withoutComments(const QString& source)
+{
+    QString out;
+    out.reserve(source.size());
+
+    bool inLine = false;
+    bool inBlock = false;
+    for (int i = 0; i < source.size(); ++i)
+    {
+        const QChar c = source.at(i);
+        const QChar next = (i + 1 < source.size()) ? source.at(i + 1) : QChar();
+
+        if (inLine)
+        {
+            if (c == QLatin1Char('\n'))
+            {
+                inLine = false;
+                out += c;
+            }
+            else
+            {
+                out += QLatin1Char(' ');
+            }
+            continue;
+        }
+
+        if (inBlock)
+        {
+            if (c == QLatin1Char('*') && next == QLatin1Char('/'))
+            {
+                inBlock = false;
+                out += QLatin1String("  ");
+                ++i;
+            }
+            else
+            {
+                out += (c == QLatin1Char('\n')) ? c : QLatin1Char(' ');
+            }
+            continue;
+        }
+
+        if (c == QLatin1Char('/') && next == QLatin1Char('/'))
+        {
+            inLine = true;
+            out += QLatin1String("  ");
+            ++i;
+            continue;
+        }
+        if (c == QLatin1Char('/') && next == QLatin1Char('*'))
+        {
+            inBlock = true;
+            out += QLatin1String("  ");
+            ++i;
+            continue;
+        }
+
+        out += c;
+    }
+
+    return out;
+}
+
+// The offset just past the end of the `#version` line, or -1 when the source has none.
+//
+// The pattern is the one ShaderInclude's versionDirective() uses, deliberately: "what counts as a version
+// directive" must not have two answers. A shader whose version line the expander recognises but this does
+// not would get its declarations pushed in front of `#version` - a compile error about #version, pointing
+// at a line the user never wrote.
+inline int endOfVersionLine(const QString& source)
+{
+    static const QRegularExpression re(QStringLiteral("^\\s*#\\s*version\\b"));
+
+    int lineStart = 0;
+    while (lineStart <= source.size())
+    {
+        int lineEnd = source.indexOf(QLatin1Char('\n'), lineStart);
+        if (lineEnd < 0)
+            lineEnd = source.size();
+
+        if (re.match(source.mid(lineStart, lineEnd - lineStart)).hasMatch())
+            return (lineEnd < source.size()) ? lineEnd + 1 : lineEnd;   // past the newline
+
+        if (lineEnd >= source.size())
+            break;
+        lineStart = lineEnd + 1;
+    }
+
+    return -1;
+}
+
 } // namespace detail
+
+// The four frame values, declared FOR the shader: what makes a ShaderToy-style shader work as it is.
+//
+// The renderer has always PUSHED these four values, but only into uniforms the shader declares itself -
+// and a ShaderToy shader declares none of them, because ShaderToy declares them for you. So the claim in
+// docs/graphics-uniforms.md 1 ("a ShaderToy shader can be used directly") was true of the names and
+// false in practice: pasting a shader that used `iTime` gave "undefined variable iTime". Found by the
+// user doing exactly that, which is how a contract that was never exercised gets found.
+//
+// WHERE THEY GO: immediately after `#version`, which is the only place GLSL allows - the version
+// directive must be the first thing in the shader. The include expander puts its own `#line` resync
+// right after that directive, and this goes IN FRONT of it, so the numbers the driver reports for the
+// user's own lines do not move.
+//
+// NOT DECLARED TWICE: a name the shader already declares is left exactly as it is. Declaring it here as
+// well is a redefinition error, and shaders written before this existed DO declare them - the examples
+// in the docs do. Their declaration wins, and which names were added travels back to the caller so it
+// can be reported rather than assumed.
+struct BuiltinUniforms
+{
+    QString text;
+    // Names declared by this function, in the order they are written into the source.
+    QStringList declared;
+    // Names the shader declares itself, therefore left alone.
+    QStringList leftToShader;
+};
+
+inline BuiltinUniforms withBuiltinUniforms(const QString& source)
+{
+    struct Entry
+    {
+        const char* name;
+        const char* declaration;
+    };
+
+    // The types are the contract, not a choice made here: the renderer sets iResolution with a vec2 and
+    // iFrame with an int, and a wrong declaration would receive a silently wrong value rather than
+    // failing (docs/graphics-uniforms.md 1).
+    static const Entry kEntries[] = {
+        { "iResolution", "uniform vec2  iResolution;" },
+        { "iTime", "uniform float iTime;" },
+        { "iTimeDelta", "uniform float iTimeDelta;" },
+        { "iFrame", "uniform int   iFrame;" },
+    };
+
+    BuiltinUniforms result;
+    result.text = source;
+
+    // Comments are removed for the QUESTION only; the source itself keeps them. A commented-out
+    // declaration must not stop the real declaration from being added: `// uniform float iTime;` is not
+    // a declaration, and a shader left with it would report "undefined variable iTime" while showing the
+    // user a line that looks like it declares it.
+    const QString code = detail::withoutComments(source);
+
+    QStringList declarations;
+    for (const Entry& entry : kEntries)
+    {
+        const QString name = QString::fromLatin1(entry.name);
+
+        // A DECLARATION, not a mention: `uniform` before the name, and identifier boundaries around it,
+        // so `uniform float iTimeScale;` is not read as `iTime`. The scan stops at `;` and braces, so it
+        // cannot run from one statement into the next.
+        const QRegularExpression re(QStringLiteral("\\buniform\\b[^;{}]*\\b%1\\b").arg(name));
+        if (re.match(code).hasMatch())
+        {
+            result.leftToShader << name;
+            continue;
+        }
+
+        result.declared << name;
+        declarations << QString::fromLatin1(entry.declaration);
+    }
+
+    if (declarations.isEmpty())
+        return result;   // the shader declares all four itself: nothing to add, source untouched
+
+    // Two lines of explanation, because this text ends up in front of the user's shader in the source
+    // that was compiled - and because the second line is the answer to "why does my own declaration
+    // still work?".
+    QString preamble = QStringLiteral(
+        "// The four frame values, declared by Sonic Pi (ShaderToy naming and semantics).\n"
+        "// Declare one of them yourself and yours is kept instead of this one.\n");
+    preamble += declarations.join(QLatin1Char('\n'));
+    preamble += QLatin1Char('\n');
+
+    const int afterVersion = detail::endOfVersionLine(source);
+    if (afterVersion >= 0)
+    {
+        result.text = source.left(afterVersion) + preamble + source.mid(afterVersion);
+    }
+    else
+    {
+        // No `#version` to sit under, so they go first - and a `#line` of our own hands the user's own
+        // line numbers back, which the insertion would otherwise shift by the length of this preamble. A
+        // shader with no version directive has a problem of its own, and that problem must still be
+        // reported where it really is rather than ten lines further down.
+        result.text = preamble + QStringLiteral("#line 1 0\n") + source;
+    }
+
+    return result;
+}
 
 // The first position mentioned in a compiler diagnostic, or a Diagnostic with line 0 when none is
 // recognisable.

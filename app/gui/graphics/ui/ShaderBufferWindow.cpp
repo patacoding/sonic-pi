@@ -69,11 +69,12 @@ const QString kOnScreenMark = QStringLiteral(" *");
 // the widgets themselves never carry them.
 //
 // A different top-level window inherits none of that, which left this editor with no Ctrl+Z, no
-// Ctrl+C/V/X and no Ctrl+A - a code editor without undo. The COMMANDS were never removed, only
-// their keys, so restoring the six expected bindings is the whole repair. They are set on this
-// editor's own command set, so nothing else in the application is affected.
+// Ctrl+C/V/X and no Ctrl+A - a code editor without undo - and with no Tab either (see below). The
+// COMMANDS were never removed, only their keys, so restoring the expected bindings is the whole
+// repair. They are set on this editor's own command set, so nothing else in the application is
+// affected.
 //
-// Deliberately only the six that mean the same thing in any text editor. Sonic Pi's other Code-menu
+// Deliberately only the keys that mean the same thing in any text editor. Sonic Pi's other Code-menu
 // actions (comment/uncomment, align, cut-to-end-of-line, the delete-word pair) carry Sonic Pi
 // language semantics and must not be applied blind to GLSL - they stay out.
 void restoreEditingKeys(SonicPiScintilla* editor)
@@ -99,10 +100,19 @@ void restoreEditingKeys(SonicPiScintilla* editor)
 
     // Undo/redo take the bindings the application's shortcut table gives them, with the platform's
     // other common redo (Ctrl+Y) as an alternate so either habit works. The rest are the universal
-    // Ctrl+X/C/V/A.
+    // Ctrl+X/C/V/A, and Tab.
     //
     // The cut/copy commands are named SelectionCut/SelectionCopy in QScintilla; there is no plain
     // Cut/Copy.
+    //
+    // TAB is a key of its own kind. The main window does have a Tab for its editors, but it is a
+    // MainWindow QShortcut that runs Sonic Pi's complete-or-indent (mainwindow.cpp), and this window
+    // has no snippet list to complete against - and must not borrow the audio side's semantics. So Tab
+    // gets Scintilla's own Indent command, which with this editor's setTabIndents(true) indents the
+    // caret or every selected line; Shift+Tab (Backtab) is bound by the constructor, so de-indenting
+    // already worked. Without this binding Tab does NOTHING AT ALL rather than moving the focus:
+    // QsciScintillaBase::focusNextPrevChild() returns false for an editable document precisely so that
+    // Tab reaches the editor, and then nothing is bound to it - reported by the user as "Tab 无效".
     const Binding bindings[] = {
         { QsciCommand::Undo,          cmd | Qt::Key_Z,                 0 },
         { QsciCommand::Redo,          cmd | Qt::SHIFT | Qt::Key_Z,     cmd | Qt::Key_Y },
@@ -110,6 +120,7 @@ void restoreEditingKeys(SonicPiScintilla* editor)
         { QsciCommand::SelectionCopy, cmd | Qt::Key_C,                 0 },
         { QsciCommand::Paste,         cmd | Qt::Key_V,                 0 },
         { QsciCommand::SelectAll,     cmd | Qt::Key_A,                 0 },
+        { QsciCommand::Tab,           Qt::Key_Tab,                     0 },
     };
 
     QsciCommandSet* commands = editor->standardCommands();
