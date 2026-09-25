@@ -36,38 +36,17 @@ const STYLE_ID = "gfx-style";
 const ALPHA_KEY = "sp-gfx-ui-alpha";
 const SHADER_FILE = "gfx-shader.frag";
 
-// The shader the canvas starts with, when gfx-shader.frag is not beside the page. It uses the
-// audio uniforms the same way a player's would, and declares them itself -- nothing about
-// uLevel or uBands is built in, which is the point.
-const DEFAULT_SHADER = `uniform float uLevel;
-uniform vec4  uBands;
-
-void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+// web/gfx-shader.frag is the shader, and the only copy of it: one file to edit, and editing it
+// changes what runs on the next reload. This is what runs when that file cannot be fetched at all —
+// a small pulsing thing, declaring nothing, plus a line in the Log saying the file was missing. A
+// shader that has lost its file should LOOK like a placeholder rather than like a real picture that
+// happens to be wrong, so this deliberately has no rings, no audio and no uniforms of its own.
+const DEFAULT_SHADER = `void mainImage(out vec4 fragColor, in vec2 fragCoord) {
   vec2  uv = (fragCoord - 0.5 * iResolution.xy) / iResolution.y;
   float r  = length(uv);
-  float a  = atan(uv.y, uv.x);
-  float t  = iTime;
-
-  vec3 col = vec3(0.0);
-
-  // rings breathing with the low end
-  for (int i = 0; i < 5; i++) {
-    float fi  = float(i);
-    float rad = 0.16 + 0.13 * fi + 0.09 * uBands.x;
-    col += vec3(0.15, 0.55, 1.00) * smoothstep(0.014, 0.0, abs(r - rad - 0.02 * sin(t * 1.3 + fi)));
-  }
-
-  // spokes the high end pushes round
-  float spokes = 0.5 + 0.5 * sin(a * 6.0 + t * (0.4 + 2.5 * uBands.w));
-  col += mix(vec3(0.05, 0.10, 0.25), vec3(1.00, 0.45, 0.12), spokes) * 0.28 * (0.25 + uLevel * 3.0);
-
-  // a core that pulses with the overall level
-  col += vec3(1.0, 0.85, 0.55) * smoothstep(0.07, 0.0, r) * (0.18 + 1.5 * uLevel);
-  col += vec3(0.05, 0.10, 0.22) * (1.0 - smoothstep(0.0, 1.1, r));
-
-  fragColor = vec4(col, 1.0);
-}
-`;
+  float g  = 0.5 + 0.5 * sin(iTime * 0.6);
+  fragColor = vec4(0.10 * g, 0.16 * g, 0.30 * g, 1.0) * (1.0 - smoothstep(0.4, 1.2, r));
+}`;
 
 const style = () => {
   if (document.getElementById(STYLE_ID)) return;
@@ -106,10 +85,12 @@ async function loadShader() {
     const res = await fetch(SHADER_FILE, { cache: "no-store" });
     if (res.ok) {
       const text = await res.text();
-      if (text.trim()) return text;
+      if (text.trim()) return { source: text, fromFile: true };
     }
-  } catch { /* the embedded one is the answer then */ }
-  return DEFAULT_SHADER;
+    return { source: DEFAULT_SHADER, fromFile: false, why: `${SHADER_FILE} was not found beside the page (${res.status})` };
+  } catch (e) {
+    return { source: DEFAULT_SHADER, fromFile: false, why: `${SHADER_FILE} could not be fetched (${e.message})` };
+  }
 }
 
 function install() {
@@ -126,7 +107,9 @@ function install() {
   const problem = (text) => (log ? log(`Graphics — ${text}`) : console.warn(`Graphics — ${text}`));
 
   (async () => {
-    canvas = createCanvas({ source: await loadShader(), onProblem: problem });
+    const shader = await loadShader();
+    if (!shader.fromFile) problem(`${shader.why}, so the placeholder shader is running — it declares no uniform and answers no directive`);
+    canvas = createCanvas({ source: shader.source, onProblem: problem });
     if (!canvas) return;
     canvas.canvas.setAttribute("aria-hidden", "true");
     document.body.insertBefore(canvas.canvas, document.body.firstChild);
