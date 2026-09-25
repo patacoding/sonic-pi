@@ -50,10 +50,13 @@ function style() {
 #gfx-ext-btn.on { color: var(--HighlightedBackground); }
 #gfx-ext-btn svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
-/* the panel itself */
+/* the panel itself. Its ground is --gfx-opaque-ground, not --pop-bg: --pop-bg resolves to
+   --Background, and gfx.js fades that so the picture shows through the app. Our own furniture has to
+   stay readable over the picture, so it keeps the ground's real colour (and falls back to --pop-bg
+   when the canvas is off and nothing is being faded). */
 #gfx-ext { position: fixed; top: 0; right: 0; height: 100dvh; width: min(340px, 92vw); z-index: 96;
   display: flex; flex-direction: column; box-sizing: border-box;
-  background: var(--pop-bg); border-left: var(--pop-border); box-shadow: var(--pop-shadow);
+  background: var(--gfx-opaque-ground, var(--pop-bg)); border-left: var(--pop-border); box-shadow: var(--pop-shadow);
   color: var(--WindowForeground); font: var(--t-ui) var(--prose-font);
   transform: translateX(101%); transition: transform 0.18s ease; }
 #gfx-ext.on { transform: none; }

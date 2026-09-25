@@ -31,6 +31,7 @@
 
 import { parseDirective, SIGIL, SIGIL_VERBOSE } from "./gfx-directive.js";
 import { createCanvas } from "./gfx-canvas.js";
+import { createGrounds } from "./gfx-grounds.js";
 import { createPanel } from "./gfx-ui.js";
 
 const STYLE_ID = "gfx-style";
@@ -57,27 +58,30 @@ const style = () => {
   el.textContent = `
 html { background: #05070d; }
 #gfx-canvas { position: fixed; inset: 0; width: 100%; height: 100%; z-index: -1; display: block; pointer-events: none; }
-/* The interface over the picture. Each surface keeps its own colour and loses only its opacity,
-   so the theme still decides what it looks like; --gfx-ui-pct is what the player turns.
-   The selectors are the ones style.css gives these backgrounds to: body/#toolbar/#site-nav take
-   --WindowBackground (style.css:35,56,116), #editor-column takes --Background (:301), and
-   #sidebar/#info-card/.ic-body take --PaneBackground (:1029,:132,:136). */
-html.gfx-on body,
-html.gfx-on #toolbar,
-html.gfx-on #site-nav { background: color-mix(in srgb, var(--WindowBackground) var(--gfx-ui-pct, 82%), transparent); }
-html.gfx-on #editor-column { background: color-mix(in srgb, var(--Background) var(--gfx-ui-pct, 82%), transparent); }
-html.gfx-on #sidebar,
-html.gfx-on #info-card,
-html.gfx-on .ic-body { background: color-mix(in srgb, var(--PaneBackground) var(--gfx-ui-pct, 82%), transparent); }
+/* NOTHING here makes a surface translucent, and that is deliberate. Fading selectors was the first
+   attempt and it was wrong: the code -- the thing the player is actually looking at -- gets its
+   background from CodeMirror's own theme, which sets \`backgroundColor: var(--Background)\` INLINE on
+   .cm-editor (editor.js:646) and --MarginBackground on .cm-gutters (:654). A rule on #editor-column
+   cannot reach either: the editor paints over it. So lowering the opacity faded the toolbar, the
+   sidebar and the seams -- a grey rim -- while the code sat there opaque.
+
+   What is faded instead is the theme's own GROUND COLOURS, further down in this file: the tokens,
+   not the selectors that use them. Every surface, inline styles included, follows a token. */
 `;
   document.head.appendChild(el);
 };
 
+// The ground colours -- what "UI opacity" really turns -- live in gfx-grounds.js, with the reason
+// they are the thing to turn rather than the surfaces that use them (CodeMirror paints the editor's
+// background itself, inline, from --Background, so a rule on an ancestor cannot reach it).
+const grounds = createGrounds();
 const alpha = () => {
   const v = Number(localStorage.getItem(ALPHA_KEY));
   return Number.isFinite(v) && v > 0 && v <= 1 ? v : 0.82;
 };
-const applyAlpha = (v) => document.documentElement.style.setProperty("--gfx-ui-pct", `${Math.round(v * 100)}%`);
+
+/** Turn the ground colours into their translucent selves -- only while there is a picture behind them. */
+const applyAlpha = (v) => (canvasOn() ? grounds.apply(Math.round(v * 100)) : grounds.clear());
 
 /** The canvas is on unless it has been turned off; a stored "0" is the only thing that turns it off. */
 const canvasOn = () => localStorage.getItem(CANVAS_KEY) !== "0";
@@ -101,6 +105,8 @@ async function loadShader() {
 function install() {
   if (window.sonicPiGfx) return;
   style();
+  grounds.capture();               // what the theme painted, before we touch anything
+  grounds.watch(() => applyAlpha(alpha()));   // and follow it when the player switches theme
   applyAlpha(alpha());
   document.documentElement.classList.add("gfx-on");
 
@@ -121,18 +127,23 @@ function install() {
       title: "Interface",
       items: [
         {
-          kind: "slider", label: "UI opacity", min: 30, max: 100, step: 1,
+          kind: "note",
+          text: "UI opacity fades the THEME'S GROUND COLOURS — the editor's own background and gutters included, since CodeMirror paints those itself — so the picture shows through the whole interface. The colours the text is drawn in are not touched, so live code stays legible on top.",
+        },
+        {
+          kind: "slider", label: "UI opacity", min: 0, max: 100, step: 1,
           value: Math.round(alpha() * 100),
           format: (v) => `${v}%`,
-          title: "How opaque Sonic Pi's own surfaces are over the picture. Lower shows more shader.",
+          title: "How much of the interface's own ground colour stays. Lower shows more of the picture; the text is unaffected.",
           onInput: (v) => { localStorage.setItem(ALPHA_KEY, String(v / 100)); applyAlpha(v / 100); },
         },
         {
           kind: "switch", label: "Shader canvas", value: canvasOn(),
-          title: "Draw the shader behind the interface. Off leaves everything else working.",
+          title: "Draw the shader behind the interface. Off leaves everything else working, and puts the interface's own grounds back to opaque.",
           onChange: (on) => {
             localStorage.setItem(CANVAS_KEY, on ? "1" : "0");
             if (canvas) canvas.canvas.style.display = on ? "" : "none";
+            applyAlpha(alpha());
           },
         },
       ],
@@ -259,6 +270,7 @@ function install() {
       if (v == null) return canvasOn();
       localStorage.setItem(CANVAS_KEY, v ? "1" : "0");
       if (canvas) canvas.canvas.style.display = v ? "" : "none";
+      applyAlpha(alpha());       // the grounds fade only while there is a picture to show through
       ui.rebuild();
       return v;
     },
