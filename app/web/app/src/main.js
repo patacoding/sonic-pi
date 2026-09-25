@@ -451,7 +451,7 @@ async function ensureSession() {
     setTimeout(() => logs.add("Host", `audio: ${ac?.sampleRate ?? "?"} Hz, ${lowLatency.on ? "low latency" : "interactive"}; base latency ${ms(ac?.baseLatency)}, output latency ${ms(ac?.outputLatency)}`), 1000);
     groupsDeclared.clear();   // the runtime is new: its groups are told again as they are used
     session = sp.createLiveSession(runtime, engine, {
-      output, log, error: showError, status: showJobs, state: () => {}, record: onRecord, midi: midiSend,
+      output, log, error: showError, status: showJobs, state: () => {}, record: (r, at, stale) => { window.sonicPiGfx?.record(r, logInfo); onRecord(r, at, stale); }, midi: midiSend,
       host: (address, number, name) => {
         if (address === "/sonic-pi/audio-in") return audioIn.want(number);   // live_audio: the sound card's input, opened on first use
         logs.add("Runtime", { "/sonic-pi/synthdef": `load synthdef ${name}`, "/sonic-pi/sample": `load sample ${name} into buffer ${number}`, "/sonic-pi/sample_free": `free buffer ${number} (${name})` }[address] ?? `${address} ${number} ${name}`);
