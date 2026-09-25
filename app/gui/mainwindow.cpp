@@ -4305,6 +4305,20 @@ void MainWindow::applyGraphicsConfig()
             SonicPi::GraphicsLog::info(QStringLiteral("menu: frame rate -> %1Hz").arg(hz));
             graphicsRenderThread->setTargetFps(hz);
         }
+
+#ifdef Q_OS_WIN
+        // Spout publishing, from the stored preference. Applied here because this is where the graphics
+        // configuration is applied at startup - and because a preference that is remembered in the file but
+        // never acted on is a switch that lies. The request is a no-op when the state already matches.
+        const bool publishSpout = SonicPi::GraphicsSettings::spoutPublish();
+        if (publishSpout != graphicsRenderThread->isSpoutPublishing())
+        {
+            SonicPi::GraphicsLog::info(QStringLiteral("menu: graphics Spout publishing -> %1")
+                                           .arg(publishSpout ? QStringLiteral("on")
+                                                             : QStringLiteral("off")));
+            graphicsRenderThread->setSpoutPublishing(publishSpout);
+        }
+#endif
     }
 
     syncGraphicsConfigMenu();
@@ -6917,6 +6931,32 @@ void MainWindow::createToolBar()
     graphicsMenu->addAction(graphicsPreviewAct);
     graphicsMenu->addAction(graphicsShaderAct);
     graphicsMenu->addAction(graphicsFullscreenAct);
+#ifdef Q_OS_WIN
+    // Beside the other output items, because that is what it is: what leaves this machine, rather than
+    // what is on screen here.
+    //
+    // CREATED HERE, immediately before it is added. An earlier version created it further down with the
+    // other Spout/Syphon items and added it to this menu from here - which handed addAction() an
+    // uninitialised member pointer and crashed the application inside Qt with an access violation
+    // (0xc0000005 in Qt6Widgets, with a dump to prove it). Create and use in the same place; the ordering
+    // is the point, not the tidiness.
+    graphicsSpoutAct = new QAction(tr("Publish Graphics Output via Spout"), this);
+    graphicsSpoutAct->setCheckable(true);
+    graphicsSpoutAct->setChecked(SonicPi::GraphicsSettings::spoutPublish());
+    graphicsSpoutAct->setToolTip(tr("Send the graphics output (not the window) to other programs as "
+                                    "\"Sonic Pi Graphics\""));
+    connect(graphicsSpoutAct, &QAction::triggered, this, [this]() {
+        const bool want = graphicsSpoutAct->isChecked();
+        const bool accepted = graphicsRenderThread && graphicsRenderThread->setSpoutPublishing(want);
+        // The recorded preference is what the user asked for; the menu shows whether the request was
+        // ACCEPTED (the work itself happens on the render thread, and the log reports its outcome), so a
+        // request that could not even be made snaps the tick back instead of lying.
+        SonicPi::GraphicsSettings::setSpoutPublish(want);
+        if (!accepted)
+            graphicsSpoutAct->setChecked(false);
+    });
+    graphicsMenu->addAction(graphicsSpoutAct);
+#endif
     graphicsMenu->addSeparator();
 
     // Output resolution and frame rate.

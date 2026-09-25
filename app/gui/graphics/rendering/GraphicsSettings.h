@@ -152,6 +152,16 @@ void setActiveShaderName(const QString& shaderName);
 // read rather than a stored list that could disagree with what is on disk.
 QStringList shaderNames();
 
+// Whether the graphics output is published as a Spout sender.
+//
+// A property of the OUTPUT, so it lives with the output's other settings (size, frame cap) rather than
+// with the window-publishing switch in the GUI's own settings: this one sends the picture, that one sends
+// the application window. Off by default - publishing opens a named sender that other programs can find,
+// which is not something to do unasked.
+bool spoutPublish();
+
+void setSpoutPublish(bool publish);
+
 // The file to READ for a given role. The user's copy when it exists, otherwise the shipped copy, and
 // an empty string when neither is present.
 QString shaderPath(const QString& fileName);

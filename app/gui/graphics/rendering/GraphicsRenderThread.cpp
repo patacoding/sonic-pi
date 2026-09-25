@@ -484,6 +484,90 @@ void GraphicsRenderThread::applyShaderCompile()
     emit shaderCompileFinished(true, QString(), QString(), 0, result.includedShaders);
 }
 
+bool GraphicsRenderThread::setSpoutPublishing(bool publish)
+{
+    if (!m_loopRunning.load(std::memory_order_relaxed))
+    {
+        GraphicsLog::warn(QStringLiteral("spout: %1 requested but the render loop is not running")
+                              .arg(publish ? QStringLiteral("publishing") : QStringLiteral("stopping")));
+        return false;
+    }
+
+    m_spoutRequestWanted.store(publish, std::memory_order_relaxed);
+    m_spoutRequestPending.store(true, std::memory_order_release);
+    return true;
+}
+
+bool GraphicsRenderThread::isSpoutPublishing() const
+{
+    QMutexLocker lock(&m_spoutMutex);
+    return m_spoutPublisher && m_spoutPublisher->isPublishing();
+}
+
+void GraphicsRenderThread::applySpoutRequest()
+{
+    const bool want = m_spoutRequestWanted.load(std::memory_order_relaxed);
+
+    QMutexLocker lock(&m_spoutMutex);
+
+    if (!want)
+    {
+        m_spoutPublishing.store(false, std::memory_order_relaxed);
+        if (m_spoutPublisher)
+        {
+            GraphicsLog::info(QStringLiteral("spout: stopping"));
+            m_spoutPublisher->stop();
+            m_spoutPublisher.reset();
+        }
+        return;
+    }
+
+    if (m_spoutPublisher && m_spoutPublisher->isPublishing())
+    {
+        m_spoutPublishing.store(true, std::memory_order_relaxed);
+        return;
+    }
+
+    const QSize size = renderTargetSize();
+    auto publisher = std::make_unique<GraphicsSpoutPublisher>();
+
+    QString error;
+    if (!publisher->start(QStringLiteral("Sonic Pi Graphics"), size.width(), size.height(), &error))
+    {
+        // Reported with the reason Spout gave: a menu item that does nothing with no explanation is the
+        // kind of thing a user retries forever.
+        GraphicsLog::error(QStringLiteral("spout: could not start publishing: %1").arg(error));
+        m_spoutPublishing.store(false, std::memory_order_relaxed);
+        return;
+    }
+
+    // Which adapter each half of the bridge landed on - the one fact about "can this machine share a
+    // texture between GL and D3D11" that only this process can report, and one the user cannot see for
+    // themselves. STATED, NOT ACTED ON: nothing in this feature switches adapters, and the picture works
+    // whichever pair this turns out to be. The comparison is by vendor word, which is a hint and is
+    // labelled as one.
+    const QString glAdapter = m_renderer.isEmpty() ? QStringLiteral("(unknown)") : m_renderer;
+    const QString dxAdapter = publisher->adapterName();
+    QString relation = QStringLiteral(" (Spout did not name its adapter)");
+    if (!dxAdapter.isEmpty())
+    {
+        const QString glVendor = glAdapter.section(QLatin1Char(' '), 0, 0);
+        const QString dxVendor = dxAdapter.section(QLatin1Char(' '), 0, 0);
+        relation = QStringLiteral(" (")
+                   + ((glAdapter.contains(dxVendor, Qt::CaseInsensitive)
+                       || dxAdapter.contains(glVendor, Qt::CaseInsensitive))
+                          ? QStringLiteral("same vendor - which a shared texture would require")
+                          : QStringLiteral("different vendors, so a shared texture between them is "
+                                           "impossible; the CPU route is the supported path anyway"))
+                   + QStringLiteral(")");
+    }
+    GraphicsLog::info(QStringLiteral("spout: GL renderer '%1'; Spout's D3D11 device is on '%2'%3")
+                          .arg(glAdapter, dxAdapter, relation));
+
+    m_spoutPublisher = std::move(publisher);
+    m_spoutPublishing.store(true, std::memory_order_relaxed);
+}
+
 void GraphicsRenderThread::installDebugLogger()
 {
     if (!m_context->hasExtension(QByteArrayLiteral("GL_KHR_debug")))
@@ -800,6 +884,11 @@ void GraphicsRenderThread::run()
         // refuses for no reason.
         if (m_forgetRequested.exchange(false, std::memory_order_acquire))
             applyShaderForget();
+
+        // Spout publishing asked for from the menu (or from the stored preference at startup): applied
+        // here, where the output size is known.
+        if (m_spoutRequestPending.exchange(false, std::memory_order_acquire))
+            applySpoutRequest();
 
         // Applied at the top of the frame, before anything is drawn, so a resize
         // can never land between the clear and the draw. This is the only place

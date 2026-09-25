@@ -319,6 +319,17 @@ QStringList shaderNames()
     return names;
 }
 
+bool spoutPublish()
+{
+    migrateFromGuiSettingsOnce();
+    return readSetting(QStringLiteral("publish-spout"), false).toBool();
+}
+
+void setSpoutPublish(bool publish)
+{
+    writeSetting(QStringLiteral("publish-spout"), publish);
+}
+
 
 QString writableShaderPath(const QString& fileName)
 {

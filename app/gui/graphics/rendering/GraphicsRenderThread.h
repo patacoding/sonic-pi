@@ -16,6 +16,10 @@
 #include "GraphicsRenderer.h"
 #include "GraphicsSharedFrame.h"
 #include "GraphicsTarget.h"
+// The Spout sender. Held by unique_ptr, so the complete type is needed here - and it is Windows-only by
+// construction (its .cpp includes the Spout SDK), which is why the class itself is declared for every
+// platform and simply never started elsewhere.
+#include "graphics/output/GraphicsSpoutPublisher.h"
 
 #include <QThread>
 #include <QString>
@@ -245,6 +249,19 @@ public:
     // size until the render thread has applied it.
     QSize renderTargetSize() const;
 
+    // Publish the graphics output as a Spout sender ("Sonic Pi Graphics"), or stop doing so.
+    //
+    // Returns whether the REQUEST was accepted, not whether a sender exists yet: starting one needs the
+    // output size, which is only known once the render loop has built its targets, so the work is applied
+    // on the render thread at the top of a frame like every other request in this feature. The outcome -
+    // and the reason when it fails - is in the log, which is where a user looks when a menu item seems to
+    // do nothing.
+    //
+    // Safe from any thread. NOT the window publisher in platform/spout_publisher.cpp - that sends the
+    // application window, this sends the picture at the configured output size.
+    bool setSpoutPublishing(bool publish);
+    bool isSpoutPublishing() const;
+
     // Ask the loop to finish and block until the thread has stopped.
     //
     // Safe to call more than once and safe when the thread was never started.
@@ -374,6 +391,27 @@ private:
 
     // Apply a pending forget request: destroy that buffer's renderer, unless it is the one on screen.
     void applyShaderForget();
+
+    // The Spout sender, created on demand from the menu and owned here because this thread is the one
+    // producing frames. It has its own thread for the DX upload; this object is only the handle.
+    //
+    // Guarded by its own mutex rather than by the renderer mutex: a menu click creating or dropping the
+    // sender must not wait for a frame, and the sender's own thread does the waiting.
+    mutable QMutex m_spoutMutex;
+    std::unique_ptr<GraphicsSpoutPublisher> m_spoutPublisher;
+
+    // Whether the frame loop should hand frames to the sender. An atomic bool read per frame without the
+    // lock, so toggling it from the menu is not a lock in the hot path.
+    std::atomic<bool> m_spoutPublishing{false};
+
+    // A change asked for from another thread, applied at the top of a frame - see setSpoutPublishing().
+    std::atomic<bool> m_spoutRequestPending{false};
+    std::atomic<bool> m_spoutRequestWanted{false};
+
+    // Apply a pending Spout request: create the sender at the current output size, or drop it. Runs on the
+    // render thread, where the size is known and (for the frame hand-off that follows) the context is
+    // current by construction.
+    void applySpoutRequest();
 
     // The two render targets, alternating.
     //

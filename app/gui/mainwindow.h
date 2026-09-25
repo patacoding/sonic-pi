@@ -902,6 +902,11 @@ private:
     // independent of the GUI; these are its menu and toolbar entry points.
     QAction *graphicsOutAct;
     QAction *graphicsFullscreenAct;
+#ifdef Q_OS_WIN
+    // Publishes the graphics OUTPUT (the picture) as a Spout sender - not the same as spoutPublishAct
+    // above, which publishes the application window.
+    QAction *graphicsSpoutAct;
+#endif
     // Re-reads the shader files from disk. They live outside the binary so they
     // can be edited and reloaded without a rebuild.
     QAction *graphicsReloadShaderAct;
