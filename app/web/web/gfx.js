@@ -31,9 +31,11 @@
 
 import { parseDirective, SIGIL, SIGIL_VERBOSE } from "./gfx-directive.js";
 import { createCanvas } from "./gfx-canvas.js";
+import { createPanel } from "./gfx-ui.js";
 
 const STYLE_ID = "gfx-style";
 const ALPHA_KEY = "sp-gfx-ui-alpha";
+const CANVAS_KEY = "sp-gfx-canvas";
 const SHADER_FILE = "gfx-shader.frag";
 
 // web/gfx-shader.frag is the shader, and the only copy of it: one file to edit, and editing it
@@ -77,6 +79,9 @@ const alpha = () => {
 };
 const applyAlpha = (v) => document.documentElement.style.setProperty("--gfx-ui-pct", `${Math.round(v * 100)}%`);
 
+/** The canvas is on unless it has been turned off; a stored "0" is the only thing that turns it off. */
+const canvasOn = () => localStorage.getItem(CANVAS_KEY) !== "0";
+
 /** The frequency bands the audio is read in, in Hz -- what a player calls bass through treble. */
 const BANDS = [[40, 250], [250, 800], [800, 3000], [3000, 12000]];
 
@@ -106,16 +111,80 @@ function install() {
 
   const problem = (text) => (log ? log(`Graphics — ${text}`) : console.warn(`Graphics — ${text}`));
 
+  // ── the extension panel ────────────────────────────────────────────────────────────────────────
+  // Every feature we add gets a section here and draws nothing of its own: see gfx-ui.js. The spec is
+  // rebuilt rather than mutated, so a value that changes (the uniform list, once the shader links) is
+  // just the next rebuild.
+  const sections = () => [
+    {
+      id: "interface",
+      title: "Interface",
+      items: [
+        {
+          kind: "slider", label: "UI opacity", min: 30, max: 100, step: 1,
+          value: Math.round(alpha() * 100),
+          format: (v) => `${v}%`,
+          title: "How opaque Sonic Pi's own surfaces are over the picture. Lower shows more shader.",
+          onInput: (v) => { localStorage.setItem(ALPHA_KEY, String(v / 100)); applyAlpha(v / 100); },
+        },
+        {
+          kind: "switch", label: "Shader canvas", value: canvasOn(),
+          title: "Draw the shader behind the interface. Off leaves everything else working.",
+          onChange: (on) => {
+            localStorage.setItem(CANVAS_KEY, on ? "1" : "0");
+            if (canvas) canvas.canvas.style.display = on ? "" : "none";
+          },
+        },
+      ],
+    },
+    {
+      id: "shader",
+      title: "Shader",
+      items: [
+        { kind: "note", text: `Editing web/${SHADER_FILE} and reloading is the whole editor for now. It is fetched fresh each load, so nothing needs rebuilding.` },
+        {
+          kind: "list", label: "Uniforms the shader really has (from the link, not its source):",
+          items: canvas ? canvas.usable : ["— the shader has not linked yet"],
+        },
+        {
+          kind: "button", label: "Reload shader", title: "Fetch gfx-shader.frag again and reload the page",
+          onClick: () => location.reload(),
+        },
+        {
+          kind: "button", label: "Say the uniforms in the Log",
+          title: "Write the list above into Sonic Pi's own Log panel",
+          onClick: () => log?.(`Graphics — uniforms: ${canvas ? canvas.usable.join(", ") || "none" : "the shader has not linked yet"}`),
+        },
+      ],
+    },
+    {
+      id: "next",
+      title: "Coming here",
+      items: [
+        { kind: "note", text: "Shader buffer tabs, per-buffer uniforms and the rest of the desktop graphics feature land in this panel, one section each." },
+      ],
+    },
+  ];
+
+  const ui = createPanel({
+    title: "Extensions",
+    sections: sections(),
+    // rebuilt on open, so a list that could only be known later (the shader's uniforms) is right
+    onOpen: () => ui.rebuild(),
+  });
+
   (async () => {
     const shader = await loadShader();
     if (!shader.fromFile) problem(`${shader.why}, so the placeholder shader is running — it declares no uniform and answers no directive`);
     canvas = createCanvas({ source: shader.source, onProblem: problem });
     if (!canvas) return;
     canvas.canvas.setAttribute("aria-hidden", "true");
+    canvas.canvas.style.display = canvasOn() ? "" : "none";
     document.body.insertBefore(canvas.canvas, document.body.firstChild);
     canvas.setSampleRate(() => taps?.ctx.sampleRate ?? 48000);
     canvas.onFeed(feed);
     window.sonicPiGfx.canvas = canvas.canvas;
+    ui.rebuild();                                    // the uniform list is only knowable now
     log?.(`Graphics — ${canvas.usable.length} uniform${canvas.usable.length === 1 ? "" : "s"} in the shader: ${canvas.usable.join(", ") || "none"}`);
   })();
 
@@ -179,11 +248,20 @@ function install() {
   window.sonicPiGfx = {
     record,
     canvas: null,
+    /** The extension panel (gfx-ui.js): the place every feature we add puts its controls. */
+    ui,
     get uniforms() { return canvas ? [...canvas.uniforms].map(([n, u]) => `${n}:${u.type ?? "unsupported"}`) : []; },
     /** Set one by hand, as the directive would: `sonicPiGfx.set("uGain", [0.5])` */
     set: (name, values) => canvas?.set(name, values) ?? { ok: false, error: "no canvas" },
     reload: () => location.reload(),
-    alpha(v) { if (v == null) return alpha(); localStorage.setItem(ALPHA_KEY, String(v)); applyAlpha(v); return v; },
+    alpha(v) { if (v == null) return alpha(); localStorage.setItem(ALPHA_KEY, String(v)); applyAlpha(v); ui.rebuild(); return v; },
+    canvasOn(v) {
+      if (v == null) return canvasOn();
+      localStorage.setItem(CANVAS_KEY, v ? "1" : "0");
+      if (canvas) canvas.canvas.style.display = v ? "" : "none";
+      ui.rebuild();
+      return v;
+    },
     sigils: [SIGIL, SIGIL_VERBOSE],
   };
 }
