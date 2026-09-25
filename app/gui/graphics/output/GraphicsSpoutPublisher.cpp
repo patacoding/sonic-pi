@@ -17,6 +17,7 @@
 
 #include "SpoutDX.h"
 
+#include <QElapsedTimer>
 #include <QThread>
 
 #include <cstring>
@@ -39,6 +40,14 @@ constexpr DXGI_FORMAT kSenderFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 // because the caller may be the render thread: a Spout runtime that never gets anywhere must not become a
 // frozen picture.
 constexpr int kStartupWaitMs = 5000;
+
+// The upload measurement: which sends to throw away, and how many to average.
+//
+// The first sends of a session create the shared texture on the receiving side and cost several times the
+// steady figure - measuring those and calling it "the cost" would report the receiver connecting rather
+// than the cost of sending. Same reasoning as the render thread's read-back measurement.
+constexpr int kUploadWarmupSends = 30;
+constexpr int kUploadMeasuredSends = 120;
 
 const char* formatName(DXGI_FORMAT format)
 {
@@ -90,6 +99,11 @@ bool GraphicsSpoutPublisher::start(const QString& senderName, int width, int hei
         m_sequence = 0;
         m_stopping = false;
         m_startupFinished = false;
+        // A fresh session: the previous one's upload measurement does not describe this one, and the first
+        // sends of a new sender are warm-up again.
+        m_sendMsSum = 0.0;
+        m_sendCount = 0;
+        m_sendCostLogged = false;
     }
 
     QThread::start();   // the sender thread: it owns the spoutDX object and the DX upload loop
@@ -163,12 +177,12 @@ QString GraphicsSpoutPublisher::adapterName() const
     return m_adapterName;
 }
 
-void GraphicsSpoutPublisher::publishFrame(const unsigned char* rgbaTopDown)
+void GraphicsSpoutPublisher::publishFrame(const unsigned char* pixels, bool bottomUp)
 {
-    if (!isPublishing() || !rgbaTopDown || m_width <= 0 || m_height <= 0)
+    if (!isPublishing() || !pixels || m_width <= 0 || m_height <= 0)
         return;
 
-    const size_t bytes = size_t(m_width) * size_t(m_height) * 4;
+    const size_t rowBytes = size_t(m_width) * 4;
 
     QMutexLocker lock(&m_mutex);
     const int index = freeSlotLocked();
@@ -181,7 +195,20 @@ void GraphicsSpoutPublisher::publishFrame(const unsigned char* rgbaTopDown)
     }
 
     Slot& slot = m_slots[index];
-    std::memcpy(slot.pixels.data(), rgbaTopDown, bytes);
+    if (bottomUp)
+    {
+        // Row by row, bottom of the picture last: the flip costs one memcpy per row and no extra traffic.
+        for (int y = 0; y < m_height; ++y)
+        {
+            const unsigned char* source = pixels + size_t(m_height - 1 - y) * rowBytes;
+            std::memcpy(slot.pixels.data() + size_t(y) * rowBytes, source, rowBytes);
+        }
+    }
+    else
+    {
+        std::memcpy(slot.pixels.data(), pixels, rowBytes * size_t(m_height));
+    }
+
     slot.sequence = ++m_sequence;
     slot.filled = true;
     m_wake.wakeOne();
@@ -320,7 +347,12 @@ void GraphicsSpoutPublisher::run()
         // slot stays marked `sending` for the whole call, so it cannot be written while being read.
         bool sent = false;
         if (m_sender)
+        {
+            QElapsedTimer upload;
+            upload.start();
             sent = m_sender->SendImage(m_slots[index].pixels.data(), unsigned(m_width), unsigned(m_height));
+            recordSendCost(double(upload.nsecsElapsed()) / 1.0e6);
+        }
 
         {
             QMutexLocker lock(&m_mutex);
@@ -346,6 +378,31 @@ void GraphicsSpoutPublisher::run()
         QMutexLocker lock(&m_mutex);
         m_wake.wakeAll();
     }
+}
+
+void GraphicsSpoutPublisher::recordSendCost(double ms)
+{
+    // Called from the sender thread and nowhere else, so these three members need no lock. The counters the
+    // render thread reads are the atomics; this is bookkeeping local to this thread.
+    if (m_sendCostLogged)
+        return;
+
+    ++m_sendCount;
+    if (m_sendCount <= kUploadWarmupSends)
+        return;
+
+    m_sendMsSum += ms;
+    if (m_sendCount - kUploadWarmupSends < kUploadMeasuredSends)
+        return;
+
+    // Once, and then never again: this file's rule is that the log carries what changed, not a per-second
+    // stream of numbers. If the cost later grows because a receiver appeared or went away, that shows up as
+    // dropped frames, which IS reported.
+    m_sendCostLogged = true;
+    GraphicsLog::info(QStringLiteral("spout: handing one frame to the sender costs %1 ms (DX upload, "
+                                     "averaged over %2 frames)")
+                          .arg(m_sendMsSum / double(kUploadMeasuredSends), 0, 'f', 2)
+                          .arg(kUploadMeasuredSends));
 }
 
 void GraphicsSpoutPublisher::failStartup(const QString& reason)

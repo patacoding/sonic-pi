@@ -150,10 +150,28 @@ void GraphicsPreviewWindow::refreshFpsOverlay()
                                 ? QStringLiteral("gpu %1 ms").arg(s.gpuMsAvg, 0, 'f', 2)
                                 : QStringLiteral("gpu -");
 
-    if (fpsText == m_lastFpsText && gpuText == m_lastGpuText)
+    // Spout, when publishing: how much is going out, how much is being thrown away, and what the
+    // read-back costs. The drop count is the one to watch - a receiver that is behind shows a picture
+    // that is no longer the newest frame. Absent entirely when not publishing, so the overlay is the size
+    // it always was for anyone not using this.
+    const QString spoutText = s.spoutPublishing
+                                  ? QStringLiteral("spout %1 fps, %2 dropped, read-back %3 ms")
+                                        .arg(s.spoutSentPerSec)
+                                        .arg(s.spoutDroppedPerSec)
+                                        .arg(s.spoutReadbackMs >= 0.0
+                                                 ? QString::number(s.spoutReadbackMs, 'f', 2)
+                                                 : QStringLiteral("-"))
+                                  : QString();
+
+    // Every line that is drawn is compared, including the Spout one. Comparing two of three was the
+    // version of this that shipped with the Spout figures: with the frame rate steady (which is the
+    // normal state of a working render loop) the numbers on the Spout line could change - and the
+    // overlay would keep showing the old ones, because the two lines it did compare had not moved.
+    if (fpsText == m_lastFpsText && gpuText == m_lastGpuText && spoutText == m_lastSpoutText)
         return;
     m_lastFpsText = fpsText;
     m_lastGpuText = gpuText;
+    m_lastSpoutText = spoutText;
 
     QFont font(QStringLiteral("Consolas"));
     font.setPixelSize(kFontPx);
@@ -162,10 +180,11 @@ void GraphicsPreviewWindow::refreshFpsOverlay()
 
     const QFontMetrics fm(font);
     const int textW = qMax(qMax(fm.horizontalAdvance(fpsText), fm.horizontalAdvance(targetText)),
-                           fm.horizontalAdvance(gpuText));
+                           qMax(fm.horizontalAdvance(gpuText), fm.horizontalAdvance(spoutText)));
     const int lineH = fm.height();
+    const int lines = spoutText.isEmpty() ? 3 : 4;
 
-    QImage img(textW + kPadding * 2, lineH * 3 + kPadding * 2, QImage::Format_ARGB32);
+    QImage img(textW + kPadding * 2, lineH * lines + kPadding * 2, QImage::Format_ARGB32);
     img.fill(QColor(0, 0, 0, 170));
 
     QPainter p(&img);
@@ -179,6 +198,12 @@ void GraphicsPreviewWindow::refreshFpsOverlay()
     p.setPen(QColor(210, 210, 210));
     p.drawText(kPadding, kPadding + lineH + fm.ascent(), targetText);
     p.drawText(kPadding, kPadding + lineH * 2 + fm.ascent(), gpuText);
+    if (!spoutText.isEmpty())
+    {
+        // Amber when frames are being dropped: that is a fault in the receiving direction, not a rate.
+        p.setPen(s.spoutDroppedPerSec > 0 ? QColor(255, 190, 70) : QColor(210, 210, 210));
+        p.drawText(kPadding, kPadding + lineH * 3 + fm.ascent(), spoutText);
+    }
     p.end();
 
     m_view.setOverlay(img);

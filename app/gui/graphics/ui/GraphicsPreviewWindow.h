@@ -110,6 +110,9 @@ private:
     // rate can hold steady while the shader gets more expensive, and that is exactly the case
     // worth seeing.
     QString m_lastGpuText;
+    // And the Spout line, for the same reason: it changes every second while publishing, whether or
+    // not the frame rate does.
+    QString m_lastSpoutText;
 };
 
 } // namespace SonicPi

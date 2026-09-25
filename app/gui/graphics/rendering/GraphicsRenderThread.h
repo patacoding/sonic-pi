@@ -78,6 +78,18 @@ struct GraphicsFrameStats
     double  gpuMsAvg           = -1.0;  // mean over the last reporting window
     double  gpuMsWorst         = -1.0;  // worst in the last reporting window
     bool    belowTarget         = false;
+
+    // Spout publishing, per reporting window. Here for the same reason as the figures above: the render
+    // thread is where the frames and the read-back are counted, and a display that counted them itself
+    // would be a second implementation of the same number.
+    //
+    // The DROP count is the one that matters to a user: a nonzero drop rate means the receiving side is
+    // behind, and the picture being sent is not the picture being drawn. `spoutReadbackMs` is what the
+    // hand-off costs the render loop, -1 when nothing has been measured yet.
+    bool    spoutPublishing     = false;
+    quint64 spoutSentPerSec     = 0;
+    quint64 spoutDroppedPerSec  = 0;
+    double  spoutReadbackMs     = -1.0;
 };
 
 // The Graphics renderer's own thread, its own OpenGL context, and its frame loop.
@@ -412,6 +424,54 @@ private:
     // render thread, where the size is known and (for the frame hand-off that follows) the context is
     // current by construction.
     void applySpoutRequest();
+
+    // ---- the Spout frame hand-off -------------------------------------------------------------
+    //
+    // TWO PIXEL-PACK BUFFERS, ONE FRAME BEHIND. The naive read-back - glReadPixels straight into memory -
+    // makes the CPU wait for the GPU to finish the frame, every frame. Reading into a buffer instead
+    // queues the copy, and taking the PREVIOUS frame's buffer next frame means the copy has long finished:
+    // measured on this machine at the configured 1920x1080, 0.77 ms a frame against 1.41 ms for the naive
+    // route, with the map wait at 0.23 ms (tools/gl-readback-probe, docs/graphics-output-design.md 8.6).
+    //
+    // Created and destroyed with the render targets, because their size is the target's size.
+    bool setUpSpoutReadback();
+    void releaseSpoutReadback();
+    // Issue this frame's read-back and hand the previous frame to the sender. Called after the draw, with
+    // the target's framebuffer still bound.
+    void publishFrameToSpout();
+    bool spoutReadbackReady() const { return m_readbackPbos[0] != 0 && m_readbackPbos[1] != 0; }
+
+    GLuint m_readbackPbos[2] = { 0, 0 };
+    // Which buffer this frame's copy goes into; the other one holds the frame being taken.
+    int m_readbackSlot = 0;
+    // False until one frame has been issued: on the first frame there is no previous frame to take.
+    bool m_readbackHasPrevious = false;
+
+    // What the hand-off costs, accumulated over the reporting window and logged with the other figures.
+    // Kept split three ways because "9 ms" is not actionable on its own: queueing the copy, waiting for
+    // the driver to hand the pixels over, and copying them into the sender are three different problems
+    // with three different fixes, and only the second one is allowed to be slow.
+    double m_spoutReadbackMsSum = 0.0;
+    double m_spoutIssueMsSum = 0.0;
+    double m_spoutMapMsSum = 0.0;
+    double m_spoutPublishMsSum = 0.0;
+    double m_spoutUnmapMsSum = 0.0;
+    int m_spoutReadbackCount = 0;
+    // How many reporting windows have carried a read-back measurement, so the warm-up can be skipped.
+    int m_spoutMeasuredWindows = 0;
+    // The figure that was last written to the log, so a later move can be reported as a move.
+    double m_spoutLoggedMs = -1.0;
+
+    // The window's Spout figures, published to GraphicsFrameStats once a second.
+    std::atomic<quint64> m_spoutSentWindow{0};
+    std::atomic<quint64> m_spoutDroppedWindow{0};
+    std::atomic<double> m_spoutReadbackMsAvg{-1.0};
+
+    // The one-off measurement line, and the drop warning. Both are logged on CHANGE rather than once a
+    // second - this file's rule: no per-second statistics in the log, because the figures belong on screen
+    // and a log full of frame rates is harder to read than the thing it reports on.
+    bool m_spoutFirstMeasurementLogged = false;
+    bool m_spoutDropping = false;
 
     // The two render targets, alternating.
     //

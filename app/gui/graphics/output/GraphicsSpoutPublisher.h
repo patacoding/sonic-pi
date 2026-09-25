@@ -69,17 +69,18 @@ public:
     // the state that makes a zero-copy route impossible, and it is invisible from outside the process.
     QString adapterName() const;
 
-    // One frame: RGBA8, TOP-DOWN (row 0 is the top of the picture).
+    // One frame: RGBA8.
     //
-    // TOP-DOWN because spoutDX::SendImage copies the buffer straight into a D3D11 texture with
-    // UpdateSubresource, and a D3D texture's row 0 is its top. A GL read-back is bottom-up, so whoever
-    // reads the pixels is the one who has to flip them - doing it here would mean the caller's mistake
-    // (an upside-down picture in every receiver) is invisible until someone looks at a receiver.
+    // `bottomUp` says the rows are in OpenGL order (row 0 is the BOTTOM of the picture), which is what a
+    // glReadPixels gives and what spoutDX::SendImage does NOT want - it copies the buffer straight into a
+    // D3D11 texture with UpdateSubresource, where row 0 is the top. The flip therefore happens HERE, inside
+    // the copy this class has to make anyway, rather than in the caller - who would need a staging buffer
+    // of its own to flip into, and would double the 8 MB of traffic per frame at 1080p to do it.
     //
     // NEVER BLOCKS. The pixels are copied into a spare buffer and the sender thread is woken. If every
     // buffer is still in flight the frame is dropped and counted: a backlog here means a receiver that is
     // behind, and waiting for it would stall the render loop - the one thing this must never do.
-    void publishFrame(const unsigned char* rgbaTopDown);
+    void publishFrame(const unsigned char* pixels, bool bottomUp);
 
     // Frame counters since the last call, then reset. For the once-a-second log line.
     quint64 takeSentCount();
@@ -111,6 +112,9 @@ private:
     // Report a startup failure and wake whoever is waiting in start().
     void failStartup(const QString& reason);
 
+    // Time one upload, and report the steady figure once. Called only from run(), so it needs no lock.
+    void recordSendCost(double ms);
+
     mutable QMutex m_mutex;
     QWaitCondition m_wake;
     bool m_stopping = false;
@@ -130,6 +134,16 @@ private:
     std::atomic<bool> m_publishing{false};
     std::atomic<quint64> m_sent{0};
     std::atomic<quint64> m_dropped{0};
+
+    // What the DX upload costs, on this thread. Measured because it is the last number behind "can the CPU
+    // route keep up" that the probe could not answer: spoutDX::SendImage is Spout's code, not GL's, so the
+    // only place to time it is here (docs/graphics-output-design.md 8.6, item 3).
+    //
+    // The first sends are not counted. They carry the shared texture's creation on the receiver side and
+    // are several times the steady cost - the same reason the render thread throws its first windows away.
+    double m_sendMsSum = 0.0;
+    int m_sendCount = 0;
+    bool m_sendCostLogged = false;
 };
 
 } // namespace SonicPi
