@@ -32,6 +32,7 @@
 import { parseDirective, SIGIL, SIGIL_VERBOSE } from "./gfx-directive.js";
 import { createCanvas } from "./gfx-canvas.js";
 import { createGrounds } from "./gfx-grounds.js";
+import { createSettings } from "./gfx-settings.js";
 import { createPanel } from "./gfx-ui.js";
 
 const STYLE_ID = "gfx-style";
@@ -75,16 +76,20 @@ html { background: #05070d; }
 // they are the thing to turn rather than the surfaces that use them (CodeMirror paints the editor's
 // background itself, inline, from --Background, so a rule on an ancestor cannot reach it).
 const grounds = createGrounds();
-const alpha = () => {
-  const v = Number(localStorage.getItem(ALPHA_KEY));
-  return Number.isFinite(v) && v > 0 && v <= 1 ? v : 0.82;
-};
+// The player's settings, read through gfx-settings.js: an absent entry and a legitimate 0 are
+// different things, and confusing them is what made the opacity fall back to the default whenever
+// the value was read again (a theme switch, a reload) instead of only when it was set.
+const settings = createSettings();
+
+/** How much of the interface's ground colour stays: 0 is a real choice, not "unset". */
+const alpha = () => settings.number(ALPHA_KEY, { min: 0, max: 1, fallback: 0.82 });
 
 /** Turn the ground colours into their translucent selves -- only while there is a picture behind them. */
 const applyAlpha = (v) => (canvasOn() ? grounds.apply(Math.round(v * 100)) : grounds.clear());
 
 /** The canvas is on unless it has been turned off; a stored "0" is the only thing that turns it off. */
-const canvasOn = () => localStorage.getItem(CANVAS_KEY) !== "0";
+/** The canvas is on unless it has been turned off. */
+const canvasOn = () => settings.bool(CANVAS_KEY, true);
 
 /** The frequency bands the audio is read in, in Hz -- what a player calls bass through treble. */
 const BANDS = [[40, 250], [250, 800], [800, 3000], [3000, 12000]];
@@ -135,13 +140,13 @@ function install() {
           value: Math.round(alpha() * 100),
           format: (v) => `${v}%`,
           title: "How much of the interface's own ground colour stays. Lower shows more of the picture; the text is unaffected.",
-          onInput: (v) => { localStorage.setItem(ALPHA_KEY, String(v / 100)); applyAlpha(v / 100); },
+          onInput: (v) => { settings.set(ALPHA_KEY, v / 100); applyAlpha(v / 100); },
         },
         {
           kind: "switch", label: "Shader canvas", value: canvasOn(),
           title: "Draw the shader behind the interface. Off leaves everything else working, and puts the interface's own grounds back to opaque.",
           onChange: (on) => {
-            localStorage.setItem(CANVAS_KEY, on ? "1" : "0");
+            settings.set(CANVAS_KEY, on);
             if (canvas) canvas.canvas.style.display = on ? "" : "none";
             applyAlpha(alpha());
           },
@@ -265,10 +270,10 @@ function install() {
     /** Set one by hand, as the directive would: `sonicPiGfx.set("uGain", [0.5])` */
     set: (name, values) => canvas?.set(name, values) ?? { ok: false, error: "no canvas" },
     reload: () => location.reload(),
-    alpha(v) { if (v == null) return alpha(); localStorage.setItem(ALPHA_KEY, String(v)); applyAlpha(v); ui.rebuild(); return v; },
+    alpha(v) { if (v == null) return alpha(); settings.set(ALPHA_KEY, v); applyAlpha(v); ui.rebuild(); return v; },
     canvasOn(v) {
       if (v == null) return canvasOn();
-      localStorage.setItem(CANVAS_KEY, v ? "1" : "0");
+      settings.set(CANVAS_KEY, v);
       if (canvas) canvas.canvas.style.display = v ? "" : "none";
       applyAlpha(alpha());       // the grounds fade only while there is a picture to show through
       ui.rebuild();
