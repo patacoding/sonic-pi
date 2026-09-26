@@ -186,7 +186,7 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
   let set = null;                    // every document there is, and which one is on screen
   let doc = null;                    // the document being edited (the set's current one)
   let tab = FIRST_TAB;               // the tab on screen
-  const pictures = new Map();        // name → the picture, THIS SESSION ONLY (never saved)
+  const pictures = new Map();        // name → the picture: this session's memory, and the exported file
   let report = null;                 // the last compile's result
 
   const say = (text, bad = false) => { sayEl.textContent = text; sayEl.classList.toggle("bad", bad); };
@@ -318,20 +318,39 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
     const out = document.createElement("button");
     out.className = "gfx-ed-btn";
     out.textContent = "Export to a file";
-    out.title = "Every document, as one JSON file. The code and the channels: a picture a channel wants is named, not carried.";
+    out.title = "Every document as one JSON file: the code, the channels, and — base64 — the pictures those channels name.";
     out.addEventListener("click", () => exportSet());
     const into = document.createElement("button");
     into.className = "gfx-ed-btn";
     into.textContent = "Import a file";
-    into.title = "Read a file this exported. Its documents are added, and the first of them is shown.";
+    into.title = "Read a file this exported: its documents and its pictures are added, and the first document is shown.";
     into.addEventListener("click", () => importPicker());
     row.append(out, into);
-    box.append(row, note("Saved in this browser as you work, and in a file when you ask. Code only: an uploaded picture is kept for the session and named, never saved."));
+    box.append(row, note("Saved in this browser as you work, and in a file when you ask. What this browser keeps is the CODE; a picture you upload lives in this session, and travels in an exported file (base64) if a document names it."));
     return box;
   }
 
-  /** The set as a file's text. Separate from the download, so what is written can be read back. */
-  const exportText = () => (set ? serializeSet(set) : "");
+  /**
+   * The set as a file's text: the code, and the pictures it needs, base64.
+   *
+   * This is the ONE place pictures are written down. localStorage still never holds them (a picture
+   * that came back from a reload would be megabytes of a thing the player may have deleted, and the
+   * rule "only the code is saved" is what keeps a document small) -- but a file the player asks for is
+   * a different act: they asked for this project, with its pictures, in one file.
+   *
+   * Only the pictures some document names are carried: a picture uploaded and never wired to a channel
+   * is not part of the project's picture of itself.
+   */
+  function exportText() {
+    if (!set) return "";
+    const want = wantedEverywhere();
+    const images = {};
+    for (const [name, held] of pictures) if (want.has(name) && held.url.startsWith("data:")) images[name] = held.url;
+    return JSON.stringify(normalizeForFile(set, images));
+  }
+
+  /** The set as it goes in a file: the same documents, plus what the pictures are. */
+  const normalizeForFile = (documents, images) => ({ ...JSON.parse(serializeSet(documents)), images });
 
   function exportSet() {
     const text = exportText();
@@ -346,13 +365,22 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 0);
-    say(`exported ${set.documents.length} document${set.documents.length > 1 ? "s" : ""}`);
-    return { ok: true, name: file };
+    const carried = (text.match(/"data:image\//g) ?? []).length;
+    const mb = (text.length / 1048576).toFixed(1);
+    say(`exported ${set.documents.length} document${set.documents.length > 1 ? "s" : ""}${carried ? ` and ${carried} picture${carried > 1 ? "s" : ""}` : ""} — ${mb} MB`);
+    return { ok: true, name: file, bytes: text.length };
   }
 
   /** Read a file this exported. Its documents are ADDED rather than put in place of what is here: a
    *  file is not worth losing what is on screen for, and a name that is taken is made unique. */
-  function importSet(text) {
+  async function importSet(text) {
+    // a file may carry pictures as well as code (gfx-project: `images`), and they are taken in FIRST:
+    // a document that arrives naming a picture then has it, rather than showing "(not here)" until the
+    // next repaint
+    let raw = null;
+    try { raw = JSON.parse(text); } catch { /* deserializeSet says so below */ }
+    const took = await takeImages(raw?.images);
+
     const incoming = deserializeSet(text);
     if (!incoming) return { ok: false, error: "that file is not a shader set this can read" };
     save();                                  // what is on screen first: it is about to change
@@ -363,9 +391,38 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
       added.push(d.name);
     }
     loadDocument(set.documents.find((d) => d.name === added[0]), { compileIt: true });
-    say(`imported ${added.join(", ")}`);
-    log?.(`Graphics — imported ${added.join(", ")}`);
-    return { ok: true, added };
+    const withPictures = took.length ? ` and ${took.length} picture${took.length > 1 ? "s" : ""} (${took.join(", ")})` : "";
+    say(`imported ${added.join(", ")}${withPictures}`);
+    log?.(`Graphics — imported ${added.join(", ")}${withPictures}`);
+    return { ok: true, added, images: took };
+  }
+
+  /**
+   * The pictures a file carries, put into this session's textures. Each is a data URL -- the bytes the
+   * file holds, not a name to go looking for -- so a project opens with its pictures in it.
+   *
+   * Junk is skipped with a word, and so is anything larger than one picture may be: a file that cannot
+   * be opened is worse than one that says what it left out.
+   */
+  async function takeImages(images) {
+    if (!images || typeof images !== "object") return [];
+    const took = [];
+    for (const [name, url] of Object.entries(images)) {
+      if (typeof url !== "string" || !/^data:image\//.test(url)) { say(`the file's "${name}" is not a picture, so it was left out`, true); continue; }
+      if (url.length > MAX_IMAGE * 1.4) { say(`"${name}" is too big to take from a file (>${Math.round(MAX_IMAGE / 1048576)} MB), so it was left out`, true); continue; }
+      try {
+        const img = new Image();
+        img.src = url;
+        await img.decode();
+        pictures.set(name, { img, url, width: img.naturalWidth || img.width, height: img.naturalHeight || img.height });
+        canvasNow()?.addImage(name, img);
+        took.push(name);
+      } catch (e) {
+        say(`"${name}" could not be read from the file: ${e.message}`, true);
+      }
+    }
+    if (took.length) paintChannels();
+    return took;
   }
 
   function importPicker() {
@@ -378,7 +435,7 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
       input.remove();
       if (!file) return;
       try {
-        const result = importSet(await file.text());
+        const result = await importSet(await file.text());
         if (!result.ok) say(result.error, true);
       } catch (e) { say(`could not read that file: ${e.message}`, true); }
     });
@@ -449,8 +506,8 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
       chanEl.appendChild(row);
     }
     const missing = missingImages(collect(), new Set(pictures.keys()));
-    if (missing.length) chanEl.appendChild(note(`Wanted but not here: ${missing.join(", ")}. A picture lives in this session only — it is never saved with the code — so choose it again on the channel that wants it, or that channel draws a placeholder.`));
-    if (wantedImages(collect()).length) chanEl.appendChild(note("A picture is kept in memory for this session and never written anywhere: saving a document saves the code and the name of the picture, not the picture."));
+    if (missing.length) chanEl.appendChild(note(`Wanted but not here: ${missing.join(", ")}. This browser does not keep pictures (only the code), so choose it again on the channel that wants it — or import a file that carries it — until then that channel draws a placeholder.`));
+    if (wantedImages(collect()).length) chanEl.appendChild(note("A picture lives in this session's memory. It is not kept in this browser, and it IS carried in an exported file, base64, for the channels that name it."));
     if (chanRefs.some((r) => r?.kind === "audio")) {
       chanEl.appendChild(note("Audio is a 512x2 texture, Shadertoy's layout: texture(iChannelN, vec2(f, 0.25)).x is the spectrum at f, and vec2(t, 0.75).x is the waveform, both 0..1. It is made from what the engine is playing every frame, so there is nothing to save."));
     }
@@ -481,6 +538,18 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
     return cell;
   }
 
+  /** A file as a data URL: base64 of its own bytes, and what an exported document carries. */
+  const readAsDataURL = (blob) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error("could not read the file"));
+    reader.onload = () => resolve(String(reader.result));
+    reader.readAsDataURL(blob);
+  });
+
+  /** The most one picture may weigh in an exported file (base64 is a third bigger again). Skipped with
+   *  a word rather than writing a file that cannot be opened back. */
+  const MAX_IMAGE = 12 * 1024 * 1024;
+
   /** Every picture anything still names: the document on screen live, the others as they are saved. */
   function wantedEverywhere() {
     const want = new Set();
@@ -506,7 +575,6 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
     for (const name of [...pictures.keys()]) {
       if (want.has(name)) continue;
       const held = pictures.get(name);
-      URL.revokeObjectURL(held.url);
       pictures.delete(name);
       canvasNow()?.removeImage?.(name);
       gone.push(name);
@@ -525,7 +593,7 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
     const button = document.createElement("button");
     button.className = "gfx-ed-btn gfx-ed-pick";
     button.textContent = "+";
-    button.title = `Choose a picture for iChannel${at} (it stays in this session, and is never saved)`;
+    button.title = `Choose a picture for iChannel${at}: it lives in this session, and an exported file carries it`;
     const input = document.createElement("input");
     input.type = "file";
     input.accept = "image/*";
@@ -553,7 +621,7 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
       const { gone } = applyChannels(true);           // saves, and lets go of any picture nothing names
       paintChannels();
       say(gone.length
-        ? `iChannel${i} reads nothing now — ${gone.join(", ")} left this session (never saved)`
+        ? `iChannel${i} reads nothing now — ${gone.join(", ")} left this session (it is in the browser's memory, not its storage)`
         : `iChannel${i} reads nothing now`);
     });
     return x;
@@ -567,13 +635,15 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
     // a big photograph takes a moment to decode, and a pane that says nothing for a moment is the
     // complaint this is answering -- so it says what it is doing before it does it
     say(`reading ${name}…`);
-    const url = URL.createObjectURL(file);
+    let url = "";
     try {
+      // the file AS IT IS, base64: it is what the thumbnail shows, and it is what an exported file
+      // carries. (Re-encoding through a canvas would change a JPEG and inflate it; this keeps the
+      // bytes the player chose, and there is no object URL to remember to revoke either.)
+      url = await readAsDataURL(file);
       const img = new Image();
       img.src = url;
       await img.decode();
-      const was = pictures.get(name);
-      if (was) URL.revokeObjectURL(was.url);          // the same file chosen again: one picture, one URL
       pictures.set(name, { img, url, width: img.naturalWidth || img.width, height: img.naturalHeight || img.height });
       canvasNow()?.addImage(name, img);
       if (at != null) {
@@ -582,10 +652,9 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
       }
       paintChannels();
       say(at == null
-        ? `${name} is in this session (never saved) — pick it on a channel`
-        : `${name} → ${tab} iChannel${at} (never saved)`);
+        ? `${name} is in this session — pick it on a channel`
+        : `${name} → ${tab} iChannel${at}`);
     } catch (e) {
-      URL.revokeObjectURL(url);        // it was never taken, so there is nothing holding it
       say(`could not read "${name}": ${e.message}`, true);
     }
   }
