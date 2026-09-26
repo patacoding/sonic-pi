@@ -272,6 +272,45 @@ function install() {
     log?.(`Graphics — the shader's own values: ${canvas.userUniforms.join(", ") || "none"}; the frame's: ${canvas.renderer.builtins.join(", ")}`);
   })();
 
+  // ── the top bar's tabs leave for sonic-pi.net ───────────────────────────────────────────────────
+  // This app IS the editor; the site's pages (Home, Examples, Learn, Tutorial, Support) live on
+  // sonic-pi.net, and the user asked for the bar's buttons to point there rather than at the copies
+  // in this tree. So the links are rewritten as the app starts -- in OUR layer, so upstream's build
+  // and its own tests are untouched, and so the change holds in dev and in the packaged site alike.
+  //
+  // They open a NEW TAB on purpose: a performance is running, and navigating the only tab away from
+  // the editor would stop the music.
+  //
+  // The local copies stay where they are: the Info card FETCHES a page's own document to show it
+  // inside the app (info.js textOf -> fileOf), so deleting them would break Info rather than tidy up.
+  const SITE_URL = "https://sonic-pi.net/";
+  const SITE_PAGES = { about: "index.html", examples: "examples.html", learn: "learn.html", tutorial: "tutorial.html", support: "support.html" };
+
+  function sendTabsOutward() {
+    const nav = document.getElementById("site-nav");
+    if (!nav) return 0;
+    let moved = 0;
+    for (const a of nav.querySelectorAll(".ic-tabs a[data-tab]")) {
+      const file = SITE_PAGES[a.dataset.tab];
+      if (!file || a.href.startsWith(SITE_URL)) continue;         // unknown tab, or already moved
+      a.href = SITE_URL + file;
+      a.target = "_blank";
+      a.rel = "noopener";
+      moved++;
+    }
+    const brand = nav.querySelector(".sn-brand");
+    if (brand && !brand.href.startsWith(SITE_URL)) {               // the wordmark is the site's home
+      brand.href = SITE_URL;
+      brand.target = "_blank";
+      brand.rel = "noopener";
+    }
+    // `a.sn-code` (the editor) and every one of the app's own toolbar buttons are left alone
+    return moved;
+  }
+
+  sendTabsOutward();
+  window.addEventListener("load", sendTabsOutward);               // and once more, after the page settles
+
   // ── the opacity shortcut ───────────────────────────────────────────────────────────────────────
   // Ctrl+Alt+Up / Ctrl+Alt+Down, 5% a press, because a performance should not need the mouse and the
   // panel. Chosen by MEASURING what is taken rather than by taste: of the 163 chords this app's own
