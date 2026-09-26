@@ -19,11 +19,13 @@
 // The rule from gfx-document.js carries through every control here: code is saved, pictures are not.
 // Uploading a picture puts it in this session's textures and nowhere else, and a document loaded
 // from storage says which picture it wants rather than carrying one.
-import { PASS_ORDER, SHARED, CHANNELS, BUFFER_PASSES, missingImages, wantedImages } from "./gfx-document.js";
+import { PASS_ORDER, SHARED, CHANNELS, BUFFER_PASSES, emptySet, uniqueName, serializeSet, deserializeSet, deserialize, emptyDocument, missingImages, wantedImages } from "./gfx-document.js";
 
 export const PANE = "gfx-shader";
 const STYLE_ID = "gfx-editor-style";
 const OPEN_KEY = "sp-gfx-editor-open";      // whether the pane was open when the page was left
+const SET_KEY = "sp-gfx-documents";         // the documents, and which one was on screen
+const ONE_KEY = "sp-gfx-document";          // the single document this replaced, still read once
 
 const TABS = [SHARED, ...PASS_ORDER];        // Common first, as Shadertoy has it, then the buffers, then Image
 
@@ -43,7 +45,14 @@ body[data-drawer="${PANE}"] #drawer { display: flex; }
 body[data-drawer="${PANE}"] #gfx-shader-pane { display: flex; }
 
 .gfx-ed-head { display: flex; align-items: center; gap: 8px; padding: 4px 8px 4px 6px; flex-shrink: 0; min-width: 0; }
-.gfx-ed-name { font: 600 var(--t-small, 12px) var(--code-font); color: var(--softForeground, var(--Foreground)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 12em; }
+.gfx-ed-docs { display: flex; align-items: center; gap: 3px; padding: 4px 8px 0 6px; flex-shrink: 0; overflow-x: auto; }
+.gfx-ed-doc { display: inline-flex; align-items: center; gap: 3px; padding: 2px 8px; border: none; border-bottom: 2px solid transparent; background: none; color: var(--softForeground, var(--Foreground)); font: 500 var(--t-tiny, 12px) var(--code-font); cursor: pointer; white-space: nowrap; }
+.gfx-ed-doc:hover { color: var(--WindowForeground); }
+.gfx-ed-doc.on { color: var(--WindowForeground); border-bottom-color: var(--HighlightedBackground); font-weight: 700; }
+.gfx-ed-doc .x { color: var(--faintText, var(--mutedForeground)); padding: 0 1px; border-radius: 2px; }
+.gfx-ed-doc .x:hover { color: var(--accentContrastText); background: var(--ErrorBackground); }
+.gfx-ed-add { font-weight: 700; padding: 2px 6px; }
+.gfx-ed-rename { width: 9em; background: var(--Background); color: var(--DefaultForeground, var(--Foreground)); border: 1px solid var(--HighlightedBackground); border-radius: var(--r-s, 3px); font: 500 var(--t-tiny, 12px) var(--code-font); padding: 1px 4px; }
 .gfx-ed-tabs { display: flex; gap: 2px; flex-shrink: 0; }
 .gfx-ed-tab { position: relative; padding: 3px 9px; border: none; border-radius: var(--r-s, 3px); background: var(--Tab); color: var(--TabText); font: 500 var(--t-tiny, 11px) var(--code-font); cursor: pointer; }
 .gfx-ed-tab.off { opacity: 0.55; }
@@ -88,11 +97,12 @@ const railIcon = () => {
 };
 
 /**
- * @param {{compile: (doc) => object, canvas: () => object, onChannel?: (pass, refs) => void, log?: (text) => void}} hooks
- *   `compile` is gfx.js's: it compiles a document, saves it, and returns the renderer's result.
+ * @param {{compile: (doc) => object, canvas: () => object, starter?: () => string, log?: (text) => void}} hooks
+ *   `compile` is gfx.js's: it compiles a document and returns the renderer's result.
  *   `canvas` is read late (the GL canvas arrives after the audio is attached), so it is a function.
+ *   `starter` is the code a NEW document begins with (web/gfx-shader.frag, in gfx.js).
  */
-export function createShaderPane({ compile, canvas, onChannel, log }) {
+export function createShaderPane({ compile, canvas, starter, log }) {
   style();
 
   // ── the rail button and the drawer pane ─────────────────────────────────────────────────────────
@@ -111,8 +121,6 @@ export function createShaderPane({ compile, canvas, onChannel, log }) {
 
   const head = document.createElement("div");
   head.className = "gfx-ed-head";
-  const nameEl = document.createElement("span");
-  nameEl.className = "gfx-ed-name";
   const tabsEl = document.createElement("span");
   tabsEl.className = "gfx-ed-tabs";
   const spacer = document.createElement("span");
@@ -123,7 +131,11 @@ export function createShaderPane({ compile, canvas, onChannel, log }) {
   compileBtn.className = "gfx-ed-btn primary";
   compileBtn.textContent = "Compile";
   compileBtn.title = "Compile every pass that has code (Alt-Enter). A pass that fails keeps the one that is running.";
-  head.append(nameEl, tabsEl, spacer, sayEl, compileBtn);
+  head.append(tabsEl, spacer, sayEl, compileBtn);
+
+  // the documents: the row above the passes' tabs, since a document is what holds the passes
+  const docsEl = document.createElement("div");
+  docsEl.className = "gfx-ed-docs";
 
   const body = document.createElement("div");
   body.className = "gfx-ed-body";
@@ -132,7 +144,7 @@ export function createShaderPane({ compile, canvas, onChannel, log }) {
   const side = document.createElement("div");
   side.className = "gfx-ed-side";
   body.append(codeHost, side);
-  el.append(head, body);
+  el.append(docsEl, head, body);
 
   const note = (text, cls = "") => { const p = document.createElement("div"); p.className = `gfx-ed-note ${cls}`.trim(); p.textContent = text; return p; };
   const heading = (text) => { const p = document.createElement("div"); p.className = "gfx-ed-h"; p.textContent = text; return p; };
@@ -140,13 +152,49 @@ export function createShaderPane({ compile, canvas, onChannel, log }) {
   // ── state ───────────────────────────────────────────────────────────────────────────────────────
   let editor = null;                 // the CodeMirror surface, once it has been imported
   let loading = null;                // the import, so two opens are one import
-  let doc = null;                    // the document being edited
+  let set = null;                    // every document there is, and which one is on screen
+  let doc = null;                    // the document being edited (the set's current one)
   let tab = SHARED;                  // the tab on screen
   const pictures = new Map();        // name → the picture, THIS SESSION ONLY (never saved)
   let report = null;                 // the last compile's result
 
   const say = (text, bad = false) => { sayEl.textContent = text; sayEl.classList.toggle("bad", bad); };
   const canvasNow = () => canvas();
+
+  // ── the documents ───────────────────────────────────────────────────────────────────────────────
+  // A set: several documents, and the one on screen. Switching is the point of having them -- it is
+  // how the look changes mid-performance -- so a switch compiles the document it arrives at, and a
+  // switch that will not compile leaves the picture that was running alone (gfx-program.js's rule)
+  // with the report saying why.
+
+  const save = () => {
+    if (!set || !doc) return;
+    const now = collect();
+    const at = set.documents.findIndex((d) => d.name === now.name);
+    // a document the set has not got is added rather than dropped: that is how "reset to the default
+    // shader" puts a document back, and a set whose current names nothing comes back on the wrong one
+    if (at < 0) set.documents.push(now);
+    else set.documents[at] = now;
+    set.current = now.name;
+    try { localStorage.setItem(SET_KEY, serializeSet(set)); } catch {}
+  };
+
+  /** The stored set, or one document made by `fallback` if nothing was ever stored. */
+  function load(fallback) {
+    let stored = null;
+    try {
+      stored = deserializeSet(localStorage.getItem(SET_KEY) ?? "");
+      // one document, the way the first version of this stored it: taken in rather than dropped
+      if (!stored) {
+        const one = localStorage.getItem(ONE_KEY);
+        const d = one ? deserialize(one) : null;
+        if (d) stored = emptySet(d);
+      }
+    } catch { stored = null; }
+    set = stored ?? emptySet(fallback());
+    doc = set.documents.find((d) => d.name === set.current) ?? set.documents[0];
+    return doc;
+  }
 
   // ── the report ──────────────────────────────────────────────────────────────────────────────────
   const reportEl = document.createElement("div");
@@ -317,7 +365,7 @@ export function createShaderPane({ compile, canvas, onChannel, log }) {
     const refs = chanRefs[pass];
     if (!refs) return;
     canvasNow()?.setChannels(pass, refs);
-    if (notify) onChannel?.(pass, refs);
+    if (notify) save();          // a cable moved, so the document in storage has moved with it
   }
 
   // ── the tabs ────────────────────────────────────────────────────────────────────────────────────
@@ -344,6 +392,106 @@ export function createShaderPane({ compile, canvas, onChannel, log }) {
       b.title = name === SHARED ? "Common: code put in front of every pass" : `${name}${textOf(name).trim() === "" ? " (off: no code)" : ""}`;
     }
   };
+
+  // ── the documents' row ──────────────────────────────────────────────────────────────────────────
+  // The row above the passes' tabs, since a document is what holds the passes. Switching one is the
+  // point of having several -- it is how the look changes mid-performance -- so a switch compiles
+  // what it arrives at, and leaves the running picture alone if that will not compile.
+  function paintDocs() {
+    docsEl.textContent = "";
+    if (!set) return;
+    for (const d of set.documents) {
+      const button = document.createElement("button");
+      button.className = `gfx-ed-doc${d.name === doc.name ? " on" : ""}`;
+      button.textContent = d.name;
+      button.title = `${d.name}${d.name === doc.name ? " (on screen)" : " — click to switch"}. Double-click to rename.`;
+      button.addEventListener("click", () => { if (d.name !== doc.name) switchTo(d.name); });
+      button.addEventListener("dblclick", (e) => { e.preventDefault(); rename(d.name); });
+      // a single document is not one to delete: deleting the only one leaves nothing to edit
+      if (set.documents.length > 1) {
+        const x = document.createElement("span");
+        x.className = "x";
+        x.textContent = "×";
+        x.title = `Delete "${d.name}"`;
+        x.addEventListener("click", (e) => { e.stopPropagation(); remove(d.name); });
+        button.appendChild(x);
+      }
+      docsEl.appendChild(button);
+    }
+    const add = document.createElement("button");
+    add.className = "gfx-ed-doc gfx-ed-add";
+    add.textContent = "+";
+    add.title = "A new document, with the default shader in its Image pass";
+    add.addEventListener("click", () => addDocument());
+    docsEl.appendChild(add);
+  }
+
+  /** Go to another document. Returns false if there is no such document to go to. */
+  function switchTo(name) {
+    const next = set.documents.find((d) => d.name === name);
+    if (!next) return false;
+    save();                                   // the document leaving the screen keeps its edits
+    loadDocument(next, { compileIt: true });
+    say(`switched to ${name}`);
+    log?.(`Graphics — the document "${name}"`);
+    return true;
+  }
+
+  function addDocument() {
+    const name = uniqueName(set.documents, "Untitled");
+    const next = emptyDocument(name, starter ? starter() : "");
+    set.documents.push(next);
+    loadDocument(next, { compileIt: true });
+    say(`new document: ${name}`);
+    return name;
+  }
+
+  /** Delete a document. Only asks when there is code to lose: a tool should not nag about nothing. */
+  function remove(name) {
+    if (set.documents.length < 2) return false;
+    const target = set.documents.find((d) => d.name === name);
+    if (!target) return false;
+    const hasCode = PASS_ORDER.some((p) => (target.passes[p] ?? "").trim() !== "") || (target.common ?? "").trim() !== "";
+    if (hasCode && !window.confirm(`Delete "${name}" and its code? This cannot be undone.`)) return false;
+    const wasCurrent = name === doc.name;
+    set.documents = set.documents.filter((d) => d.name !== name);
+    if (wasCurrent) loadDocument(set.documents[0], { compileIt: true });
+    else { save(); paintDocs(); }
+    say(`deleted ${name}`);
+    return true;
+  }
+
+  /** Rename in place: the tab becomes a field, Enter keeps it, Escape does not. */
+  function rename(name) {
+    const target = set.documents.find((d) => d.name === name);
+    if (!target) return false;
+    const button = [...docsEl.querySelectorAll(".gfx-ed-doc")].find((b) => b.textContent.startsWith(name));
+    const input = document.createElement("input");
+    input.className = "gfx-ed-rename";
+    input.value = name;
+    input.setAttribute("aria-label", "Document name");
+    const done = (commit) => {
+      input.removeEventListener("blur", onBlur);
+      const want = input.value.trim();
+      input.remove();
+      if (!commit || !want || want === name) { paintDocs(); return; }
+      // uniqueName against the others, so a rename cannot collide with a document that is already there
+      target.name = uniqueName(set.documents.filter((d) => d !== target), want);
+      if (name === doc.name) doc = target;
+      save();
+      paintDocs();
+    };
+    const onBlur = () => done(true);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); done(true); }
+      else if (e.key === "Escape") { e.preventDefault(); done(false); }
+    });
+    input.addEventListener("blur", onBlur);
+    if (button) button.replaceWith(input); else docsEl.appendChild(input);
+    input.focus();
+    input.select();
+    return true;
+  }
 
   // ── the editor, imported the first time it is needed ────────────────────────────────────────────
   async function ensureEditor() {
@@ -377,6 +525,7 @@ export function createShaderPane({ compile, canvas, onChannel, log }) {
     if (!editor) return;
     const next = collect();
     doc = next;
+    save();                       // what runs is what is kept, so a compile is a save
     const result = compile(next) ?? { ok: false, failures: [], compiled: [] };
     report = result;
     // the marks: one tab's lines at a time, and every other tab's cleared (this compile replaced them)
@@ -401,7 +550,6 @@ export function createShaderPane({ compile, canvas, onChannel, log }) {
     const wanted = tab;
     doc = next;
     for (const name of PASS_ORDER) chanRefs[name] = [...(next.channels[name] ?? [])];
-    nameEl.textContent = next.name;
     if (editor) {
       editor.setCode(SHARED, next.common ?? "");
       for (const p of PASS_ORDER) editor.setCode(p, next.passes[p] ?? "");
@@ -413,6 +561,9 @@ export function createShaderPane({ compile, canvas, onChannel, log }) {
     show(TABS.includes(wanted) ? wanted : SHARED);
     report = null;
     paintReport();
+    // the set now says this is the document on screen, and holds it as the editor has it
+    save();
+    paintDocs();
     say("");
     if (compileIt) compileNow();
   }
@@ -471,6 +622,9 @@ export function createShaderPane({ compile, canvas, onChannel, log }) {
     isOpen,
     restore,
     loadDocument,
+    /** The stored documents, or one made by `fallback` if nothing was ever stored. The document it
+     *  returns is the one to compile: what was on screen when the page was left. */
+    load,
     /** What the pane is editing now, channels included -- the top layer's copy of the truth. */
     document: () => (editor ? collect() : doc),
     compile: compileNow,
@@ -478,6 +632,14 @@ export function createShaderPane({ compile, canvas, onChannel, log }) {
     refresh() { editor?.refresh(); paintTabs(); paintChannels(); },
     /** The shader has just linked: the names a player can send are only known now. */
     uniformsChanged() { editor?.setUniformNames(canvasNow()?.usable ?? []); },
+    // the documents, for the music to drive (`puts :gfx, :document, "name"`) and for the Log
+    get documents() { return set ? set.documents.map((d) => d.name) : []; },
+    get current() { return doc?.name ?? null; },
+    switchTo,
+    addDocument,
+    remove,
+    rename,
+    save,
     pictures,
   };
 }

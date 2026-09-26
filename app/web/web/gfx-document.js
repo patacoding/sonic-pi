@@ -111,3 +111,62 @@ export const serialize = (doc) => JSON.stringify(normalizeDocument(doc));
 export const deserialize = (text) => {
   try { return normalizeDocument(JSON.parse(text)); } catch { return null; }
 };
+
+// ── A set of them ─────────────────────────────────────────────────────────────────────────────────
+// Why there is more than one document at all: switching the look mid-performance is a requirement of
+// playing live, and Shadertoy cannot do it because it is one page with one shader in it. So the saved
+// thing is a set -- the documents, and which one was on screen -- and the editor's tabs are the set.
+//
+//   { version, current, documents: [document, ...] }
+//
+// Names are how a document is asked for (`puts :gfx, :document, "rings"`), so they are made unique on
+// the way in: two documents with one name would make that directive a coin toss.
+
+export const SET_VERSION = 1;
+
+export function emptySet(doc) {
+  const first = normalizeDocument(doc ?? emptyDocument());
+  return { version: SET_VERSION, current: first.name, documents: [first] };
+}
+
+/** A name not already taken, made from `want`: "rings", then "rings 2", "rings 3"… */
+export function uniqueName(documents, want) {
+  const taken = new Set(documents.map((d) => d.name));
+  const base = (typeof want === "string" && want.trim() ? want.trim().slice(0, 60) : "Untitled");
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n++) { const name = `${base} ${n}`; if (!taken.has(name)) return name; }
+}
+
+/**
+ * Whatever came out of storage, made into a set this code can trust. An unreadable set is one empty
+ * document rather than an exception, and a `current` that names nothing becomes the first document --
+ * a set whose current document cannot be found is a set with no picture at all.
+ */
+export function normalizeSet(raw, fallbackName = "Untitled") {
+  const given = Array.isArray(raw?.documents) ? raw.documents : [];
+  const documents = [];
+  for (const d of given) {
+    const doc = normalizeDocument(d);
+    // two documents with one name would make `puts :gfx, :document, "name"` a coin toss
+    doc.name = uniqueName(documents, doc.name);
+    documents.push(doc);
+  }
+  if (!documents.length) return emptySet(emptyDocument(fallbackName));
+  const current = documents.some((d) => d.name === raw?.current) ? raw.current : documents[0].name;
+  return { version: SET_VERSION, current, documents };
+}
+
+/**
+ * The set as storage takes it. As with one document, THE PICTURES ARE NOT IN HERE: a channel's picture
+ * is a name and only a name, all the way down.
+ */
+export const serializeSet = (set) => JSON.stringify(normalizeSet(set));
+
+/** And back. Null for anything unreadable, so the caller can tell "nothing saved" from "saved empty". */
+export const deserializeSet = (text) => {
+  try {
+    const raw = JSON.parse(text);
+    if (!raw || typeof raw !== "object" || !Array.isArray(raw.documents)) return null;
+    return normalizeSet(raw);
+  } catch { return null; }
+};

@@ -35,12 +35,11 @@ import { createGrounds } from "./gfx-grounds.js";
 import { createSettings } from "./gfx-settings.js";
 import { createPanel } from "./gfx-ui.js";
 import { createShaderPane } from "./gfx-editor.js";
-import { emptyDocument, activePasses, serialize, deserialize } from "./gfx-document.js";
+import { emptyDocument } from "./gfx-document.js";
 
 const STYLE_ID = "gfx-style";
 const ALPHA_KEY = "sp-gfx-ui-alpha";
 const CANVAS_KEY = "sp-gfx-canvas";
-const DOC_KEY = "sp-gfx-document";      // the document last compiled: code only, never a picture
 const SHADER_FILE = "gfx-shader.frag";
 
 // web/gfx-shader.frag is the shader, and the only copy of it: one file to edit, and editing it
@@ -128,20 +127,10 @@ function install() {
   const problem = (text) => (log ? log(`Graphics — ${text}`) : console.warn(`Graphics — ${text}`));
 
   // ── the document ───────────────────────────────────────────────────────────────────────────────
-  // What runs is a document (gfx-document.js), and localStorage keeps the last one. Only the code
-  // is in there: a picture a channel asks for is named, never carried, so a saved document that
-  // wants one comes back wanting it.
-  const saveDocument = (doc) => { try { localStorage.setItem(DOC_KEY, serialize(doc)); } catch {} };
-  const storedDocument = () => {
-    try {
-      const text = localStorage.getItem(DOC_KEY);
-      if (!text) return null;
-      const doc = deserialize(text);
-      if (doc) log?.(`Graphics — the saved document "${doc.name}" is back (${activePasses(doc).join(", ") || "no pass has code"}). Pictures are not saved: a channel that wants one draws a placeholder until it is uploaded again.`);
-      return doc;
-    } catch { return null; }
-  };
-  const compileDocument = (doc) => { const result = canvas.compile(doc); saveDocument(doc); return result; };
+  // What runs is one of the documents the editor holds (gfx-document.js, gfx-editor.js), and the
+  // editor is where they are saved. Only code is ever saved: a picture a channel asks for is named,
+  // never carried, so a document that wants one comes back wanting it.
+  const compileDocument = (doc) => canvas.compile(doc);
 
   // ── the extension panel ────────────────────────────────────────────────────────────────────────
   // Every feature we add gets a section here and draws nothing of its own: see gfx-ui.js. The spec is
@@ -193,11 +182,9 @@ function install() {
         },
         {
           kind: "button", label: "Reset to the default shader",
-          title: `Put web/${SHADER_FILE} back as the Image pass and compile it. Everything else in the editor goes.`,
+          title: `Put web/${SHADER_FILE} back as this document's Image pass and compile it. The other tabs of this document go.`,
           onClick: () => {
-            const doc = emptyDocument("Default", shaderSource);
-            compileDocument(doc);
-            pane?.loadDocument(doc);
+            pane?.loadDocument(emptyDocument("Default", shaderSource), { compileIt: true });
             log?.("Graphics — the default shader is back");
           },
         },
@@ -230,7 +217,7 @@ function install() {
   pane = createShaderPane({
     compile: compileDocument,
     canvas: () => canvas,
-    onChannel: () => { if (pane) saveDocument(pane.document()); },
+    starter: () => shaderSource,           // a new document starts from web/gfx-shader.frag
     log: (text) => log?.(text),
   });
 
@@ -238,7 +225,10 @@ function install() {
     const shader = await loadShader();
     shaderSource = shader.source;
     if (!shader.fromFile) problem(`${shader.why}, so the placeholder shader is running — it declares no uniform and answers no directive`);
-    const doc = storedDocument() ?? emptyDocument("Default", shader.source);
+    // the documents the editor holds, or a first one from the .frag: which one it lands on is the
+    // one that was on screen when the page was left
+    const doc = pane.load(() => emptyDocument("Default", shader.source));
+    log?.(`Graphics — the document "${doc.name}" (${pane.documents.join(", ")}). Pictures are not saved: a channel that wants one draws a placeholder until it is uploaded again.`);
     canvas = createCanvas({ document: doc, onProblem: problem });
     if (!canvas) return;
     canvas.canvas.setAttribute("aria-hidden", "true");
