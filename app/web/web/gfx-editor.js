@@ -96,14 +96,12 @@ body[data-drawer="${PANE}"] #gfx-shader-pane { display: flex; }
 .gfx-ed-chan select { flex: 1; min-width: 0; background: var(--Background); color: var(--DefaultForeground, var(--Foreground)); border: 1px solid var(--WindowBorder); border-radius: var(--r-s, 3px); font: var(--t-tiny, 11px) var(--code-font); }
 .gfx-ed-chan.over { outline: 1px dashed var(--HighlightedBackground); outline-offset: 1px; }
 .gfx-ed-pick { padding: 0 5px; line-height: 1.5; flex-shrink: 0; }
-.gfx-ed-pics { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 8px; }
-.gfx-ed-picscap { font: var(--t-tiny, 11px) var(--code-font); color: var(--faintText, var(--mutedForeground)); }
-.gfx-ed-pic { position: relative; display: flex; flex-direction: column; align-items: center; width: 60px; padding: 3px; border: 1px solid var(--WindowBorder); border-radius: var(--r-s, 3px); background: var(--Background); }
-.gfx-ed-pic .x { position: absolute; top: -5px; right: -5px; width: 14px; height: 14px; line-height: 12px; text-align: center; border-radius: 50%; background: var(--ErrorBackground); color: #fff; font: 700 10px var(--code-font); cursor: pointer; }
-.gfx-ed-picname { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: var(--t-tiny, 11px) var(--code-font); color: var(--softForeground, var(--Foreground)); }
-.gfx-ed-thumb { width: 52px; height: 38px; object-fit: cover; border-radius: 2px; background: var(--PaneBackground); }
-.gfx-ed-chan-prev { display: inline-flex; align-items: center; justify-content: center; width: 2.2em; height: 1.4em; font: var(--t-tiny, 11px) var(--code-font); color: var(--mutedForeground); }
-.gfx-ed-thumb-sm { width: 2.2em; height: 1.4em; object-fit: cover; border-radius: 2px; }
+.gfx-ed-chan-prev { display: inline-flex; align-items: center; justify-content: center; width: 2.4em; height: 1.5em; font: var(--t-tiny, 11px) var(--code-font); color: var(--mutedForeground); flex-shrink: 0; }
+/* THE picture of a channel, and the only place a picture is drawn: one size, so one picture never
+   appears as a big one and a small one side by side */
+.gfx-ed-thumb-sm { width: 2.4em; height: 1.5em; object-fit: cover; border-radius: 2px; background: var(--PaneBackground); }
+.gfx-ed-forget { padding: 0 5px; line-height: 1.5; flex-shrink: 0; }
+.gfx-ed-forget:hover { border-color: var(--ErrorBackground); color: var(--ErrorBackground); }
 .gfx-ed-report { margin-top: 8px; }
 .gfx-ed-rep { border-left: 2px solid var(--ErrorBackground); padding: 2px 0 2px 6px; margin-bottom: 6px; }
 .gfx-ed-rep-pass { font: 600 var(--t-tiny, 11px) var(--code-font); }
@@ -423,10 +421,13 @@ export function createShaderPane({ compile, canvas, starter, log }) {
         const f = e.dataTransfer?.files?.[0];
         if (f) upload(f, i);
       });
-      row.append(label, previewOf(current), select, channelPicker(i));
+      const pick = channelPicker(i);
+      row.append(label, previewOf(current), select, pick);
+      // a picture this row draws can be let go from here -- and only from here, so it is shown once:
+      // a second copy of it somewhere else was the "one big, one small" this had to lose
+      if (current.kind === "image" && pictures.has(current.name)) row.append(forgetButton(current.name));
       chanEl.appendChild(row);
     }
-    if (pictures.size) chanEl.appendChild(picturesBox());
     const missing = missingImages(collect(), new Set(pictures.keys()));
     if (missing.length) chanEl.appendChild(note(`Wanted but not here: ${missing.join(", ")}. A picture lives in this session only — it is never saved with the code — so choose it again on the channel that wants it, or that channel draws a placeholder.`));
     if (wantedImages(collect()).length) chanEl.appendChild(note("A picture is kept in memory for this session and never written anywhere: saving a document saves the code and the name of the picture, not the picture."));
@@ -452,41 +453,6 @@ export function createShaderPane({ compile, canvas, starter, log }) {
       cell.title = ref?.kind === "image" ? `${ref.name} is not in this session — choose it again` : "nothing";
     }
     return cell;
-  }
-
-  /**
-   * The pictures this session holds, as tiles, under the channels. This is what answers "I chose a
-   * picture and nothing happened": a picture that arrived shows ITSELF. The × lets one go -- letting a
-   * picture go is not rewriting the cables: the channels that named it go on naming it, and draw a
-   * placeholder, which is the shape of the rule that pictures are never saved.
-   */
-  function picturesBox() {
-    const box = document.createElement("div");
-    box.className = "gfx-ed-pics";
-    const cap = document.createElement("span");
-    cap.className = "gfx-ed-picscap";
-    cap.textContent = "In this session:";
-    box.appendChild(cap);
-    for (const [name, held] of pictures) {
-      const tile = document.createElement("div");
-      tile.className = "gfx-ed-pic";
-      tile.title = `${name} — ${held.width}×${held.height}, in this session only (never saved)`;
-      const img = document.createElement("img");
-      img.className = "gfx-ed-thumb";
-      img.src = held.url;
-      img.alt = name;
-      const label = document.createElement("span");
-      label.className = "gfx-ed-picname";
-      label.textContent = name;
-      const x = document.createElement("span");
-      x.className = "x";
-      x.textContent = "×";
-      x.title = `Forget "${name}". The channels that wanted it stay wired, and draw a placeholder.`;
-      x.addEventListener("click", () => forgetPicture(name));
-      tile.append(img, label, x);
-      box.appendChild(tile);
-    }
-    return box;
   }
 
   /** Let a picture go: out of this session's textures (it was never written anywhere to begin with). */
@@ -519,6 +485,17 @@ export function createShaderPane({ compile, canvas, starter, log }) {
     button.addEventListener("click", () => input.click());
     button.appendChild(input);
     return button;
+  }
+
+  /** Let this session's copy of a picture go. The channels that name it keep naming it, and draw a
+   *  placeholder -- which is the shape of the rule that pictures are never saved. */
+  function forgetButton(name) {
+    const x = document.createElement("button");
+    x.className = "gfx-ed-btn gfx-ed-forget";
+    x.textContent = "×";
+    x.title = `Forget "${name}" (it was never saved). Any channel that wants it draws a placeholder until it is chosen again.`;
+    x.addEventListener("click", () => forgetPicture(name));
+    return x;
   }
 
   /** A picture goes into this session's textures -- `addImage` -- and is not written to storage.
