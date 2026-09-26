@@ -186,7 +186,21 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
   let set = null;                    // every document there is, and which one is on screen
   let doc = null;                    // the document being edited (the set's current one)
   let tab = FIRST_TAB;               // the tab on screen
-  const pictures = new Map();        // name → the picture: this session's memory, and the exported file
+  // ── the pictures, PER DOCUMENT ────────────────────────────────────────────────────────────────
+  // A picture belongs to the document it was chosen in, and not to the session as a whole. That is
+  // what the user asked for ("每个文档的代码，图片也都要各自保存") and it is also the only correct
+  // thing: two documents may each want a picture called photo.png and mean DIFFERENT photographs, and
+  // one name → one picture for the whole session silently gives the second document the first's.
+  //
+  // So: documents[].images in a file, one map here per document, and the renderer is given the current
+  // document's pictures when that document is shown.
+  const docPictures = new Map();      // document name → (picture name → { img, url, width, height })
+  /** The pictures of a document (its own, created empty the first time it is asked for). */
+  function picturesOf(name = doc?.name) {
+    let held = docPictures.get(name);
+    if (!held) { held = new Map(); docPictures.set(name, held); }
+    return held;
+  }
   let report = null;                 // the last compile's result
 
   const say = (text, bad = false) => { sayEl.textContent = text; sayEl.classList.toggle("bad", bad); };
@@ -318,39 +332,42 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
     const out = document.createElement("button");
     out.className = "gfx-ed-btn";
     out.textContent = "Export to a file";
-    out.title = "Every document as one JSON file: the code, the channels, and — base64 — the pictures those channels name.";
+    out.title = "Every document as one JSON file: its code, its channels, and — base64 — its own pictures.";
     out.addEventListener("click", () => exportSet());
     const into = document.createElement("button");
     into.className = "gfx-ed-btn";
     into.textContent = "Import a file";
-    into.title = "Read a file this exported: its documents and its pictures are added, and the first document is shown.";
+    into.title = "Read a file this exported: its documents — with their own pictures and channels — replace what is here, and the document that was on screen is shown.";
     into.addEventListener("click", () => importPicker());
     row.append(out, into);
-    box.append(row, note("Saved in this browser as you work, and in a file when you ask. What this browser keeps is the CODE; a picture you upload lives in this session, and travels in an exported file (base64) if a document names it."));
+    box.append(row, note("Saved in this browser as you work, and in a file when you ask. What this browser keeps is the CODE; a picture belongs to the document you chose it in, and travels in an exported file (base64) when that document's channels name it."));
     return box;
   }
 
   /**
-   * The set as a file's text: the code, and the pictures it needs, base64.
+   * The set as a file's text: every document, its code, its channels, and ITS OWN pictures, base64.
    *
-   * This is the ONE place pictures are written down. localStorage still never holds them (a picture
-   * that came back from a reload would be megabytes of a thing the player may have deleted, and the
-   * rule "only the code is saved" is what keeps a document small) -- but a file the player asks for is
-   * a different act: they asked for this project, with its pictures, in one file.
+   * This is the ONE place pictures are written down. localStorage still never holds them (a reload comes
+   * back knowing which picture a channel wants and not having it, which keeps a document small) -- but a
+   * file the player asks for is a different act: they asked for this project, with its pictures.
    *
-   * Only the pictures some document names are carried: a picture uploaded and never wired to a channel
-   * is not part of the project's picture of itself.
+   * PER DOCUMENT, not one pool for the file: two documents may each want a picture called photo.png and
+   * mean different photographs. Only the pictures a document's own channels name are carried -- one
+   * uploaded and never wired to a channel is not part of that document's picture of itself.
    */
   function exportText() {
     if (!set) return "";
-    const want = wantedEverywhere();
-    const images = {};
-    for (const [name, held] of pictures) if (want.has(name) && held.url.startsWith("data:")) images[name] = held.url;
-    return JSON.stringify(normalizeForFile(set, images));
+    const documents = set.documents.map((d) => {
+      const held = docPictures.get(d.name);
+      if (!held?.size) return d;
+      const channels = d.name === doc?.name ? chanRefs : d.channels;
+      const named = new Set((channels ?? []).filter((r) => r?.kind === "image").map((r) => r.name));
+      const images = {};
+      for (const [name, picture] of held) if (named.has(name) && picture.url.startsWith("data:")) images[name] = picture.url;
+      return Object.keys(images).length ? { ...d, images } : d;
+    });
+    return JSON.stringify({ format: FILE_FORMAT, version: FILE_VERSION, savedAt: new Date().toISOString(), current: set.current, documents });
   }
-
-  /** The set as it goes in a file: the same documents, plus what the pictures are. */
-  const normalizeForFile = (documents, images) => ({ ...JSON.parse(serializeSet(documents)), images });
 
   function exportSet() {
     const text = exportText();
@@ -371,40 +388,71 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
     return { ok: true, name: file, bytes: text.length };
   }
 
-  /** Read a file this exported. Its documents are ADDED rather than put in place of what is here: a
-   *  file is not worth losing what is on screen for, and a name that is taken is made unique. */
+  /**
+   * Read a file this exported: it REPLACES what is here -- every document, its channels and its own
+   * pictures. The user was clear about it ("从文件导入的时候，刷新整个 shadertoy 文档，不需要再留着之前的"):
+   * a file is a project, and opening a project means being IN that project, not in it plus whatever was
+   * on screen. So there are no duplicates and no half-merged state to make sense of.
+   *
+   * The file's own `current` document is the one shown -- the one whose iChannels were on screen when
+   * the file was saved.
+   */
   async function importSet(text) {
-    // a file may carry pictures as well as code (gfx-project: `images`), and they are taken in FIRST:
-    // a document that arrives naming a picture then has it, rather than showing "(not here)" until the
-    // next repaint
     let raw = null;
     try { raw = JSON.parse(text); } catch { /* deserializeSet says so below */ }
-    const took = await takeImages(raw?.images);
-
     const incoming = deserializeSet(text);
-    if (!incoming) return { ok: false, error: "that file is not a shader set this can read" };
-    save();                                  // what is on screen first: it is about to change
-    const added = [];
+    if (!incoming) return { ok: false, error: "that file is not a shader document set" };
+
+    // v1 of this file had ONE pictures pool for the whole file. An older file still opens with its
+    // pictures: the pool is folded into the documents whose channels name those pictures.
+    const legacy = raw?.images && typeof raw.images === "object" ? raw.images : null;
+    const imagesFor = (name, fallback) => {
+      const rawDoc = Array.isArray(raw?.documents) ? raw.documents.find((d) => d?.name === name) : null;
+      const own = rawDoc?.images && typeof rawDoc.images === "object" ? rawDoc.images
+        : fallback?.images && typeof fallback.images === "object" ? fallback.images : {};
+      if (!legacy) return own;
+      const channels = fallback?.channels ?? [];
+      const named = new Set(channels.filter((r) => r?.kind === "image").map((r) => r.name));
+      return { ...Object.fromEntries(Object.entries(legacy).filter(([n]) => named.has(n))), ...own };
+    };
+
+    const before = [...set.documents.map((d) => d.name)];
+    const old = [];
+    for (const held of docPictures.values()) old.push(...held.keys());
+
+    set.documents = incoming.documents;
+    set.current = incoming.current;
+    docPictures.clear();
+    const took = [];
     for (const d of incoming.documents) {
-      d.name = uniqueName(set.documents, d.name);
-      set.documents.push(d);
-      added.push(d.name);
+      const names = await takeImages(imagesFor(d.name, d), d.name);
+      took.push(...names.map((n) => `${d.name}/${n}`));
     }
-    loadDocument(set.documents.find((d) => d.name === added[0]), { compileIt: true });
-    const withPictures = took.length ? ` and ${took.length} picture${took.length > 1 ? "s" : ""} (${took.join(", ")})` : "";
-    say(`imported ${added.join(", ")}${withPictures}`);
-    log?.(`Graphics — imported ${added.join(", ")}${withPictures}`);
-    return { ok: true, added, images: took };
+
+    const wanted = set.documents.find((d) => d.name === incoming.current) ?? set.documents[0];
+    loadDocument(wanted, { compileIt: true });
+
+    // textures the new set does not name are let go of, so a session that opens several files does not
+    // pile them up in the renderer
+    const stillWanted = new Set();
+    for (const d of set.documents) for (const name of docPictures.get(d.name)?.keys() ?? []) stillWanted.add(name);
+    for (const name of old) if (!stillWanted.has(name)) canvasNow()?.removeImage?.(name);
+
+    const list = set.documents.map((d) => d.name).join(", ");
+    const withPictures = took.length ? `, ${took.length} picture${took.length > 1 ? "s" : ""}` : "";
+    say(`opened ${list}${withPictures}`);
+    log?.(`Graphics — opened ${list}${withPictures} (replacing ${before.join(", ") || "nothing"})`);
+    return { ok: true, documents: set.documents.map((d) => d.name), current: wanted.name, images: took };
   }
 
   /**
-   * The pictures a file carries, put into this session's textures. Each is a data URL -- the bytes the
-   * file holds, not a name to go looking for -- so a project opens with its pictures in it.
+   * The pictures a file carries for ONE document, put into this session's textures. Each is a data URL
+   * -- the bytes the file holds, not a name to go looking for -- so a file opens with its pictures in it.
    *
    * Junk is skipped with a word, and so is anything larger than one picture may be: a file that cannot
    * be opened is worse than one that says what it left out.
    */
-  async function takeImages(images) {
+  async function takeImages(images, into) {
     if (!images || typeof images !== "object") return [];
     const took = [];
     for (const [name, url] of Object.entries(images)) {
@@ -414,14 +462,14 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
         const img = new Image();
         img.src = url;
         await img.decode();
-        pictures.set(name, { img, url, width: img.naturalWidth || img.width, height: img.naturalHeight || img.height });
-        canvasNow()?.addImage(name, img);
+        picturesOf(into).set(name, { img, url, width: img.naturalWidth || img.width, height: img.naturalHeight || img.height });
+        if (into === doc?.name) canvasNow()?.addImage(name, img);
         took.push(name);
       } catch (e) {
         say(`"${name}" could not be read from the file: ${e.message}`, true);
       }
     }
-    if (took.length) paintChannels();
+    if (took.length && into === doc?.name) paintChannels();
     return took;
   }
 
@@ -468,12 +516,12 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
       // EVERY pass, so a binding has to be possible for the ones that draw later as well. A pass that
       // reads a buffer drawn after it sees the previous frame -- which the renderer documents.
       for (const b of BUFFER_PASSES) add(`buffer:${b}`, b);
-      for (const name of pictures.keys()) add(`image:${name}`, name);
+      for (const name of picturesOf().keys()) add(`image:${name}`, name);
       const current = refs[i] ?? { kind: "none" };
       const what = current.buffer ?? current.name ?? current.band;
       const value = current.kind === "none" ? "" : `${current.kind}:${what}`;
       // a picture this session does not have (a document loaded from storage): shown, and marked
-      if (current.kind === "image" && !pictures.has(current.name)) add(value, `${current.name} (not here)`);
+      if (current.kind === "image" && !picturesOf().has(current.name)) add(value, `${current.name} (not here)`);
       select.value = value;
       select.addEventListener("change", () => {
         const [kind, ...rest] = select.value.split(":");
@@ -505,9 +553,9 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
       if (current.kind !== "none") row.append(clearButton(i));
       chanEl.appendChild(row);
     }
-    const missing = missingImages(collect(), new Set(pictures.keys()));
+    const missing = missingImages(collect(), new Set(picturesOf().keys()));
     if (missing.length) chanEl.appendChild(note(`Wanted but not here: ${missing.join(", ")}. This browser does not keep pictures (only the code), so choose it again on the channel that wants it — or import a file that carries it — until then that channel draws a placeholder.`));
-    if (wantedImages(collect()).length) chanEl.appendChild(note("A picture lives in this session's memory. It is not kept in this browser, and it IS carried in an exported file, base64, for the channels that name it."));
+    if (wantedImages(collect()).length) chanEl.appendChild(note("A picture belongs to this document and lives in this session's memory. This browser does not keep it; an exported file carries it, base64, for the channels of this document that name it."));
     if (chanRefs.some((r) => r?.kind === "audio")) {
       chanEl.appendChild(note("Audio is a 512x2 texture, Shadertoy's layout: texture(iChannelN, vec2(f, 0.25)).x is the spectrum at f, and vec2(t, 0.75).x is the waveform, both 0..1. It is made from what the engine is playing every frame, so there is nothing to save."));
     }
@@ -517,7 +565,7 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
   function previewOf(ref) {
     const cell = document.createElement("span");
     cell.className = "gfx-ed-chan-prev";
-    const held = ref?.kind === "image" ? pictures.get(ref.name) : null;
+    const held = ref?.kind === "image" ? picturesOf().get(ref.name) : null;
     if (held) {
       const img = document.createElement("img");
       img.className = "gfx-ed-thumb-sm";
@@ -550,17 +598,11 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
    *  a word rather than writing a file that cannot be opened back. */
   const MAX_IMAGE = 12 * 1024 * 1024;
 
-  /** Every picture anything still names: the document on screen live, the others as they are saved. */
-  function wantedEverywhere() {
-    const want = new Set();
-    for (const d of set?.documents ?? []) {
-      // the document on screen is read live (the editor holds the truth while it is open), the others
-      // as they were saved. One array each, and no pass in it.
-      const channels = d.name === doc?.name ? chanRefs : d.channels;
-      for (const r of channels ?? []) if (r?.kind === "image") want.add(r.name);
-    }
-    return want;
-  }
+// The file this layer writes and reads. `format` names it; `version` is the FILE's own version (each
+// document carries its own, gfx-document.js's). v1 had one pictures pool for the whole file, which
+// could not tell two documents' same-named pictures apart -- files of that shape are still read.
+const FILE_FORMAT = "sonic-pi-shader-documents";
+const FILE_VERSION = 2;
 
   /**
    * Let go of the pictures nothing names any more -- out of this session's textures, out of the
@@ -570,12 +612,14 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
    * got still says "(not here)" rather than being quietly tidied away.
    */
   function prunePictures(repaint = true) {
-    const want = wantedEverywhere();
+    // the CURRENT document's own channels: a picture belongs to a document, so another document naming
+    // the same name is not a reason to keep this one (they are different pictures)
+    const want = new Set(wantedImages(collect()));
     const gone = [];
-    for (const name of [...pictures.keys()]) {
+    for (const name of [...picturesOf().keys()]) {
       if (want.has(name)) continue;
-      const held = pictures.get(name);
-      pictures.delete(name);
+      const held = picturesOf().get(name);
+      picturesOf().delete(name);
       canvasNow()?.removeImage?.(name);
       gone.push(name);
     }
@@ -644,7 +688,7 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
       const img = new Image();
       img.src = url;
       await img.decode();
-      pictures.set(name, { img, url, width: img.naturalWidth || img.width, height: img.naturalHeight || img.height });
+      picturesOf().set(name, { img, url, width: img.naturalWidth || img.width, height: img.naturalHeight || img.height });
       canvasNow()?.addImage(name, img);
       if (at != null) {
         chanRefs = chanRefs.map((r, j) => (j === at ? { kind: "image", name } : r ?? { kind: "none" }));
@@ -763,6 +807,8 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
     if (hasCode && !window.confirm(`Delete "${name}" and its code? This cannot be undone.`)) return false;
     const wasCurrent = name === doc.name;
     set.documents = set.documents.filter((d) => d.name !== name);
+    for (const picture of docPictures.get(name)?.keys() ?? []) canvasNow()?.removeImage?.(picture);
+    docPictures.delete(name);                       // a deleted document takes its pictures with it
     if (wasCurrent) loadDocument(set.documents[0], { compileIt: true });
     else { save(); paintDocs(); }
     say(`deleted ${name}`);
@@ -784,7 +830,10 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
       input.remove();
       if (!commit || !want || want === name) { paintDocs(); return; }
       // uniqueName against the others, so a rename cannot collide with a document that is already there
+      const before = target.name;
       target.name = uniqueName(set.documents.filter((d) => d !== target), want);
+      if (docPictures.has(before)) docPictures.set(target.name, docPictures.get(before));   // its pictures
+      docPictures.delete(before);                                                          // move with it
       if (name === doc.name) doc = target;
       save();
       paintDocs();
@@ -867,6 +916,10 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
       editor.markAllClean();
       editor.setUniformNames(canvasNow()?.usable ?? []);
     }
+    // the document's OWN pictures, into this session's textures: two documents may each want a picture
+    // called photo.png and mean different photographs, so what the renderer holds has to change with
+    // the document (switching documents is then instant -- no decode, the image is already in memory)
+    for (const [name, held] of picturesOf(next.name)) canvasNow()?.addImage(name, held.img);
     for (const p of PASS_ORDER) applyChannels(p);
     show(TABS.includes(wanted) ? wanted : FIRST_TAB);
     report = null;
@@ -959,6 +1012,7 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
     exportText,
     exportSet,
     importSet,
-    pictures,
+    /** The pictures of the document on screen -- what every caller means by "this document's pictures". */
+    get pictures() { return picturesOf(); },
   };
 }

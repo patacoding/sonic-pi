@@ -311,6 +311,73 @@ function install() {
   sendTabsOutward();
   window.addEventListener("load", sendTabsOutward);               // and once more, after the page settles
 
+  // Changing the href is not enough, and this is where the first attempt failed: the app has its OWN
+  // handlers on that row (info.js) which preventDefault and show the LOCAL page inside the Info card.
+  // So a plain left click kept landing on this tree's pages -- exactly what was reported as "the tabs
+  // still go to the local dev pages". The click is taken in the CAPTURE phase (before the app's own
+  // listeners, which are on the row itself) and the official page is opened instead. A modified click
+  // (Cmd/Ctrl/Shift) is left alone: that is the browser's own new-tab gesture and the href is right.
+  //
+  // The app's own tap handler is on `pointerup` and ignores a drag of more than 12px, so this does the
+  // same: a scroll that starts on the row must not open anything.
+  const TAB_SELECTOR = "#site-nav .ic-tabs a[data-tab], #site-nav .sn-brand";
+  let pressedAt = null, openedAt = 0;
+  const siteOf = (el) => {
+    if (el.classList.contains("sn-brand")) return SITE_URL;
+    const file = SITE_PAGES[el.dataset.tab];
+    return file ? SITE_URL + file : null;
+  };
+  document.addEventListener("pointerdown", (e) => {
+    pressedAt = e.target?.closest?.(TAB_SELECTOR) ? { x: e.clientX, y: e.clientY } : null;
+  }, true);
+  const leave = (e) => {
+    const el = e.target?.closest?.(TAB_SELECTOR);
+    if (!el) return;
+    if (e.type === "pointerup" && (!pressedAt || Math.hypot(e.clientX - pressedAt.x, e.clientY - pressedAt.y) > 12)) return;
+    if (e.metaKey || e.ctrlKey || e.shiftKey) return;             // the browser's new tab: let it have it
+    const url = siteOf(el);
+    if (!url) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();                                 // and the app's own handler never runs
+    if (performance.now() - openedAt < 600) return;               // pointerup then click: one tab, not two
+    openedAt = performance.now();
+    window.open(url, "_blank", "noopener");
+  };
+  document.addEventListener("pointerup", leave, true);
+  document.addEventListener("click", leave, true);
+
+  // ── an exported shader file opens from the app's own Open ───────────────────────────────────────
+  // What went wrong once, and is worth not repeating: a player looking for "load a file" reaches for
+  // the toolbar's Open, not for a pane they must open first -- so the exported JSON was picked up by
+  // the app's loader and PASTED INTO THE CODE BUFFER as if it were Ruby, with the iChannels untouched.
+  // (The input would not even offer a .json in its file dialog.) So the input is taught to accept one,
+  // and a file that is OURS is taken by this layer instead. Everything else -- .rb, .txt, .sonicpi --
+  // is left entirely to the app, sets included.
+  const loadInput = document.getElementById("load-file");
+  if (loadInput) {
+    loadInput.accept = `${loadInput.accept},.json,application/json`;
+    document.addEventListener("change", (e) => {
+      const input = e.target;
+      if (input !== loadInput) return;
+      const file = input.files?.[0];
+      if (!file) return;
+      if (!/\.json$/i.test(file.name) && file.type !== "application/json") return;   // the app's, not ours
+      e.stopImmediatePropagation();                     // before the app's own handler does the pasting
+      input.value = "";                                 // so the same file can be opened twice
+      file.text().then(async (text) => {
+        const result = await pane?.importSet(text);
+        if (!result?.ok) {
+          toast(`not a shader document set: ${result?.error ?? "unreadable"}`, true);
+          log?.(`Graphics — that file could not be opened: ${result?.error ?? "unreadable"}`);
+          return;
+        }
+        const pictures = result.images?.length ? ` and ${result.images.length} picture${result.images.length > 1 ? "s" : ""}` : "";
+        toast(`opened ${result.documents.length} shader document${result.documents.length > 1 ? "s" : ""}${pictures}`);
+        log?.(`Graphics — opened ${result.documents.join(", ")}${pictures} from ${file.name}`);
+      }).catch((err) => toast(`could not read ${file.name}: ${err.message}`, true));
+    }, true);
+  }
+
   // ── the opacity shortcut ───────────────────────────────────────────────────────────────────────
   // Ctrl+Alt+Up / Ctrl+Alt+Down, 5% a press, because a performance should not need the mouse and the
   // panel. Chosen by MEASURING what is taken rather than by taste: of the 163 chords this app's own
