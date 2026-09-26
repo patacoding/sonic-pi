@@ -83,7 +83,59 @@ export function createCanvas({ document: doc = null, imageSource = "", onProblem
     stamp();
     feed?.(state.time, state.delta);                 // the upper layer's own values (the audio)
     renderer.render({ ...state, sampleRate: sampleRate(), audio });
+    if (pending) { const p = pending; pending = null; try { p.resolve(grab(p.scale)); } catch (e) { p.reject(e); } }
   }
+
+  // ── capture: the frame that was just drawn ────────────────────────────────────────────────────────
+  // `preserveDrawingBuffer` is off on purpose (it costs a copy every frame), so the drawing buffer is
+  // only readable INSIDE the frame that drew it -- hence a capture is taken at the end of the next
+  // frame, from the same call stack. Nothing is re-rendered: what comes back is the picture that is on
+  // screen, at the canvas's own size, with no interface over it, and with no side effects on iFrame,
+  // iTime or the ping-pong (a re-render would advance all three and make an "identical" capture differ).
+  //
+  // This is what makes audio-visual work drivable from a script: set the code, Run, and take the picture
+  // a human would take a screenshot of.
+  let pending = null;
+
+  function grab(scale = 1) {
+    const w = canvas.width, h = canvas.height;
+    const px = new Uint8Array(w * h * 4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);        // whatever the passes left bound, the screen is what we want
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    const out = document.createElement("canvas");
+    out.width = Math.max(1, Math.round(w * scale));
+    out.height = Math.max(1, Math.round(h * scale));
+    const ctx = out.getContext("2d");
+    const img = ctx.createImageData(out.width, out.height);
+    // WebGL's origin is bottom-left and the canvas's is top-left: flipped row by row, and scaled by
+    // nearest sampling (a capture is evidence, not a resampled picture)
+    let sum = 0;
+    for (let y = 0; y < out.height; y++) {
+      const sy = h - 1 - Math.min(h - 1, Math.floor(y / scale));
+      for (let x = 0; x < out.width; x++) {
+        const sx = Math.min(w - 1, Math.floor(x / scale));
+        const s = (sy * w + sx) * 4, d = (y * out.width + x) * 4;
+        img.data[d] = px[s]; img.data[d + 1] = px[s + 1]; img.data[d + 2] = px[s + 2]; img.data[d + 3] = 255;
+        sum += (px[s] * 0.2126 + px[s + 1] * 0.7152 + px[s + 2] * 0.0722) / 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    const url = out.toDataURL("image/png");
+    return {
+      dataUrl: url, url, width: out.width, height: out.height,
+      bytes: Math.round((url.length - "data:image/png;base64,".length) * 0.75),
+      mean: sum / (out.width * out.height),           // 0 = black: the cheapest "did anything draw?" there is
+      frame: state.frame, time: state.time,
+    };
+  }
+
+  /** The next drawn frame, as a PNG data URL. `scale` < 1 answers with a smaller picture. */
+  function capture({ scale = 1 } = {}) {
+    if (disposed) return Promise.reject(new Error("the canvas is disposed"));
+    if (!canvas.width || !canvas.height) return Promise.reject(new Error("the canvas has no size yet"));
+    return new Promise((resolve, reject) => { pending = { resolve, reject, scale: scale > 0 ? scale : 1 }; });
+  }
+
 
   const move = (e) => { state.mouse[0] = e.clientX; state.mouse[1] = canvas.clientHeight - e.clientY; };
   const down = (e) => { state.down = true; move(e); state.mouse[2] = state.mouse[0]; state.mouse[3] = state.mouse[1]; };
@@ -119,6 +171,8 @@ export function createCanvas({ document: doc = null, imageSource = "", onProblem
     addImage: (name, source) => renderer.addImage(name, source),
     removeImage: (name) => renderer.removeImage(name),
     get images() { return renderer.images; },
+    /** The next drawn frame as a PNG data URL -- see the note above `grab()`. */
+    capture,
     onFeed: (fn) => { feed = fn; },
     setSampleRate: (fn) => { sampleRate = fn; },
     bands,

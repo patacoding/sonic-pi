@@ -603,6 +603,17 @@ function install() {
     get passes() { return canvas ? canvas.live : []; },
     /** Set one by hand, as the directive would: `sonicPiGfx.set("uGain", [0.5])` */
     set: (name, values) => canvas?.set(name, values) ?? { ok: false, error: "no canvas" },
+    /**
+     * The picture the shader is drawing, as a PNG data URL: an audio-visual script's "screenshot",
+     * without the interface in it and without disturbing the animation (gfx-canvas.js `capture()`).
+     *
+     *     const shot = await sonicPiGfx.capture();                 // { dataUrl, width, height, mean, frame }
+     *     const small = await sonicPiGfx.capture({ scale: 0.5 });
+     *
+     * `mean` is the average luminance (0 = black) -- the cheapest way for a script to tell "something
+     * drew" from "that pass is off".
+     */
+    capture: (opts) => (canvas ? canvas.capture(opts) : Promise.reject(new Error("the shader canvas is not running"))),
     reload: () => location.reload(),
     alpha(v) { if (v == null) return alpha(); settings.set(ALPHA_KEY, v); applyAlpha(v); ui.rebuild(); return v; },
     canvasOn(v) {

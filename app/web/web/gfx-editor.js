@@ -879,21 +879,27 @@ const FILE_VERSION = 2;
 
   // ── compiling ───────────────────────────────────────────────────────────────────────────────────
   function compileNow() {
-    if (!editor) return;
+    // Compiling is the DOCUMENT's business, not the editor's. This used to return early when the pane
+    // was shut, which meant a script (or anything else driving the page) could set a pass and then get
+    // nothing at all from compile() -- the picture silently stayed as it was. `collect()` already reads
+    // the document when there is no editor, so the compile happens either way; only the marks on screen
+    // and the tab repaint are the editor's, and those are skipped when it is not there.
     const next = collect();
     doc = next;
     save();                       // what runs is what is kept, so a compile is a save
     const result = compile(next) ?? { ok: false, failures: [], compiled: [] };
     report = result;
-    // the marks: one tab's lines at a time, and every other tab's cleared (this compile replaced them)
-    const { byTab } = marksFor(result.failures);
-    for (const name of TABS) editor.report(name, byTab.get(name) ?? []);
-    // clean is a claim that the code running is the code in the tab, so it is only made about the
-    // passes that compiled and -- since Common goes in front of all of them -- about Common when
-    // every pass did. A pass that failed stays marked, which is the honest thing for it to be.
-    for (const name of result.compiled) editor.markClean(name);
-    if (result.ok) editor.markClean(SHARED);
-    paintTabs();
+    if (editor) {
+      // the marks: one tab's lines at a time, and every other tab's cleared (this compile replaced them)
+      const { byTab } = marksFor(result.failures);
+      for (const name of TABS) editor.report(name, byTab.get(name) ?? []);
+      // clean is a claim that the code running is the code in the tab, so it is only made about the
+      // passes that compiled and -- since Common goes in front of all of them -- about Common when
+      // every pass did. A pass that failed stays marked, which is the honest thing for it to be.
+      for (const name of result.compiled) editor.markClean(name);
+      if (result.ok) editor.markClean(SHARED);
+      paintTabs();
+    }
     paintReport();
     const bad = result.failures.length;
     const answer = bad ? `${bad} pass${bad > 1 ? "es" : ""} did not compile — the one that was running still is` : `compiled: ${result.compiled.join(", ") || "nothing"}`;
@@ -990,6 +996,34 @@ const FILE_VERSION = 2;
     load,
     /** What the pane is editing now, channels included -- the top layer's copy of the truth. */
     document: () => (editor ? collect() : doc),
+    /**
+     * Put source into ONE tab: `Common`, `Buffer A`-`D`, or `Image`.
+     *
+     * Why this exists: editing a pass through `importSet()` means round-tripping the whole set (read
+     * `exportText()`, change one string, import it back), which replaces every document and every
+     * picture as a side effect. An audio-visual loop wants one call that changes one pass and nothing
+     * else -- that is this. It writes the DOCUMENT (so a compile, a save and an export all see it) and,
+     * when the pane is open, the editor on screen (so the player sees what the script wrote).
+     *
+     *     sonicPiGfx.pane.setSource("Image", "void mainImage(out vec4 c, in vec2 p) { … }");
+     *     sonicPiGfx.pane.compile();            // and to put it on screen
+     */
+    setSource(name, source) {
+      const which = TABS.includes(name) ? name : null;
+      if (!which) return { ok: false, error: `no "${name}" tab: there is ${TABS.join(", ")}` };
+      if (!doc) return { ok: false, error: "no document is loaded" };
+      const text = String(source ?? "");
+      if (which === SHARED) doc.common = text; else doc.passes[which] = text;
+      if (editor) editor.setCode(which, text);       // open: keep the screen in step with the model
+      save();
+      return { ok: true, tab: which, bytes: text.length };
+    },
+    /** What one tab holds right now (the editor's text when it is open, the document's otherwise). */
+    getSource(name) {
+      const which = TABS.includes(name) ? name : null;
+      if (!which || !doc) return null;
+      return textOf(which);
+    },
     compile: compileNow,
     /** The pane was hidden and shown, or the document changed underneath: measure and repaint. */
     refresh() { editor?.refresh(); paintTabs(); paintChannels(); },
