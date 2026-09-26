@@ -19,7 +19,7 @@
 // The rule from gfx-document.js carries through every control here: code is saved, pictures are not.
 // Uploading a picture puts it in this session's textures and nowhere else, and a document loaded
 // from storage says which picture it wants rather than carrying one.
-import { PASS_ORDER, SHARED, CHANNELS, BUFFER_PASSES, emptySet, uniqueName, serializeSet, deserializeSet, deserialize, emptyDocument, missingImages, wantedImages } from "./gfx-document.js";
+import { PASS_ORDER, SHARED, CHANNELS, BUFFER_PASSES, emptySet, uniqueName, serializeSet, deserializeSet, deserialize, emptyDocument, missingImages, wantedImages, channelsWerePerPass } from "./gfx-document.js";
 
 export const PANE = "gfx-shader";
 const STYLE_ID = "gfx-editor-style";
@@ -218,6 +218,15 @@ export function createShaderPane({ compile, canvas, starter, log }) {
     } catch { stored = null; }
     set = stored ?? emptySet(fallback());
     doc = set.documents.find((d) => d.name === set.current) ?? set.documents[0];
+    // the channels used to belong to each pass; if an older document wired one channel NUMBER
+    // differently in different passes, collapsing it onto the document's four lost the difference --
+    // so it is said rather than going quietly missing
+    try {
+      const raw = JSON.parse(localStorage.getItem(SET_KEY) ?? "null");
+      if (raw?.documents?.some?.(channelsWerePerPass)) {
+        log?.("Graphics — this document's channels used to be per pass. There is one set of iChannels now, so the wiring Image had was kept; check the others if a picture changed.");
+      }
+    } catch {}
     return doc;
   }
 
@@ -280,13 +289,15 @@ export function createShaderPane({ compile, canvas, starter, log }) {
     name: doc?.name ?? "Untitled",
     common: textOf(SHARED),
     passes: Object.fromEntries(PASS_ORDER.map((p) => [p, textOf(p)])),
-    channels: Object.fromEntries(PASS_ORDER.map((p) => [p, chanRefs[p] ?? doc.channels[p] ?? []])),
+    channels: [...chanRefs],
   });
 
   // ── the channel pickers ─────────────────────────────────────────────────────────────────────────
   // `chanRefs` is the truth for the channels while the pane is open: picking one has to be instant,
   // and a channel is a binding rather than a line of GLSL, so it does not need a compile.
-  const chanRefs = {};
+  // THE FOUR INPUTS, and there is one set of them: see gfx-document.js. They belong to the document,
+  // not to a tab, so nothing here is keyed by pass and switching tabs cannot show a different set.
+  let chanRefs = Array.from({ length: CHANNELS }, () => ({ kind: "none" }));
   const chanEl = document.createElement("div");
   // the side of the pane: the set in and out of a file, the cables, then what the compile said
   side.append(docsSide(), chanEl, reportEl);
@@ -369,22 +380,13 @@ export function createShaderPane({ compile, canvas, starter, log }) {
     input.click();
   }
 
-  /** The buffers a pass may read: its own (the frame before) and any drawn before it this frame.
-   *  A later buffer is not offered -- it would silently be last frame's, since it has not drawn yet. */
-  const buffersFor = (pass) => {
-    const at = BUFFER_PASSES.indexOf(pass);
-    return at < 0 ? [...BUFFER_PASSES] : BUFFER_PASSES.slice(0, at + 1);
-  };
-
   function paintChannels() {
     chanEl.textContent = "";
     if (canvasNow() == null) { chanEl.appendChild(note("The shader canvas is not running, so there is nothing to point at a channel.")); return; }
-    chanEl.appendChild(heading(tab === SHARED ? "Channels" : `iChannels of ${tab}`));
-    if (tab === SHARED) {
-      chanEl.appendChild(note("Common is shared code, not a pass: it has no channels of its own. Pick a buffer or Image to wire its iChannels."));
-      return;
-    }
-    const refs = chanRefs[tab] ?? [];
+    // the document's inputs, named as the document's -- no tab's name on them, because they are not
+    // a tab's: they are the same four wherever the code on screen came from
+    chanEl.appendChild(heading("iChannels"));
+    const refs = chanRefs;
     for (let i = 0; i < CHANNELS; i++) {
       const row = document.createElement("div");
       row.className = "gfx-ed-chan";
@@ -399,7 +401,10 @@ export function createShaderPane({ compile, canvas, starter, log }) {
       // note under the channels).
       add("audio:fft", "Audio — spectrum");
       add("audio:wave", "Audio — waveform");
-      for (const b of buffersFor(tab)) add(`buffer:${b}`, b);
+      // every buffer is offered, not only the ones this pass could read: the same four channels feed
+      // EVERY pass, so a binding has to be possible for the ones that draw later as well. A pass that
+      // reads a buffer drawn after it sees the previous frame -- which the renderer documents.
+      for (const b of BUFFER_PASSES) add(`buffer:${b}`, b);
       for (const name of pictures.keys()) add(`image:${name}`, name);
       const current = refs[i] ?? { kind: "none" };
       const what = current.buffer ?? current.name ?? current.band;
@@ -416,9 +421,9 @@ export function createShaderPane({ compile, canvas, starter, log }) {
           : { kind: "none" };
         // read the refs again rather than closing over the array this row was painted from: another
         // channel may have been moved since, and rebuilding from a stale copy would undo it
-        const now = chanRefs[tab] ?? refs;
-        chanRefs[tab] = now.map((r, j) => (j === i ? next : r ?? { kind: "none" }));
-        const { gone } = applyChannels(tab, true);
+        const now = chanRefs.length ? chanRefs : refs;
+        chanRefs = now.map((r, j) => (j === i ? next : r ?? { kind: "none" }));
+        const { gone } = applyChannels(true);
         paintChannels();                 // the row's own preview follows what it now draws
         if (gone.length) say(`${gone.join(", ")} left this session — nothing wants it now`);
       });
@@ -440,7 +445,7 @@ export function createShaderPane({ compile, canvas, starter, log }) {
     const missing = missingImages(collect(), new Set(pictures.keys()));
     if (missing.length) chanEl.appendChild(note(`Wanted but not here: ${missing.join(", ")}. A picture lives in this session only — it is never saved with the code — so choose it again on the channel that wants it, or that channel draws a placeholder.`));
     if (wantedImages(collect()).length) chanEl.appendChild(note("A picture is kept in memory for this session and never written anywhere: saving a document saves the code and the name of the picture, not the picture."));
-    if (PASS_ORDER.some((p) => (chanRefs[p] ?? []).some((r) => r?.kind === "audio"))) {
+    if (chanRefs.some((r) => r?.kind === "audio")) {
       chanEl.appendChild(note("Audio is a 512x2 texture, Shadertoy's layout: texture(iChannelN, vec2(f, 0.25)).x is the spectrum at f, and vec2(t, 0.75).x is the waveform, both 0..1. It is made from what the engine is playing every frame, so there is nothing to save."));
     }
   }
@@ -474,8 +479,10 @@ export function createShaderPane({ compile, canvas, starter, log }) {
   function wantedEverywhere() {
     const want = new Set();
     for (const d of set?.documents ?? []) {
+      // the document on screen is read live (the editor holds the truth while it is open), the others
+      // as they were saved. One array each, and no pass in it.
       const channels = d.name === doc?.name ? chanRefs : d.channels;
-      for (const pass of PASS_ORDER) for (const r of channels?.[pass] ?? []) if (r?.kind === "image") want.add(r.name);
+      for (const r of channels ?? []) if (r?.kind === "image") want.add(r.name);
     }
     return want;
   }
@@ -534,15 +541,14 @@ export function createShaderPane({ compile, canvas, starter, log }) {
     const x = document.createElement("button");
     x.className = "gfx-ed-btn gfx-ed-forget";
     x.textContent = "×";
-    x.title = `iChannel${i}: draw nothing. A picture stays in this session while something else still wants it.`;
+    x.title = `iChannel${i}: read nothing. A picture stays in this session while something else still wants it.`;
     x.addEventListener("click", () => {
-      const refs = chanRefs[tab] ?? [];
-      chanRefs[tab] = refs.map((r, j) => (j === i ? { kind: "none" } : r ?? { kind: "none" }));
-      const { gone } = applyChannels(tab, true);      // saves, and lets go of any picture nothing names
+      chanRefs = chanRefs.map((r, j) => (j === i ? { kind: "none" } : r ?? { kind: "none" }));
+      const { gone } = applyChannels(true);           // saves, and lets go of any picture nothing names
       paintChannels();
       say(gone.length
-        ? `${tab} iChannel${i} draws nothing now — ${gone.join(", ")} left this session (never saved)`
-        : `${tab} iChannel${i} draws nothing now`);
+        ? `iChannel${i} reads nothing now — ${gone.join(", ")} left this session (never saved)`
+        : `iChannel${i} reads nothing now`);
     });
     return x;
   }
@@ -565,9 +571,8 @@ export function createShaderPane({ compile, canvas, starter, log }) {
       pictures.set(name, { img, url, width: img.naturalWidth || img.width, height: img.naturalHeight || img.height });
       canvasNow()?.addImage(name, img);
       if (at != null) {
-        const refs = chanRefs[tab] ?? [];
-        chanRefs[tab] = refs.map((r, j) => (j === at ? { kind: "image", name } : r ?? { kind: "none" }));
-        applyChannels(tab, true);
+        chanRefs = chanRefs.map((r, j) => (j === at ? { kind: "image", name } : r ?? { kind: "none" }));
+        applyChannels(true);
       }
       paintChannels();
       say(at == null
@@ -586,10 +591,8 @@ export function createShaderPane({ compile, canvas, starter, log }) {
    * one: moving a cable is not a line of GLSL. `notify` is for a change the player made -- the pane
    * saving the document is this file's -- and not for the same refs arriving from a document just loaded.
    */
-  function applyChannels(pass, notify = false) {
-    const refs = chanRefs[pass];
-    if (!refs) return { gone: [] };
-    canvasNow()?.setChannels(pass, refs);
+  function applyChannels(notify = false) {
+    canvasNow()?.setChannels(chanRefs);
     if (!notify) return { gone: [] };
     save();                      // a cable moved, so the document in storage has moved with it
     // ...and it may have left a picture that nothing names any more: that is when one is let go of.
@@ -779,7 +782,7 @@ export function createShaderPane({ compile, canvas, starter, log }) {
   function loadDocument(next, { compileIt = false } = {}) {
     const wanted = tab;
     doc = next;
-    for (const name of PASS_ORDER) chanRefs[name] = [...(next.channels[name] ?? [])];
+    chanRefs = Array.from({ length: CHANNELS }, (_, i) => next.channels?.[i] ?? { kind: "none" });
     if (editor) {
       editor.setCode(SHARED, next.common ?? "");
       for (const p of PASS_ORDER) editor.setCode(p, next.passes[p] ?? "");

@@ -114,8 +114,8 @@ export function createCanvas({ document: doc = null, imageSource = "", onProblem
     audio,
     set: (name, values) => renderer.set(name, values),
     setIfPresent: (name, values) => renderer.setIfPresent(name, values),
-    /** Moving a channel's cable, which is not a compile: see gfx-renderer.js. */
-    setChannels: (pass, refs) => renderer.setChannels(pass, refs),
+    /** Moving the channels' cables, which is not a compile: see gfx-renderer.js. All four at once. */
+    setChannels: (refs) => renderer.setChannels(refs),
     addImage: (name, source) => renderer.addImage(name, source),
     removeImage: (name) => renderer.removeImage(name),
     get images() { return renderer.images; },

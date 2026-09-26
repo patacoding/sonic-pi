@@ -37,6 +37,7 @@ export function createRenderer(gl, { onProblem = () => {} } = {}) {
 
   const floatOK = !!gl.getExtension("EXT_color_buffer_float");
   let W = 1, H = 1;
+  let lastChannels = [];             // what the four channels are now, for a pass compiled after they moved
 
   // ── textures, targets, and the two stand-ins ───────────────────────────────────────────────────
   function texture(w, h, { float = false, filter = gl.NEAREST, wrap = gl.CLAMP_TO_EDGE, pixels = null }) {
@@ -148,6 +149,9 @@ export function createRenderer(gl, { onProblem = () => {} } = {}) {
    */
   function compile(doc) {
     const failures = [], compiled = [];
+    const given = Array.isArray(doc.channels) ? doc.channels : [];      // the document's, not a pass's
+    if (given.length) lastChannels = given;      // so a pass compiled later still gets the wiring
+    const channels = lastChannels;
     for (const name of PASS_ORDER) {
       const source = doc.passes[name] ?? "";
       const off = source.trim() === "";
@@ -159,7 +163,7 @@ export function createRenderer(gl, { onProblem = () => {} } = {}) {
       }
       const entry = existing ?? { program: createProgram(gl, { name }), channels: [] };
       passes.set(name, entry);
-      entry.channels = doc.channels[name] ?? [];
+      entry.channels = channels;                  // the document's four, the same for every pass
       const r = entry.program.compile({ source, common: doc.common ?? "" });
       if (r.ok) compiled.push(name);
       else failures.push({ pass: name, report: r.report, diagnostics: r.diagnostics ?? [], where: r.where });
@@ -294,20 +298,22 @@ export function createRenderer(gl, { onProblem = () => {} } = {}) {
     get passes() { return [...passes.keys()]; },
     /** Which passes have a program that is actually drawing right now. */
     get live() { return [...passes].filter(([, e]) => !!e.program.program).map(([n]) => n); },
-    /** Where each pass's channels point, for the editor. */
-    channelsOf(pass) { return passes.get(pass)?.channels ?? []; },
+    /** What the four channels read -- the document's, so every pass answers the same. */
+    channelsOf() { return lastChannels; },
     /** The size of the audio texture, so the editor can say what a shader is reading. */
     get audioSize() { return { w: AUDIO_W, h: AUDIO_H }; },
 
     /**
-     * Point a pass's channels somewhere else. A separate act from compiling, because it is: which
+     * Point the four channels somewhere else. A separate act from compiling, because it is: which
      * texture `iChannel0` samples is a binding, not a line of GLSL, so the editor can change it
      * while the picture keeps running instead of making the player recompile to move a cable.
+     *
+     * ALL FOUR GO TO ALL THE PASSES AT ONCE. There is one set of inputs for the piece and not one per
+     * tab (gfx-document.js says why), so this cannot be per pass even if a caller asked it to be.
      */
-    setChannels(pass, refs) {
-      const entry = passes.get(pass);
-      if (!entry) return false;
-      entry.channels = refs ?? [];
+    setChannels(refs) {
+      lastChannels = refs ?? [];
+      for (const entry of passes.values()) entry.channels = lastChannels;
       return true;
     },
 

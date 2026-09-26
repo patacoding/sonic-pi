@@ -7,7 +7,15 @@
 // held in a list, saved, loaded and swapped. Nothing in this file knows about GL or the DOM: it is
 // the shape, and the rules about what may be in it.
 //
-//   { version, name, common, passes: { "Buffer A"…"Image": source }, channels: { <pass>: [4 refs] } }
+//   { version, name, common, passes: { "Buffer A"…"Image": source }, channels: [4 refs] }
+//
+// THE CHANNELS ARE THE DOCUMENT'S, NOT A PASS'S. The user was blunt about this and was right: "ichannel
+// 的选择和指定只需要一个，你现在 image buffer a b c d 每个页面都有，而且还不同步". Four inputs belong to the
+// piece, not to each tab of it -- you wire them once, they are the same four wherever you are looking,
+// and switching tabs cannot show you a different set. (Shadertoy does keep them per tab; this is a
+// deliberate step away from it, because in practice it is one performance's four inputs.) A pass that
+// needs a different source than another pass uses a different CHANNEL NUMBER -- which is what the
+// numbers are for -- rather than a per-pass binding that looks the same and is not.
 //
 // A pass whose source is blank is OFF: not compiled, not rendered. That is how Buffer C costs nothing
 // when a piece does not use it. `Common` is not a pass -- it is text put in front of every pass, which
@@ -38,7 +46,7 @@ export const PASS_ORDER = ["Buffer A", "Buffer B", "Buffer C", "Buffer D", "Imag
 export const SHARED = "Common";
 export const BUFFER_PASSES = PASS_ORDER.filter((p) => p !== "Image");
 export const CHANNELS = 4;
-export const VERSION = 1;
+export const VERSION = 2;                    // 1: channels were per pass. 2: channels are the document's
 
 const blank = () => ({ kind: "none" });
 
@@ -49,11 +57,51 @@ export function emptyDocument(name = "Untitled", imageSource = "") {
     name,
     common: "",
     passes: Object.fromEntries(PASS_ORDER.map((p) => [p, p === "Image" ? imageSource : ""])),
-    channels: Object.fromEntries(PASS_ORDER.map((p) => [p, Array.from({ length: CHANNELS }, blank)])),
+    channels: Array.from({ length: CHANNELS }, blank),
   };
 }
 
 const isRef = (r) => r && typeof r === "object" && ["none", "buffer", "image", "audio"].includes(r.kind);
+
+/**
+ * One channel, from either shape storage may hold. The channels used to belong to each pass, so an
+ * older document has one array per pass name; they are now the document's, so there is one array.
+ *
+ * Collapsing them loses something, and it is worth being plain about what: a pass that read a
+ * different source on a channel NUMBER than another pass did cannot survive it. Image's is taken,
+ * because Image is the one that draws the screen and so the one whose wiring is visible; the Log says
+ * when the others disagreed, rather than the difference disappearing quietly.
+ */
+function oneChannel(channels, i) {
+  if (Array.isArray(channels)) return channels[i];
+  if (!channels || typeof channels !== "object") return undefined;
+  if (channels.Image?.[i]) return channels.Image[i];
+  for (const p of PASS_ORDER) {
+    const r = channels[p]?.[i];
+    if (r && r.kind !== "none") return r;          // the wiring somebody else had, rather than nothing
+  }
+  return undefined;
+}
+
+/**
+ * Did this older document wire the same channel NUMBER differently in different passes? Then
+ * collapsing it onto one set lost something, and the editor can say so instead of the difference
+ * going quietly missing. Pure, so the storage-reading side can ask before it trusts anything.
+ */
+export function channelsWerePerPass(raw) {
+  const c = raw?.channels;
+  if (!c || Array.isArray(c) || typeof c !== "object") return false;
+  for (let i = 0; i < CHANNELS; i++) {
+    // only the passes that actually wired it count. A pass with nothing on that channel has not
+    // "wired it differently" -- it simply does not care, and collapsing loses nothing by it. (Reading
+    // unwired as a value of its own made every document where one pass wired a channel and another
+    // did not look like a disagreement, which is most of them.)
+    const wired = PASS_ORDER.map((p) => c[p]?.[i]).filter((r) => r && r.kind && r.kind !== "none");
+    if (wired.length < 2) continue;
+    if (new Set(wired.map((r) => JSON.stringify(r))).size > 1) return true;
+  }
+  return false;
+}
 export const AUDIO_BANDS = ["fft", "wave"];
 
 /**
@@ -66,21 +114,17 @@ export function normalizeDocument(raw) {
   if (!raw || typeof raw !== "object") return emptyDocument();
   const passes = {};
   for (const p of PASS_ORDER) passes[p] = typeof raw.passes?.[p] === "string" ? raw.passes[p] : "";
-  const channels = {};
-  for (const p of PASS_ORDER) {
-    const given = Array.isArray(raw.channels?.[p]) ? raw.channels[p] : [];
-    channels[p] = Array.from({ length: CHANNELS }, (_, i) => {
-      const r = given[i];
-      if (!isRef(r)) return blank();
-      if (r.kind === "buffer" && !BUFFER_PASSES.includes(r.buffer)) return blank();
-      if (r.kind === "image" && (typeof r.name !== "string" || !r.name)) return blank();
-      if (r.kind === "audio" && !AUDIO_BANDS.includes(r.band)) return blank();
-      return r.kind === "buffer" ? { kind: "buffer", buffer: r.buffer }
-           : r.kind === "image" ? { kind: "image", name: r.name }
-           : r.kind === "audio" ? { kind: "audio", band: r.band }
-           : blank();
-    });
-  }
+  const channels = Array.from({ length: CHANNELS }, (_, i) => {
+    const r = oneChannel(raw.channels, i);
+    if (!isRef(r)) return blank();
+    if (r.kind === "buffer" && !BUFFER_PASSES.includes(r.buffer)) return blank();
+    if (r.kind === "image" && (typeof r.name !== "string" || !r.name)) return blank();
+    if (r.kind === "audio" && !AUDIO_BANDS.includes(r.band)) return blank();
+    return r.kind === "buffer" ? { kind: "buffer", buffer: r.buffer }
+         : r.kind === "image" ? { kind: "image", name: r.name }
+         : r.kind === "audio" ? { kind: "audio", band: r.band }
+         : blank();
+  });
   return {
     version: VERSION,
     name: typeof raw.name === "string" && raw.name.trim() ? raw.name.trim().slice(0, 60) : "Untitled",
@@ -99,7 +143,7 @@ export const isBuffer = (pass) => BUFFER_PASSES.includes(pass);
 /** Every picture this document wants, so the editor can tell the player which are not here. */
 export function wantedImages(doc) {
   const want = new Set();
-  for (const p of PASS_ORDER) for (const r of doc.channels[p] ?? []) if (r?.kind === "image") want.add(r.name);
+  for (const r of doc.channels ?? []) if (r?.kind === "image") want.add(r.name);
   return [...want];
 }
 
