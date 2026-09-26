@@ -234,9 +234,14 @@ export function createShaderEditor({ parent, onCompile, onDirty }) {
     keymap.of([
       ...closeBracketsKeymap, ...defaultKeymap, ...searchKeymap, ...historyKeymap, ...completionKeymap,
       indentWithTab,
-      // the compile shortcut every shader toy has, and the same one: Alt-Enter (Mod-Enter for a Mac)
-      { key: "Alt-Enter", run: () => (onCompile?.(), true) },
-      { key: "Mod-Enter", run: () => (onCompile?.(), true) },
+      // Compile. NOT Alt-Enter, which is the shader toy convention: in THIS app Alt-Enter and
+      // Ctrl-Enter are both Run, and the app's dispatcher listens on document in the CAPTURE phase and
+      // stops the event there -- so a shader editor bound to either of them would run the player's
+      // Sonic Pi code instead of compiling, and never see the key at all. Measured, not guessed:
+      // node -e "...shortcuts.js..." says Run owns Alt-Enter and Ctrl-Enter in all three keymaps.
+      // Shift-Ctrl-Enter (Shift-Mod-Enter on a Mac) is free in all three and no browser wants it.
+      { key: "Shift-Ctrl-Enter", run: () => (onCompile?.(), true) },
+      { key: "Shift-Mod-Enter", run: () => (onCompile?.(), true) },
     ]),
     diagnosticsField,
     EditorView.updateListener.of((u) => {

@@ -16,6 +16,26 @@
 // So reads go through here, and each one answers "what did the player choose?", with an absent or
 // unusable entry giving the fallback and a legitimate 0 or false coming back as 0 or false.
 
+/**
+ * One step of a control a key press moves: the opacity, up or down by a fixed amount.
+ *
+ * Pure, and here rather than in the key handler, because the two things that are easy to get wrong are
+ * arithmetic and are worth pinning: the ends CLAMP rather than wrap (a shortcut held down must stop at
+ * 0 and at 1, not leap from one end to the other mid-performance), and the value is kept to the step's
+ * own precision so that twenty presses down and twenty presses up come back to where they started
+ * rather than to 0.7999999999999999.
+ *
+ * @param {number} current 0..1
+ * @param {number} direction +1 for more opaque, -1 for less
+ * @param {number} step how much one press moves it
+ */
+export function stepLevel(current, direction, step = 0.05) {
+  const from = Number.isFinite(current) ? current : 0;
+  const to = Math.min(1, Math.max(0, from + (direction >= 0 ? step : -step)));
+  const places = Math.max(0, Math.ceil(-Math.log10(step)));        // 0.05 -> 2 places
+  return Number(to.toFixed(places));
+}
+
 export function createSettings(store = localStorage) {
   /** The raw string, or null when there is none -- the distinction the rest of this file is about. */
   const raw = (key) => {

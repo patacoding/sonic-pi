@@ -32,7 +32,7 @@
 import { parseDirective, SIGIL, SIGIL_VERBOSE } from "./gfx-directive.js";
 import { createCanvas } from "./gfx-canvas.js";
 import { createGrounds } from "./gfx-grounds.js";
-import { createSettings } from "./gfx-settings.js";
+import { createSettings, stepLevel } from "./gfx-settings.js";
 import { createPanel } from "./gfx-ui.js";
 import { createShaderPane, resolveDocument } from "./gfx-editor.js";
 import { emptyDocument } from "./gfx-document.js";
@@ -42,6 +42,7 @@ const STYLE_ID = "gfx-style";
 const ALPHA_KEY = "sp-gfx-ui-alpha";
 const CANVAS_KEY = "sp-gfx-canvas";
 const SHADER_FILE = "gfx-shader.frag";
+const ALPHA_STEP = 0.05;                // one press of the opacity shortcut
 
 // web/gfx-shader.frag is the shader, and the only copy of it: one file to edit, and editing it
 // changes what runs on the next reload. This is what runs when that file cannot be fetched at all —
@@ -71,6 +72,18 @@ html { background: #05070d; }
 
    What is faded instead is the theme's own GROUND COLOURS, further down in this file: the tokens,
    not the selectors that use them. Every surface, inline styles included, follows a token. */
+
+/* The shortcut's own readout: a key press that changes something the player cannot see the value of
+   has to say what it changed, and the panel's slider is usually shut. A small pill at the foot of the
+   window, and it goes away by itself -- nothing to dismiss mid-performance. */
+#gfx-toast {
+  position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%) translateY(6px);
+  z-index: 40; pointer-events: none; opacity: 0; transition: opacity 120ms ease, transform 120ms ease;
+  padding: 5px 12px; border-radius: var(--r-pill, 999px); border: 1px solid var(--WindowBorder);
+  background: var(--raisedSurface, var(--PaneBackground)); color: var(--WindowForeground);
+  font: 600 var(--t-small, 13px) var(--code-font); white-space: nowrap;
+}
+#gfx-toast.on { opacity: 1; transform: translateX(-50%) translateY(0); }
 `;
   document.head.appendChild(el);
 };
@@ -256,6 +269,56 @@ function install() {
     ui.rebuild();                                    // the uniform list is only knowable now
     log?.(`Graphics — the shader's own values: ${canvas.userUniforms.join(", ") || "none"}; the frame's: ${canvas.renderer.builtins.join(", ")}`);
   })();
+
+  // ── the opacity shortcut ───────────────────────────────────────────────────────────────────────
+  // Ctrl+Alt+Up / Ctrl+Alt+Down, 5% a press, because a performance should not need the mouse and the
+  // panel. Chosen by MEASURING what is taken rather than by taste: of the 163 chords this app's own
+  // catalogue claims (shortcut-defs.js + shortcuts.js, all three keymaps) plus its ad-hoc ones
+  // (Ctrl+G, Ctrl+R, Ctrl+A in the log), nothing is on Ctrl+Alt with an arrow -- only i, n and p are
+  // on Ctrl+Alt at all. It is also free of the two traps that catch the obvious alternatives: the
+  // browser keeps Ctrl+Shift+O (bookmarks) and Ctrl+Shift+I (devtools) to itself, and Ctrl+Alt with
+  // a LETTER is AltGr on a German or Polish layout, which would type a character instead. AltGr does
+  // not touch the arrow keys, so this chord cannot be a character on any layout.
+  //
+  // Listening here rather than registering a command with app.js's dispatcher (the user's choice) means
+  // this file must answer the conflict question itself -- hence the note above, and hence the guard
+  // below: the app's dispatcher runs first (it is a capture listener registered earlier) and stops any
+  // chord it owns, so `defaultPrevented` is exactly "that key was already somebody's".
+  const stepOpacity = (direction) => {
+    const next = stepLevel(alpha(), direction, ALPHA_STEP);
+    settings.set(ALPHA_KEY, next);
+    applyAlpha(next);
+    if (ui.isOpen) ui.rebuild();        // the panel's slider follows if it is on screen...
+    // ...and either way the readout says where it landed: the slider is usually shut, and a key that
+    // changes something invisible has to answer "by how much?" (the panel reads `alpha()` when it is
+    // opened, so a rebuild for a shut panel would be work nobody sees)
+    toast(`UI opacity ${Math.round(next * 100)}%`);
+    return next;
+  };
+
+  let toastEl = null, toastTimer = 0;
+  function toast(text) {
+    if (!toastEl) {
+      toastEl = document.createElement("div");
+      toastEl.id = "gfx-toast";
+      toastEl.setAttribute("role", "status");
+      toastEl.setAttribute("aria-live", "polite");
+      document.body.appendChild(toastEl);
+    }
+    toastEl.textContent = text;
+    toastEl.classList.add("on");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.classList.remove("on"), 900);
+  }
+
+  document.addEventListener("keydown", (e) => {
+    if (e.isComposing || e.keyCode === 229) return;
+    if (!e.ctrlKey || !e.altKey || e.metaKey || e.shiftKey) return;
+    if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+    if (e.defaultPrevented) return;     // the app's dispatcher already had this key: leave it alone
+    e.preventDefault();
+    stepOpacity(e.key === "ArrowUp" ? 1 : -1);
+  }, true);
 
   /** The audio, from the engine's own output node -- the same tap the scope uses. */
   function attachAudio(engine) {

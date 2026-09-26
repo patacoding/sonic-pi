@@ -155,7 +155,7 @@ export function createShaderPane({ compile, canvas, starter, log }) {
   const compileBtn = document.createElement("button");
   compileBtn.className = "gfx-ed-btn primary";
   compileBtn.textContent = "Compile";
-  compileBtn.title = "Compile every pass that has code (Alt-Enter). A pass that fails keeps the one that is running.";
+  compileBtn.title = "Compile every pass that has code (Shift+Ctrl+Enter, or Shift+Cmd+Enter on a Mac). A pass that fails keeps the one that is running.";
   head.append(tabsEl, spacer, sayEl, compileBtn);
 
   // the documents: the row above the passes' tabs, since a document is what holds the passes
