@@ -1,0 +1,7 @@
+# built by scripts/build-gfx-editor.mjs: our own layer's artifact, so it is not committed
+# (upstream commits web/app.js because upstream's own pipeline builds it; nothing builds this
+# one but us -- tools/serve-dev.sh and tools/build-for-cdn.sh do, and offline-check.mjs fails
+# if the site ships without it). entry.js, the source, *is* committed.
+editor.js
+editor.js.map
+chunks/
