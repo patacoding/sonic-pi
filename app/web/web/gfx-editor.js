@@ -126,8 +126,10 @@ const railIcon = () => {
  *   `compile` is gfx.js's: it compiles a document and returns the renderer's result.
  *   `canvas` is read late (the GL canvas arrives after the audio is attached), so it is a function.
  *   `starter` is the code a NEW document begins with (web/gfx-shader.frag, in gfx.js).
+ *   `onCompiled` says what a compile came to, for the layer that has somewhere to show it (a toast):
+ *   the pane's own status line is inside the pane, and a compile key can be pressed from outside it.
  */
-export function createShaderPane({ compile, canvas, starter, log }) {
+export function createShaderPane({ compile, canvas, starter, log, onCompiled }) {
   style();
 
   // ── the rail button and the drawer pane ─────────────────────────────────────────────────────────
@@ -155,7 +157,7 @@ export function createShaderPane({ compile, canvas, starter, log }) {
   const compileBtn = document.createElement("button");
   compileBtn.className = "gfx-ed-btn primary";
   compileBtn.textContent = "Compile";
-  compileBtn.title = "Compile every pass that has code (Shift+Ctrl+Enter, or Shift+Cmd+Enter on a Mac). A pass that fails keeps the one that is running.";
+  compileBtn.title = "Compile every pass that has code (F8, from anywhere in the app). A pass that fails keeps the one that is running.";
   head.append(tabsEl, spacer, sayEl, compileBtn);
 
   // the documents: the row above the passes' tabs, since a document is what holds the passes
@@ -772,7 +774,9 @@ export function createShaderPane({ compile, canvas, starter, log }) {
     paintTabs();
     paintReport();
     const bad = result.failures.length;
-    say(bad ? `${bad} pass${bad > 1 ? "es" : ""} did not compile — the one that was running still is` : `compiled: ${result.compiled.join(", ") || "nothing"}`, bad > 0);
+    const answer = bad ? `${bad} pass${bad > 1 ? "es" : ""} did not compile — the one that was running still is` : `compiled: ${result.compiled.join(", ") || "nothing"}`;
+    say(answer, bad > 0);
+    onCompiled?.(answer, bad > 0);        // the key is pressed from anywhere, so the answer has to land anywhere
     if (bad) for (const f of result.failures) log?.(`Graphics — ${f.pass} did not compile.\n${f.report}`);
     return result;
   }

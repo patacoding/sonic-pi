@@ -84,6 +84,7 @@ html { background: #05070d; }
   font: 600 var(--t-small, 13px) var(--code-font); white-space: nowrap;
 }
 #gfx-toast.on { opacity: 1; transform: translateX(-50%) translateY(0); }
+#gfx-toast.bad { border-color: var(--ErrorBackground); color: var(--ErrorBackground); }
 `;
   document.head.appendChild(el);
 };
@@ -243,6 +244,7 @@ function install() {
     compile: compileDocument,
     canvas: () => canvas,
     starter: () => shaderSource,           // a new document starts from web/gfx-shader.frag
+    onCompiled: (answer, bad) => toast(`Shader: ${answer}`, bad),   // the compile key works from anywhere, so its answer shows anywhere
     log: (text) => log?.(text),
   });
 
@@ -297,7 +299,7 @@ function install() {
   };
 
   let toastEl = null, toastTimer = 0;
-  function toast(text) {
+  function toast(text, bad = false) {
     if (!toastEl) {
       toastEl = document.createElement("div");
       toastEl.id = "gfx-toast";
@@ -306,6 +308,7 @@ function install() {
       document.body.appendChild(toastEl);
     }
     toastEl.textContent = text;
+    toastEl.classList.toggle("bad", bad);
     toastEl.classList.add("on");
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => toastEl.classList.remove("on"), 900);
@@ -313,11 +316,33 @@ function install() {
 
   document.addEventListener("keydown", (e) => {
     if (e.isComposing || e.keyCode === 229) return;
-    if (!e.ctrlKey || !e.altKey || e.metaKey || e.shiftKey) return;
-    if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
     if (e.defaultPrevented) return;     // the app's dispatcher already had this key: leave it alone
-    e.preventDefault();
-    stepOpacity(e.key === "ArrowUp" ? 1 : -1);
+
+    // Compile: F8, on its own, NOT in the Ctrl+Alt family the opacity key uses -- the user was clear
+    // that the two have nothing to do with each other. F8 because it is free in all three of the app's
+    // keymaps and no browser claims it (F7 is Firefox's caret browsing, F5 reloads, F11/F12 are taken),
+    // and because a function key is the old convention for "build" rather than something invented here.
+    //
+    // Document-level, and that is the lesson this key cost twice: a shortcut that only works with the
+    // editor focused does nothing whenever the focus is elsewhere -- in the player's Sonic Pi code, in
+    // the Log, or nowhere. (The app's own documentation card makes #main `inert` while it shows, and
+    // then nothing in this pane can be focused at all.) The user reported "the compile key does not
+    // work" twice; both times the key was fine and the focus was the problem.
+    if (e.key === "F8") {
+      if (!pane?.isOpen()) return;      // nothing is being edited: a compile would change nothing
+      e.preventDefault();
+      return void pane.compile();
+    }
+
+    // The opacity: Ctrl+Alt+Up / Down, 5% a press. Measured free in the app's catalogue (see the note
+    // above), and free of the two traps that catch the obvious alternatives: the browser keeps
+    // Ctrl+Shift+O and Ctrl+Shift+I to itself, and Ctrl+Alt with a LETTER is AltGr on a German or
+    // Polish layout, which would type a character. AltGr does not touch the arrow keys.
+    if (!e.ctrlKey || !e.altKey || e.metaKey || e.shiftKey) return;
+    if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      e.preventDefault();
+      stepOpacity(e.key === "ArrowUp" ? 1 : -1);
+    }
   }, true);
 
   /** The audio, from the engine's own output node -- the same tap the scope uses. */
