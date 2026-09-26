@@ -92,10 +92,18 @@ body[data-drawer="${PANE}"] #gfx-shader-pane { display: flex; }
 .gfx-ed-side { flex-shrink: 0; width: 264px; min-height: 0; overflow: auto; border-left: 1px solid var(--WindowBorder); padding: 6px 8px 10px; }
 .gfx-ed-note { font: var(--t-tiny, 11px) var(--code-font); color: var(--faintText, var(--mutedForeground)); margin: 2px 0 8px; }
 .gfx-ed-chan { display: flex; align-items: center; gap: 4px; margin-bottom: 3px; }
-.gfx-ed-chan-n { width: 5.6em; font: var(--t-tiny, 11px) var(--code-font); color: var(--mutedForeground); }
+.gfx-ed-chan-n { width: 4.9em; flex-shrink: 0; font: var(--t-tiny, 11px) var(--code-font); color: var(--mutedForeground); }
 .gfx-ed-chan select { flex: 1; min-width: 0; background: var(--Background); color: var(--DefaultForeground, var(--Foreground)); border: 1px solid var(--WindowBorder); border-radius: var(--r-s, 3px); font: var(--t-tiny, 11px) var(--code-font); }
-.gfx-ed-drop { border: 1px dashed var(--WindowBorder); border-radius: var(--r-s, 3px); padding: 6px; text-align: center; font: var(--t-tiny, 11px) var(--code-font); color: var(--mutedForeground); cursor: pointer; }
-.gfx-ed-drop:hover, .gfx-ed-drop.over { border-color: var(--HighlightedBackground); color: var(--WindowForeground); }
+.gfx-ed-chan.over { outline: 1px dashed var(--HighlightedBackground); outline-offset: 1px; }
+.gfx-ed-pick { padding: 0 5px; line-height: 1.5; flex-shrink: 0; }
+.gfx-ed-pics { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 8px; }
+.gfx-ed-picscap { font: var(--t-tiny, 11px) var(--code-font); color: var(--faintText, var(--mutedForeground)); }
+.gfx-ed-pic { position: relative; display: flex; flex-direction: column; align-items: center; width: 60px; padding: 3px; border: 1px solid var(--WindowBorder); border-radius: var(--r-s, 3px); background: var(--Background); }
+.gfx-ed-pic .x { position: absolute; top: -5px; right: -5px; width: 14px; height: 14px; line-height: 12px; text-align: center; border-radius: 50%; background: var(--ErrorBackground); color: #fff; font: 700 10px var(--code-font); cursor: pointer; }
+.gfx-ed-picname { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: var(--t-tiny, 11px) var(--code-font); color: var(--softForeground, var(--Foreground)); }
+.gfx-ed-thumb { width: 52px; height: 38px; object-fit: cover; border-radius: 2px; background: var(--PaneBackground); }
+.gfx-ed-chan-prev { display: inline-flex; align-items: center; justify-content: center; width: 2.2em; height: 1.4em; font: var(--t-tiny, 11px) var(--code-font); color: var(--mutedForeground); }
+.gfx-ed-thumb-sm { width: 2.2em; height: 1.4em; object-fit: cover; border-radius: 2px; }
 .gfx-ed-report { margin-top: 8px; }
 .gfx-ed-rep { border-left: 2px solid var(--ErrorBackground); padding: 2px 0 2px 6px; margin-bottom: 6px; }
 .gfx-ed-rep-pass { font: 600 var(--t-tiny, 11px) var(--code-font); }
@@ -404,60 +412,153 @@ export function createShaderPane({ compile, canvas, starter, log }) {
         const now = chanRefs[tab] ?? refs;
         chanRefs[tab] = now.map((r, j) => (j === i ? next : r ?? { kind: "none" }));
         applyChannels(tab, true);
+        paintChannels();                 // the row's own preview follows what it now draws
       });
-      row.append(label, select);
+      // a file dropped on the row is chosen for the row, the same as the + is
+      row.addEventListener("dragover", (e) => { e.preventDefault(); row.classList.add("over"); });
+      row.addEventListener("dragleave", () => row.classList.remove("over"));
+      row.addEventListener("drop", (e) => {
+        e.preventDefault();
+        row.classList.remove("over");
+        const f = e.dataTransfer?.files?.[0];
+        if (f) upload(f, i);
+      });
+      row.append(label, previewOf(current), select, channelPicker(i));
       chanEl.appendChild(row);
     }
-    chanEl.appendChild(uploadDrop());
+    if (pictures.size) chanEl.appendChild(picturesBox());
     const missing = missingImages(collect(), new Set(pictures.keys()));
-    if (missing.length) chanEl.appendChild(note(`Wanted but not here: ${missing.join(", ")}. A picture lives in this session only — it is never saved with the code — so upload it again, or the channel draws a placeholder.`));
+    if (missing.length) chanEl.appendChild(note(`Wanted but not here: ${missing.join(", ")}. A picture lives in this session only — it is never saved with the code — so choose it again on the channel that wants it, or that channel draws a placeholder.`));
     if (wantedImages(collect()).length) chanEl.appendChild(note("A picture is kept in memory for this session and never written anywhere: saving a document saves the code and the name of the picture, not the picture."));
   }
 
-  /** A drop target and a file picker: the player's own photographs, this session only. */
-  function uploadDrop() {
+  /** What a channel is drawing, at a glance: the picture itself, a buffer's letter, or nothing. */
+  function previewOf(ref) {
+    const cell = document.createElement("span");
+    cell.className = "gfx-ed-chan-prev";
+    const held = ref?.kind === "image" ? pictures.get(ref.name) : null;
+    if (held) {
+      const img = document.createElement("img");
+      img.className = "gfx-ed-thumb-sm";
+      img.src = held.url;
+      img.alt = ref.name;
+      cell.appendChild(img);
+      cell.title = `${ref.name} — ${held.width}×${held.height}, this session only`;
+    } else if (ref?.kind === "buffer") {
+      cell.textContent = ref.buffer.replace("Buffer ", "");   // a buffer is a texture there is no cheap way to read back
+      cell.title = ref.buffer;
+    } else {
+      cell.textContent = "–";
+      cell.title = ref?.kind === "image" ? `${ref.name} is not in this session — choose it again` : "nothing";
+    }
+    return cell;
+  }
+
+  /**
+   * The pictures this session holds, as tiles, under the channels. This is what answers "I chose a
+   * picture and nothing happened": a picture that arrived shows ITSELF. The × lets one go -- letting a
+   * picture go is not rewriting the cables: the channels that named it go on naming it, and draw a
+   * placeholder, which is the shape of the rule that pictures are never saved.
+   */
+  function picturesBox() {
     const box = document.createElement("div");
-    box.className = "gfx-ed-drop";
-    box.textContent = "Drop a picture here, or click to choose";
+    box.className = "gfx-ed-pics";
+    const cap = document.createElement("span");
+    cap.className = "gfx-ed-picscap";
+    cap.textContent = "In this session:";
+    box.appendChild(cap);
+    for (const [name, held] of pictures) {
+      const tile = document.createElement("div");
+      tile.className = "gfx-ed-pic";
+      tile.title = `${name} — ${held.width}×${held.height}, in this session only (never saved)`;
+      const img = document.createElement("img");
+      img.className = "gfx-ed-thumb";
+      img.src = held.url;
+      img.alt = name;
+      const label = document.createElement("span");
+      label.className = "gfx-ed-picname";
+      label.textContent = name;
+      const x = document.createElement("span");
+      x.className = "x";
+      x.textContent = "×";
+      x.title = `Forget "${name}". The channels that wanted it stay wired, and draw a placeholder.`;
+      x.addEventListener("click", () => forgetPicture(name));
+      tile.append(img, label, x);
+      box.appendChild(tile);
+    }
+    return box;
+  }
+
+  /** Let a picture go: out of this session's textures (it was never written anywhere to begin with). */
+  function forgetPicture(name) {
+    const held = pictures.get(name);
+    if (!held) return;
+    URL.revokeObjectURL(held.url);
+    pictures.delete(name);
+    canvasNow()?.removeImage?.(name);
+    paintChannels();
+    say(`forgot ${name} — the channel that wanted it draws a placeholder`);
+  }
+
+  /**
+   * The way a picture gets onto a channel, which is where Shadertoy puts it: an iChannel slot is
+   * given a picture, rather than a picture being uploaded somewhere and then wired up. So choosing a
+   * file here BINDS THIS ROW to it -- the one thing that makes "I chose a picture" and "the picture
+   * is on iChannel2" the same act. Dragging a file onto the row does the same.
+   */
+  function channelPicker(at) {
+    const button = document.createElement("button");
+    button.className = "gfx-ed-btn gfx-ed-pick";
+    button.textContent = "+";
+    button.title = `Choose a picture for iChannel${at} (it stays in this session, and is never saved)`;
     const input = document.createElement("input");
     input.type = "file";
     input.accept = "image/*";
     input.style.display = "none";
-    const take = (files) => { for (const f of files ?? []) upload(f); };
-    box.addEventListener("click", () => input.click());
-    input.addEventListener("change", () => take(input.files));
-    box.addEventListener("dragover", (e) => { e.preventDefault(); box.classList.add("over"); });
-    box.addEventListener("dragleave", () => box.classList.remove("over"));
-    box.addEventListener("drop", (e) => { e.preventDefault(); box.classList.remove("over"); take(e.dataTransfer?.files); });
-    box.appendChild(input);
-    return box;
+    input.addEventListener("change", () => { const f = input.files?.[0]; if (f) upload(f, at); });
+    button.addEventListener("click", () => input.click());
+    button.appendChild(input);
+    return button;
   }
 
-  /** A picture goes into this session's textures -- `addImage` -- and is not written to storage. */
-  async function upload(file) {
-    if (!file || !/^image\//.test(file.type)) { say("that is not a picture", true); return; }
+  /** A picture goes into this session's textures -- `addImage` -- and is not written to storage.
+   *  `at` is the channel it was chosen for: choosing a picture for iChannel2 is what puts it there. */
+  async function upload(file, at = null) {
+    if (!file || !/^image\//.test(file.type)) { say(`"${file?.name ?? "that"}" is not a picture`, true); return; }
+    const name = (file.name ?? "").slice(0, 60) || "picture";
+    // a big photograph takes a moment to decode, and a pane that says nothing for a moment is the
+    // complaint this is answering -- so it says what it is doing before it does it
+    say(`reading ${name}…`);
     const url = URL.createObjectURL(file);
     try {
       const img = new Image();
       img.src = url;
       await img.decode();
-      const name = file.name.slice(0, 60) || "picture";
-      pictures.set(name, img);
+      const was = pictures.get(name);
+      if (was) URL.revokeObjectURL(was.url);          // the same file chosen again: one picture, one URL
+      pictures.set(name, { img, url, width: img.naturalWidth || img.width, height: img.naturalHeight || img.height });
       canvasNow()?.addImage(name, img);
-      // a channel already asking for this name (a document reloaded and uploaded again) is now fed
+      if (at != null) {
+        const refs = chanRefs[tab] ?? [];
+        chanRefs[tab] = refs.map((r, j) => (j === at ? { kind: "image", name } : r ?? { kind: "none" }));
+        applyChannels(tab, true);
+      }
       paintChannels();
-      say(`${name} is in this session (never saved)`);
+      say(at == null
+        ? `${name} is in this session (never saved) — pick it on a channel`
+        : `${name} → ${tab} iChannel${at} (never saved)`);
     } catch (e) {
-      say(`could not read that picture: ${e.message}`, true);
-    } finally {
-      URL.revokeObjectURL(url);
+      URL.revokeObjectURL(url);        // it was never taken, so there is nothing holding it
+      say(`could not read "${name}": ${e.message}`, true);
     }
   }
+
+
 
   /**
    * Push a pass's channels into the running renderer. A separate act from compiling, because it is
    * one: moving a cable is not a line of GLSL. `notify` is for a change the player made -- the pane
-   * saving the document is gfx.js's -- and not for the same refs arriving from a document just loaded.
+   * saving the document is this file's -- and not for the same refs arriving from a document just loaded.
    */
   function applyChannels(pass, notify = false) {
     const refs = chanRefs[pass];
