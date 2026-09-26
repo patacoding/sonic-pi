@@ -38,6 +38,12 @@ export function createCanvas({ document: doc = null, imageSource = "", onProblem
   const compiled = renderer.compile(shown);
   if (!compiled.ok) for (const f of compiled.failures) onProblem(`${f.pass} did not compile.\n${f.report}`);
 
+  // one column per FFT bin and the newest samples for the waveform, filled each frame by the upper
+  // layer (gfx.js, which owns the analyser). The texture's own width is the ceiling -- fftSize 1024
+  // is what makes the analyser's 512 bins land on it exactly, and the fill is bounded by the data so
+  // a different fftSize would show fewer columns rather than read off the end
+  const audio = { fft: new Float32Array(renderer.audioSize.w), wave: new Float32Array(renderer.audioSize.w) };
+
   const state = {
     time: 0, delta: 0, frame: 0,
     mouse: [0, 0, 0, 0],          // x, y, down-x, down-y -- in Shadertoy's sense, made in the renderer
@@ -76,7 +82,7 @@ export function createCanvas({ document: doc = null, imageSource = "", onProblem
     resize();
     stamp();
     feed?.(state.time, state.delta);                 // the upper layer's own values (the audio)
-    renderer.render({ ...state, sampleRate: sampleRate() });
+    renderer.render({ ...state, sampleRate: sampleRate(), audio });
   }
 
   const move = (e) => { state.mouse[0] = e.clientX; state.mouse[1] = canvas.clientHeight - e.clientY; };
@@ -104,6 +110,8 @@ export function createCanvas({ document: doc = null, imageSource = "", onProblem
     get userUniforms() { return renderer.userUniforms(); },
     get live() { return renderer.live; },
     get float() { return renderer.float; },
+    /** What the upper layer fills each frame: the audio, as the texture's two rows (gfx-renderer.js). */
+    audio,
     set: (name, values) => renderer.set(name, values),
     setIfPresent: (name, values) => renderer.setIfPresent(name, values),
     /** Moving a channel's cable, which is not a compile: see gfx-renderer.js. */

@@ -394,17 +394,26 @@ export function createShaderPane({ compile, canvas, starter, log }) {
       const select = document.createElement("select");
       const add = (value, text) => select.appendChild(Object.assign(document.createElement("option"), { value, textContent: text }));
       add("", "None");
+      // the engine's own audio first, because it is the one input that is always there: no file to
+      // find, nothing to be missing. Shadertoy's two audio inputs, and its texture layout (see the
+      // note under the channels).
+      add("audio:fft", "Audio — spectrum");
+      add("audio:wave", "Audio — waveform");
       for (const b of buffersFor(tab)) add(`buffer:${b}`, b);
       for (const name of pictures.keys()) add(`image:${name}`, name);
       const current = refs[i] ?? { kind: "none" };
-      const value = current.kind === "none" ? "" : `${current.kind}:${current.buffer ?? current.name}`;
+      const what = current.buffer ?? current.name ?? current.band;
+      const value = current.kind === "none" ? "" : `${current.kind}:${what}`;
       // a picture this session does not have (a document loaded from storage): shown, and marked
       if (current.kind === "image" && !pictures.has(current.name)) add(value, `${current.name} (not here)`);
       select.value = value;
       select.addEventListener("change", () => {
         const [kind, ...rest] = select.value.split(":");
         const name = rest.join(":");
-        const next = kind === "buffer" ? { kind: "buffer", buffer: name } : kind === "image" ? { kind: "image", name } : { kind: "none" };
+        const next = kind === "buffer" ? { kind: "buffer", buffer: name }
+          : kind === "image" ? { kind: "image", name }
+          : kind === "audio" ? { kind: "audio", band: name }
+          : { kind: "none" };
         // read the refs again rather than closing over the array this row was painted from: another
         // channel may have been moved since, and rebuilding from a stale copy would undo it
         const now = chanRefs[tab] ?? refs;
@@ -431,6 +440,9 @@ export function createShaderPane({ compile, canvas, starter, log }) {
     const missing = missingImages(collect(), new Set(pictures.keys()));
     if (missing.length) chanEl.appendChild(note(`Wanted but not here: ${missing.join(", ")}. A picture lives in this session only — it is never saved with the code — so choose it again on the channel that wants it, or that channel draws a placeholder.`));
     if (wantedImages(collect()).length) chanEl.appendChild(note("A picture is kept in memory for this session and never written anywhere: saving a document saves the code and the name of the picture, not the picture."));
+    if (PASS_ORDER.some((p) => (chanRefs[p] ?? []).some((r) => r?.kind === "audio"))) {
+      chanEl.appendChild(note("Audio is a 512x2 texture, Shadertoy's layout: texture(iChannelN, vec2(f, 0.25)).x is the spectrum at f, and vec2(t, 0.75).x is the waveform, both 0..1. It is made from what the engine is playing every frame, so there is nothing to save."));
+    }
   }
 
   /** What a channel is drawing, at a glance: the picture itself, a buffer's letter, or nothing. */
@@ -448,6 +460,9 @@ export function createShaderPane({ compile, canvas, starter, log }) {
     } else if (ref?.kind === "buffer") {
       cell.textContent = ref.buffer.replace("Buffer ", "");   // a buffer is a texture there is no cheap way to read back
       cell.title = ref.buffer;
+    } else if (ref?.kind === "audio") {
+      cell.textContent = ref.band;
+      cell.title = `the engine's audio, as a 512x2 texture (${ref.band === "fft" ? "the spectrum" : "the waveform"}), made fresh every frame`;
     } else {
       cell.textContent = "–";
       cell.title = ref?.kind === "image" ? `${ref.name} is not in this session — choose it again` : "nothing";

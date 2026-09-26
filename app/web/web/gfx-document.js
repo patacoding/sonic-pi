@@ -18,13 +18,16 @@
 //   { kind: "none" }                          nothing: bound to a 1x1 black texture, never a null
 //   { kind: "buffer", buffer: "Buffer A" }    one of this document's own buffers
 //   { kind: "image", name: "photo.jpg" }      a picture the player uploaded THIS SESSION
+//   { kind: "audio", band: "fft" | "wave" }   the engine's own audio, as a 512x2 texture (renderer)
 //
 // A channel never refers to another document's buffer: documents are self-contained, as Shadertoy's
 // are. And `kind: "image"` names a picture; it does not carry one.
 //
 // ── The rule this file exists to keep ───────────────────────────────────────────────────────────
 //
-// ONLY THE CODE IS SAVED. A picture the player uploads lives in this session's memory and nowhere
+// ONLY THE CODE IS SAVED. An audio channel carries nothing at all but the fact that it wants audio --
+// the samples are the engine's, made this frame, so there is nothing to write down. A picture the
+// player uploads lives in this session's memory and nowhere
 // else: `serialize` writes the name a channel asks for and never the bytes, so nothing about the
 // image reaches localStorage. A reload therefore finds a document that wants a picture it does not
 // have -- `missingImages` is how the editor knows to say so, and the renderer draws a placeholder
@@ -50,7 +53,8 @@ export function emptyDocument(name = "Untitled", imageSource = "") {
   };
 }
 
-const isRef = (r) => r && typeof r === "object" && ["none", "buffer", "image"].includes(r.kind);
+const isRef = (r) => r && typeof r === "object" && ["none", "buffer", "image", "audio"].includes(r.kind);
+export const AUDIO_BANDS = ["fft", "wave"];
 
 /**
  * Whatever came out of storage, made into a document this code can trust: unknown passes dropped,
@@ -70,8 +74,10 @@ export function normalizeDocument(raw) {
       if (!isRef(r)) return blank();
       if (r.kind === "buffer" && !BUFFER_PASSES.includes(r.buffer)) return blank();
       if (r.kind === "image" && (typeof r.name !== "string" || !r.name)) return blank();
+      if (r.kind === "audio" && !AUDIO_BANDS.includes(r.band)) return blank();
       return r.kind === "buffer" ? { kind: "buffer", buffer: r.buffer }
            : r.kind === "image" ? { kind: "image", name: r.name }
+           : r.kind === "audio" ? { kind: "audio", band: r.band }
            : blank();
     });
   }

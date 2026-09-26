@@ -250,7 +250,9 @@ function install() {
     const ac = engine?.audioContext ?? engine?.node?.context;
     if (!ac || !engine.node) return false;
     if (analyser?.context === ac) return true;                 // already tapped this context
-    analyser = Object.assign(ac.createAnalyser(), { fftSize: 2048, smoothingTimeConstant: 0.6 });
+    // fftSize 1024 is not arbitrary: it is what makes the analyser's 512 bins land one per column of
+    // the audio texture, with the newest 512 of its 1024 samples as the waveform (gfx-renderer.js)
+    analyser = Object.assign(ac.createAnalyser(), { fftSize: 1024, smoothingTimeConstant: 0.6 });
     engine.node.connect(analyser);
     taps = { ctx: ac, time: new Float32Array(analyser.fftSize), freq: new Float32Array(analyser.frequencyBinCount), connected: true };
     const binHz = ac.sampleRate / analyser.fftSize;
@@ -280,6 +282,17 @@ function install() {
     const clamped = Math.max(0, Math.min(1, level.rms * 6));   // a little gain: RMS on music sits low
     canvas.setIfPresent("uLevel", [clamped]);
     canvas.setIfPresent("uBands", bandValues);
+
+    // ...and the same reading, as a texture a shader can sample (Shadertoy's 512x2 layout: the FFT
+    // row, then the waveform row). Filled in place, so a frame allocates nothing, and bounded by the
+    // data rather than by the array -- how many columns there are is the analyser's business.
+    const held = canvas.audio;
+    const norm = (db) => Math.max(0, Math.min(1, (db + 90) / 90));         // dBFS, as uBands does it
+    const bins = Math.min(held.fft.length, taps.freq.length);
+    for (let x = 0; x < bins; x++) held.fft[x] = norm(taps.freq[x]);
+    const samples = Math.min(held.wave.length, taps.time.length);
+    const from = taps.time.length - samples;                               // the newest samples
+    for (let x = 0; x < samples; x++) held.wave[x] = Math.max(0, Math.min(1, (taps.time[from + x] + 1) / 2));
   }
 
   /** `puts :gfx, :document, "rings"` — which document is on screen, from the music. */

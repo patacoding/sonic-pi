@@ -77,6 +77,19 @@ export function createRenderer(gl, { onProblem = () => {} } = {}) {
     return { tex: t, w: 8, h: 8 };
   })();
 
+  /** The engine's own audio, as a texture: 512 columns, and two rows -- the FFT on top of the
+   *  waveform. THIS IS SHADERTOY'S LAYOUT, deliberately, so a shader written there reads the same
+   *  numbers here: `texture(iChannel0, vec2(f, 0.25)).x` is the frequency band at `f`, and
+   *  `texture(iChannel0, vec2(t, 0.75)).x` is the waveform at `t`, both in 0..1.
+   *
+   *  Silence is what it starts as, and what it goes back to when the engine has not been run: a
+   *  piece that samples audio before anything is playing draws a flat line rather than a black hole. */
+  const AUDIO_W = 512, AUDIO_H = 2;
+  const audioPixels = new Uint8Array(AUDIO_W * AUDIO_H * 4);
+  for (let i = 3; i < audioPixels.length; i += 4) audioPixels[i] = 255;      // opaque, whatever is in it
+  const audioTex = texture(AUDIO_W, AUDIO_H, { filter: gl.LINEAR, wrap: gl.CLAMP_TO_EDGE, pixels: audioPixels });
+  const audio = { tex: audioTex, w: AUDIO_W, h: AUDIO_H };
+
   // ── buffers ────────────────────────────────────────────────────────────────────────────────────
   function ensureBuffer(name) {
     let b = buffers.get(name);
@@ -105,6 +118,7 @@ export function createRenderer(gl, { onProblem = () => {} } = {}) {
 
   // ── what a channel draws from ──────────────────────────────────────────────────────────────────
   function resolve(ref) {
+    if (ref?.kind === "audio") return audio;
     if (ref?.kind === "image") {
       const img = images.get(ref.name);
       if (img) return img;
@@ -155,9 +169,43 @@ export function createRenderer(gl, { onProblem = () => {} } = {}) {
     return { ok: failures.length === 0, compiled, failures, float: floatOK };
   }
 
+  /**
+   * What the engine is playing, as the two rows of that texture. The upper layer hands over the same
+   * numbers it already takes for `uLevel`/`uBands`, so there is one reading of the audio in the page
+   * and not two that can disagree.
+   *
+   * `fft` and `wave` are both 0..1 and 512 long, and are read at the NEXT draw -- the audio is
+   * sampled once a frame, not once a pass, so a pass that reads it twice reads the same numbers.
+   */
+  function setAudio(fft, wave) {
+    if (!fft && !wave) return;
+    for (let x = 0; x < AUDIO_W; x++) {
+      const at = x * 4;                                                  // row 0, from the bottom: v=0.25
+      const v = fft ? fft[x] : 0;
+      audioPixels[at] = audioPixels[at + 1] = audioPixels[at + 2] = Math.max(0, Math.min(255, Math.round(v * 255)));
+      const wt = (AUDIO_W + x) * 4;                                      // row 1: v=0.75
+      const w2 = wave ? wave[x] : 0;
+      audioPixels[wt] = audioPixels[wt + 1] = audioPixels[wt + 2] = Math.max(0, Math.min(255, Math.round(w2 * 255)));
+    }
+    gl.bindTexture(gl.TEXTURE_2D, audioTex);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, AUDIO_W, AUDIO_H, gl.RGBA, gl.UNSIGNED_BYTE, audioPixels);
+  }
+
+  /** Does any pass that is going to draw read the audio? Then uploading it is worth doing at all. */
+  function audioWanted() {
+    for (const [, entry] of passes) {
+      if (!entry.program.program) continue;
+      for (const r of entry.channels ?? []) if (r?.kind === "audio") return true;
+    }
+    return false;
+  }
+
   // ── drawing ────────────────────────────────────────────────────────────────────────────────────
   /** state: { time, delta, frame, mouse: [x,y,downX,downY], down, date: Float32Array(4), sampleRate } */
   function render(state) {
+    // once a frame, and only if a pass that draws actually reads it: an audio texture nobody samples
+    // is a texture upload per frame for nothing
+    if (state.audio && audioWanted()) setAudio(state.audio.fft, state.audio.wave);
     for (const name of BUFFER_PASSES) {
       const b = buffers.get(name);
       if (b) { b.write = 1 - b.cur; b.written = false; }               // this frame draws into the other one
@@ -248,6 +296,8 @@ export function createRenderer(gl, { onProblem = () => {} } = {}) {
     get live() { return [...passes].filter(([, e]) => !!e.program.program).map(([n]) => n); },
     /** Where each pass's channels point, for the editor. */
     channelsOf(pass) { return passes.get(pass)?.channels ?? []; },
+    /** The size of the audio texture, so the editor can say what a shader is reading. */
+    get audioSize() { return { w: AUDIO_W, h: AUDIO_H }; },
 
     /**
      * Point a pass's channels somewhere else. A separate act from compiling, because it is: which
