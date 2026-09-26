@@ -160,7 +160,7 @@ function install() {
         { kind: "note", text: `Editing web/${SHADER_FILE} and reloading is the whole editor for now. It is fetched fresh each load, so nothing needs rebuilding.` },
         {
           kind: "list", label: "Uniforms the shader really has (from the link, not its source):",
-          items: canvas ? canvas.usable : ["— the shader has not linked yet"],
+          items: canvas ? [...canvas.userUniforms, ...canvas.renderer.builtins.map((b) => `${b} (frame)`)] : ["— the shader has not linked yet"],
         },
         {
           kind: "button", label: "Reload shader", title: "Fetch gfx-shader.frag again and reload the page",
@@ -169,7 +169,7 @@ function install() {
         {
           kind: "button", label: "Say the uniforms in the Log",
           title: "Write the list above into Sonic Pi's own Log panel",
-          onClick: () => log?.(`Graphics — uniforms: ${canvas ? canvas.usable.join(", ") || "none" : "the shader has not linked yet"}`),
+          onClick: () => log?.(`Graphics — passes: ${canvas ? canvas.live.join(", ") || "none" : "none"}; the shader's own values: ${canvas ? canvas.userUniforms.join(", ") || "none" : "none"}`),
         },
       ],
     },
@@ -192,7 +192,7 @@ function install() {
   (async () => {
     const shader = await loadShader();
     if (!shader.fromFile) problem(`${shader.why}, so the placeholder shader is running — it declares no uniform and answers no directive`);
-    canvas = createCanvas({ source: shader.source, onProblem: problem });
+    canvas = createCanvas({ imageSource: shader.source, onProblem: problem });
     if (!canvas) return;
     canvas.canvas.setAttribute("aria-hidden", "true");
     canvas.canvas.style.display = canvasOn() ? "" : "none";
@@ -201,7 +201,7 @@ function install() {
     canvas.onFeed(feed);
     window.sonicPiGfx.canvas = canvas.canvas;
     ui.rebuild();                                    // the uniform list is only knowable now
-    log?.(`Graphics — ${canvas.usable.length} uniform${canvas.usable.length === 1 ? "" : "s"} in the shader: ${canvas.usable.join(", ") || "none"}`);
+    log?.(`Graphics — the shader's own values: ${canvas.userUniforms.join(", ") || "none"}; the frame's: ${canvas.renderer.builtins.join(", ")}`);
   })();
 
   /** The audio, from the engine's own output node -- the same tap the scope uses. */
@@ -266,7 +266,10 @@ function install() {
     canvas: null,
     /** The extension panel (gfx-ui.js): the place every feature we add puts its controls. */
     ui,
-    get uniforms() { return canvas ? [...canvas.uniforms].map(([n, u]) => `${n}:${u.type ?? "unsupported"}`) : []; },
+    /** What the passes declare: the player's own values, and the frame's. */
+    get uniforms() { return canvas ? canvas.usable : []; },
+    /** Every pass that has a program drawing right now. */
+    get passes() { return canvas ? canvas.live : []; },
     /** Set one by hand, as the directive would: `sonicPiGfx.set("uGain", [0.5])` */
     set: (name, values) => canvas?.set(name, values) ?? { ok: false, error: "no canvas" },
     reload: () => location.reload(),

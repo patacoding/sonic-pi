@@ -32,13 +32,24 @@ void main() {
 // sampler whose texture the renderer binds, so it is declared by whichever pass wants it and the
 // renderer tells it which unit to read.
 const BUILTINS = [
-  ["float", "iTime"],        // seconds since the first frame
-  ["float", "iTimeDelta"],   // the last frame's own duration
-  ["int", "iFrame"],         // frames drawn
-  ["vec3", "iResolution"],   // x, y, and 1.0 (Shadertoy's pixelAspect is always 1 here)
-  ["vec4", "iMouse"],        // xy the pointer, zw the press -- and NEGATED while dragging, as Shadertoy has it
-  ["vec4", "iDate"],         // year, month, day, seconds
-  ["float", "iSampleRate"],
+  { type: "float", name: "iTime" },        // seconds since the first frame
+  { type: "float", name: "iTimeDelta" },   // the last frame's own duration
+  { type: "int", name: "iFrame" },         // frames drawn
+  { type: "vec3", name: "iResolution" },   // x, y, and 1.0 (Shadertoy's pixelAspect is always 1 here)
+  // xy the pointer, zw the press -- and NEGATED while dragging, as Shadertoy has it
+  { type: "vec4", name: "iMouse" },
+  { type: "vec4", name: "iDate" },         // year, month, day, seconds
+  { type: "float", name: "iSampleRate" },
+  // The channels are declared HERE, not left to each pass, because Shadertoy's shaders use
+  // `texture(iChannel0, uv)` without declaring anything -- a ported shader that did not compile
+  // would be a shader that "does not work on the web" for no good reason. Which texture each one
+  // reads is the renderer's business, per pass.
+  { type: "sampler2D", name: "iChannel0" },
+  { type: "sampler2D", name: "iChannel1" },
+  { type: "sampler2D", name: "iChannel2" },
+  { type: "sampler2D", name: "iChannel3" },
+  // an array: declared with its size, deduped (and looked up) by the base name
+  { type: "vec3", name: "iChannelResolution[4]", base: "iChannelResolution" },
 ];
 
 // glGetActiveUniform's type enum -> the name gfx-directive.js reasons in.
@@ -57,8 +68,8 @@ const GL_TYPES = new Map([
  */
 export function assemble({ source, common = "", header = "" }) {
   const declared = BUILTINS
-    .filter(([, name]) => !new RegExp(`\\buniform\\s+\\w+\\s+${name}\\b`).test(source))
-    .map(([type, name]) => `uniform ${type} ${name};`)
+    .filter((b) => !new RegExp(`\\buniform\\s+\\w+\\s+${b.base ?? b.name}\\b`).test(source))
+    .map((b) => `uniform ${b.type} ${b.name};`)
     .join("\n");
   const lines = [
     ...(header ? header.split("\n") : []),
@@ -111,6 +122,9 @@ export function describe(diagnostics) {
  * @param {WebGL2RenderingContext} gl
  * @param {{name?: string, onSwap?: Function}} opts
  */
+/** The names the prelude declares: ours to set every frame, and not the player's to send. */
+export const BUILTIN_NAMES = BUILTINS.map((b) => b.base ?? b.name);
+
 export function createProgram(gl, { name = "pass", onSwap } = {}) {
   let program = null;
   let uniforms = new Map();          // name -> { type, size, location }
@@ -141,6 +155,10 @@ export function createProgram(gl, { name = "pass", onSwap } = {}) {
     if (!fits(u.type, shape)) {
       return { ok: false, error: `"${name}" is ${u.type} in the shader, but ${shape} (${values.length} value${values.length > 1 ? "s" : ""}) was given` };
     }
+    // A uniform belongs to a program, and `gl.uniform*` writes to the program IN USE. With one pass
+    // that was invisible; with several it silently did nothing to every pass but the one bound last
+    // -- found by reading a pixel back in tools/webgl-multipass-probe, not by reading this code.
+    gl.useProgram(program);
     switch (u.type) {
       case "float": gl.uniform1f(u.location, Number(values[0])); break;
       case "int": gl.uniform1i(u.location, Math.round(Number(values[0]))); break;
@@ -149,6 +167,10 @@ export function createProgram(gl, { name = "pass", onSwap } = {}) {
       case "vec3": gl.uniform3fv(u.location, values.slice(0, 3)); break;
       case "vec4": gl.uniform4fv(u.location, values.slice(0, 4)); break;
     }
+    // and check at the boundary: a refused upload must not come back as success. (dev-discipline §4.1:
+    // an error has to be checked where it happens, or it is attributed to the next call instead.)
+    const err = gl.getError();
+    if (err) return { ok: false, error: `the driver refused "${name}" (GL error 0x${err.toString(16)})` };
     return { ok: true };
   }
 
@@ -202,6 +224,24 @@ export function createProgram(gl, { name = "pass", onSwap } = {}) {
       gl.deleteShader(sh); gl.deleteShader(vs);
       onSwap?.(api, { kept, dropped });
       return { ok: true, kept, dropped, uniforms: api.usable };
+    },
+
+    /** Point a channel at a texture unit. Ours, every frame -- not something a program sends. */
+    setSampler(name, unit) {
+      const u = uniforms.get(name);
+      if (!u?.sampler) return false;
+      gl.uniform1i(u.location, unit);
+      return true;
+    },
+
+    /** Set an array uniform whole (iChannelResolution: four vec3s, so twelve floats). */
+    setArray(name, floats) {
+      const u = uniforms.get(name);
+      if (!u || !u.array) return false;
+      const components = { vec2: 2, vec3: 3, vec4: 4 }[u.type];
+      if (!components) return false;
+      gl.uniform3fv(u.location, floats.slice(0, u.size * components));
+      return true;
     },
 
     /** Set a value, as a directive would. Remembered, so a recompile keeps it. */
