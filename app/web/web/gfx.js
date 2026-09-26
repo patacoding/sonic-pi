@@ -285,6 +285,51 @@ function install() {
   // inside the app (info.js textOf -> fileOf), so deleting them would break Info rather than tidy up.
   const SITE_URL = "https://sonic-pi.net/";
   const SITE_PAGES = { about: "index.html", examples: "examples.html", learn: "learn.html", tutorial: "tutorial.html", support: "support.html" };
+  // The site's pages as FILES, for the anchors that name one directly (the Info card's own body is full
+  // of them: `index.html`, `tutorial.html`, `support.html`). `code.html` is deliberately NOT here -- it
+  // is this app -- and neither is `specs.html`, which is the spec browser in this tree.
+  const SITE_FILES = new Set([...Object.values(SITE_PAGES), "index.html", "examples.html", "learn.html", "support.html", "tutorial.html"]);
+  const isSiteFile = (file) => SITE_FILES.has(file) || /^tutorial-[0-9a-z]+\.html$/.test(file);   // a chapter a page
+
+  /** The official URL an anchor of ours should point at, or null if it is not ours to move. */
+  function outwardOf(a) {
+    if (!a || a.dataset.gfxOutward || !a.getAttribute) return null;
+    const href = a.getAttribute("href") ?? "";
+    // same page (`#mac`), or something that is already somebody else's or a scheme (`https:`, `mailto:`)
+    if (!href || href.startsWith("#") || /^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith("//")) return null;
+    const parts = href.split(/(?=[?#])/);                        // index.html#mac -> ["index.html", "#mac"]
+    if (!isSiteFile(parts[0])) return null;
+    return SITE_URL + parts.join("");
+  }
+
+  /**
+   * Send every anchor that names one of this tree's own site pages to the official site, in a new tab.
+   *
+   * Why this is not only the tab row: the Info card's BODY is a copy of the page, and it is full of
+   * cross-page links ("the app for macOS" is `index.html#mac`). In the shipped product `index.html` is a
+   * redirect to `code.html` (see build-for-cdn.sh), so such a link would reload the whole editor and lose
+   * the anchor -- mid-performance, from a click a player made to read something. The page it names is the
+   * official site's page and lives there, so that is where it goes.
+   *
+   * The card's content is fetched and adopted LATER (info.js), so a pass at load is not enough: a
+   * MutationObserver catches each page as it arrives. Only childList is watched -- this function sets
+   * attributes, and watching those would be a loop.
+   */
+  function sendPagesOutward(root = document) {
+    const anchors = root.matches?.("a[href]") ? [root] : [];
+    if (root.querySelectorAll) anchors.push(...root.querySelectorAll("a[href]"));
+    let moved = 0;
+    for (const a of anchors) {
+      const url = outwardOf(a);
+      if (!url) continue;
+      a.href = url;
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.dataset.gfxOutward = "1";
+      moved++;
+    }
+    return moved;
+  }
 
   function sendTabsOutward() {
     const nav = document.getElementById("site-nav");
@@ -309,7 +354,11 @@ function install() {
   }
 
   sendTabsOutward();
-  window.addEventListener("load", sendTabsOutward);               // and once more, after the page settles
+  sendPagesOutward();
+  new MutationObserver((records) => {
+    for (const r of records) for (const n of r.addedNodes) if (n.nodeType === 1) sendPagesOutward(n);
+  }).observe(document.body, { childList: true, subtree: true });
+  window.addEventListener("load", () => { sendTabsOutward(); sendPagesOutward(); });   // and once more, after the page settles
 
   // Changing the href is not enough, and this is where the first attempt failed: the app has its OWN
   // handlers on that row (info.js) which preventDefault and show the LOCAL page inside the Info card.
@@ -318,11 +367,16 @@ function install() {
   // listeners, which are on the row itself) and the official page is opened instead. A modified click
   // (Cmd/Ctrl/Shift) is left alone: that is the browser's own new-tab gesture and the href is right.
   //
+  // The card's own body links are taken the same way (`a[data-gfx-outward]`): they are ordinary anchors
+  // inside a page the app adopted, and a capture listener is the only thing that can keep info.js from
+  // swapping the card to a local page instead.
+  //
   // The app's own tap handler is on `pointerup` and ignores a drag of more than 12px, so this does the
   // same: a scroll that starts on the row must not open anything.
-  const TAB_SELECTOR = "#site-nav .ic-tabs a[data-tab], #site-nav .sn-brand";
+  const TAB_SELECTOR = "#site-nav .ic-tabs a[data-tab], #site-nav .sn-brand, a[data-gfx-outward]";
   let pressedAt = null, openedAt = 0;
   const siteOf = (el) => {
+    if (el.dataset.gfxOutward) return el.href;                    // already pointing at the official page
     if (el.classList.contains("sn-brand")) return SITE_URL;
     const file = SITE_PAGES[el.dataset.tab];
     return file ? SITE_URL + file : null;
