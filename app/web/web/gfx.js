@@ -34,10 +34,13 @@ import { createCanvas } from "./gfx-canvas.js";
 import { createGrounds } from "./gfx-grounds.js";
 import { createSettings } from "./gfx-settings.js";
 import { createPanel } from "./gfx-ui.js";
+import { createShaderPane } from "./gfx-editor.js";
+import { emptyDocument, activePasses, serialize, deserialize } from "./gfx-document.js";
 
 const STYLE_ID = "gfx-style";
 const ALPHA_KEY = "sp-gfx-ui-alpha";
 const CANVAS_KEY = "sp-gfx-canvas";
+const DOC_KEY = "sp-gfx-document";      // the document last compiled: code only, never a picture
 const SHADER_FILE = "gfx-shader.frag";
 
 // web/gfx-shader.frag is the shader, and the only copy of it: one file to edit, and editing it
@@ -116,11 +119,29 @@ function install() {
   document.documentElement.classList.add("gfx-on");
 
   let canvas = null;
+  let pane = null;                 // the shader editor's pane (gfx-editor.js)
+  let shaderSource = "";           // web/gfx-shader.frag: what the FIRST document starts from
   let log = null;                  // the app's logInfo, handed to us by the one hook
   let analyser = null, taps = null, bandBins = null;
   const level = { rms: 0 }, bandValues = [0, 0, 0, 0];
 
   const problem = (text) => (log ? log(`Graphics — ${text}`) : console.warn(`Graphics — ${text}`));
+
+  // ── the document ───────────────────────────────────────────────────────────────────────────────
+  // What runs is a document (gfx-document.js), and localStorage keeps the last one. Only the code
+  // is in there: a picture a channel asks for is named, never carried, so a saved document that
+  // wants one comes back wanting it.
+  const saveDocument = (doc) => { try { localStorage.setItem(DOC_KEY, serialize(doc)); } catch {} };
+  const storedDocument = () => {
+    try {
+      const text = localStorage.getItem(DOC_KEY);
+      if (!text) return null;
+      const doc = deserialize(text);
+      if (doc) log?.(`Graphics — the saved document "${doc.name}" is back (${activePasses(doc).join(", ") || "no pass has code"}). Pictures are not saved: a channel that wants one draws a placeholder until it is uploaded again.`);
+      return doc;
+    } catch { return null; }
+  };
+  const compileDocument = (doc) => { const result = canvas.compile(doc); saveDocument(doc); return result; };
 
   // ── the extension panel ────────────────────────────────────────────────────────────────────────
   // Every feature we add gets a section here and draws nothing of its own: see gfx-ui.js. The spec is
@@ -157,14 +178,28 @@ function install() {
       id: "shader",
       title: "Shader",
       items: [
-        { kind: "note", text: `Editing web/${SHADER_FILE} and reloading is the whole editor for now. It is fetched fresh each load, so nothing needs rebuilding.` },
+        {
+          kind: "button", label: "Open the shader editor",
+          title: "The tabs, the code and the channels, in the panel at the foot of the window (the picture frame in the rail)",
+          onClick: () => pane?.open(),
+        },
+        {
+          kind: "note",
+          text: `The editor is a pane of the bottom drawer — the picture frame in the rail. web/${SHADER_FILE} is only what the FIRST document starts from; what runs is what the editor holds. What is saved is the code: an uploaded picture is kept in this session and named, never carried.`,
+        },
         {
           kind: "list", label: "Uniforms the shader really has (from the link, not its source):",
           items: canvas ? [...canvas.userUniforms, ...canvas.renderer.builtins.map((b) => `${b} (frame)`)] : ["— the shader has not linked yet"],
         },
         {
-          kind: "button", label: "Reload shader", title: "Fetch gfx-shader.frag again and reload the page",
-          onClick: () => location.reload(),
+          kind: "button", label: "Reset to the default shader",
+          title: `Put web/${SHADER_FILE} back as the Image pass and compile it. Everything else in the editor goes.`,
+          onClick: () => {
+            const doc = emptyDocument("Default", shaderSource);
+            compileDocument(doc);
+            pane?.loadDocument(doc);
+            log?.("Graphics — the default shader is back");
+          },
         },
         {
           kind: "button", label: "Say the uniforms in the Log",
@@ -177,7 +212,7 @@ function install() {
       id: "next",
       title: "Coming here",
       items: [
-        { kind: "note", text: "Shader buffer tabs, per-buffer uniforms and the rest of the desktop graphics feature land in this panel, one section each." },
+        { kind: "note", text: "The rest of the desktop graphics feature lands in this panel, one section each." },
       ],
     },
   ];
@@ -189,10 +224,22 @@ function install() {
     onOpen: () => ui.rebuild(),
   });
 
+  // The editor's pane, in the drawer. Made now rather than with the canvas below, because it is
+  // what the rail's button opens and a player who opens it before the first Run should find the
+  // editor and the code rather than a pane that is not there yet. Its `canvas` is read late.
+  pane = createShaderPane({
+    compile: compileDocument,
+    canvas: () => canvas,
+    onChannel: () => { if (pane) saveDocument(pane.document()); },
+    log: (text) => log?.(text),
+  });
+
   (async () => {
     const shader = await loadShader();
+    shaderSource = shader.source;
     if (!shader.fromFile) problem(`${shader.why}, so the placeholder shader is running — it declares no uniform and answers no directive`);
-    canvas = createCanvas({ imageSource: shader.source, onProblem: problem });
+    const doc = storedDocument() ?? emptyDocument("Default", shader.source);
+    canvas = createCanvas({ document: doc, onProblem: problem });
     if (!canvas) return;
     canvas.canvas.setAttribute("aria-hidden", "true");
     canvas.canvas.style.display = canvasOn() ? "" : "none";
@@ -200,6 +247,10 @@ function install() {
     canvas.setSampleRate(() => taps?.ctx.sampleRate ?? 48000);
     canvas.onFeed(feed);
     window.sonicPiGfx.canvas = canvas.canvas;
+    // the editor shows the document that is running, and only now can the channels point anywhere
+    pane.loadDocument(doc);
+    pane.uniformsChanged();
+    pane.restore();                                  // the pane was open when the page was left
     ui.rebuild();                                    // the uniform list is only knowable now
     log?.(`Graphics — the shader's own values: ${canvas.userUniforms.join(", ") || "none"}; the frame's: ${canvas.renderer.builtins.join(", ")}`);
   })();
@@ -266,6 +317,8 @@ function install() {
     canvas: null,
     /** The extension panel (gfx-ui.js): the place every feature we add puts its controls. */
     ui,
+    /** The shader editor's pane (gfx-editor.js): the tabs, the code and the channels. */
+    get pane() { return pane; },
     /** What the passes declare: the player's own values, and the frame's. */
     get uniforms() { return canvas ? canvas.usable : []; },
     /** Every pass that has a program drawing right now. */

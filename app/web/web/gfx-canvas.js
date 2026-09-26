@@ -106,6 +106,11 @@ export function createCanvas({ document: doc = null, imageSource = "", onProblem
     get float() { return renderer.float; },
     set: (name, values) => renderer.set(name, values),
     setIfPresent: (name, values) => renderer.setIfPresent(name, values),
+    /** Moving a channel's cable, which is not a compile: see gfx-renderer.js. */
+    setChannels: (pass, refs) => renderer.setChannels(pass, refs),
+    addImage: (name, source) => renderer.addImage(name, source),
+    removeImage: (name) => renderer.removeImage(name),
+    get images() { return renderer.images; },
     onFeed: (fn) => { feed = fn; },
     setSampleRate: (fn) => { sampleRate = fn; },
     bands,

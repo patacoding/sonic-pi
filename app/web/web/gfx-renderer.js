@@ -129,6 +129,8 @@ export function createRenderer(gl, { onProblem = () => {} } = {}) {
   /**
    * Compile the document's passes. A pass that fails keeps whatever it had -- including nothing --
    * and the failure comes back in `failures` for the editor to show, per pass, with its own lines.
+   * `diagnostics` rides along with the readable `report`: the editor marks lines, and re-reading its
+   * own line numbers back out of a block of text is how a "line 12" ends up pointing at line 1.
    */
   function compile(doc) {
     const failures = [], compiled = [];
@@ -146,7 +148,7 @@ export function createRenderer(gl, { onProblem = () => {} } = {}) {
       entry.channels = doc.channels[name] ?? [];
       const r = entry.program.compile({ source, common: doc.common ?? "" });
       if (r.ok) compiled.push(name);
-      else failures.push({ pass: name, report: r.report, where: r.where });
+      else failures.push({ pass: name, report: r.report, diagnostics: r.diagnostics ?? [], where: r.where });
       if (isBuffer(name)) ensureBuffer(name);
     }
     for (const name of BUFFER_PASSES) if (!passes.has(name)) dropBuffer(name);
@@ -246,6 +248,18 @@ export function createRenderer(gl, { onProblem = () => {} } = {}) {
     get live() { return [...passes].filter(([, e]) => !!e.program.program).map(([n]) => n); },
     /** Where each pass's channels point, for the editor. */
     channelsOf(pass) { return passes.get(pass)?.channels ?? []; },
+
+    /**
+     * Point a pass's channels somewhere else. A separate act from compiling, because it is: which
+     * texture `iChannel0` samples is a binding, not a line of GLSL, so the editor can change it
+     * while the picture keeps running instead of making the player recompile to move a cable.
+     */
+    setChannels(pass, refs) {
+      const entry = passes.get(pass);
+      if (!entry) return false;
+      entry.channels = refs ?? [];
+      return true;
+    },
 
     /** A picture for a channel. Kept in memory for this session and never written anywhere. */
     addImage(name, source) {

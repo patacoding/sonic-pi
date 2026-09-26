@@ -92,18 +92,23 @@ export function assemble({ source, common = "", header = "" }) {
  * A driver's compile or link log, with its line numbers read back as the player's:
  * `{ pass: { line } }` for a line of the pass's own source, `{ common: { line } }` for a line of the
  * shared block, `null` for a line inside the prelude (which is nobody's code to fix).
+ *
+ * `severity` is kept from the log's own word for it. It matters because the editor marks these lines,
+ * and a driver's warning is not the same thing as a shader that will not compile -- the one thing a
+ * GLSL log can be trusted to say about itself, since the line numbers beside it need rebasing.
  */
 export function locate(text, places) {
   const { offset, commonAt } = places;
   return String(text).trim().split("\n").map((raw) => {
     const line = raw.trim();
-    const m = /^(?:ERROR|WARNING):\s*\d+:(\d+):\s*(.*)$/.exec(line);
-    if (!m) return { where: "driver", line, message: line };
+    const m = /^(ERROR|WARNING):\s*\d+:(\d+):\s*(.*)$/.exec(line);
+    if (!m) return { where: "driver", line, message: line, severity: /warning/i.test(line) ? "warning" : "error" };
     const at = Number(m[1]);
-    const message = m[2];
-    if (at > offset) return { where: "pass", line: at - offset, message };
-    if (commonAt < offset && at > commonAt) return { where: "common", line: at - commonAt, message };
-    return { where: "prelude", line: null, message };
+    const severity = m[1] === "WARNING" ? "warning" : "error";
+    const message = m[3];
+    if (at > offset) return { where: "pass", line: at - offset, message, severity };
+    if (commonAt < offset && at > commonAt) return { where: "common", line: at - commonAt, message, severity };
+    return { where: "prelude", line: null, message, severity };
   }).filter((d) => d.message);
 }
 
