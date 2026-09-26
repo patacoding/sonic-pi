@@ -103,7 +103,7 @@ export function locate(text, places) {
     const line = raw.trim();
     const m = /^(ERROR|WARNING):\s*\d+:(\d+):\s*(.*)$/.exec(line);
     if (!m) return { where: "driver", line, message: line, severity: /warning/i.test(line) ? "warning" : "error" };
-    const at = Number(m[1]);
+    const at = Number(m[2]);                                  // m[1] is the WORD, m[2] the line
     const severity = m[1] === "WARNING" ? "warning" : "error";
     const message = m[3];
     if (at > offset) return { where: "pass", line: at - offset, message, severity };

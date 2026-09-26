@@ -35,8 +35,75 @@ export function createRenderer(gl, { onProblem = () => {} } = {}) {
   const said = new Set();            // each kind of trouble once, not once a frame
   const say = (text) => { if (!said.has(text)) { said.add(text); onProblem(text); } };
 
+  // ── the compiled-program cache ───────────────────────────────────────────────────────────────────
+  // MEASURED (tools/webgl-multipass-probe §8, real driver): switching documents costs ~10 ms for one
+  // pass, ~108 ms for a five-pass one, and ~1341 ms the first time a heavy shader is seen -- and the
+  // SAME source costs ~8 ms again, so the driver does not save us. A performance switches between two
+  // or three looks all night, so each distinct (Common + source) is compiled ONCE and kept:
+  //
+  //   - switching back to a look already shown is then free (no compile, no link);
+  //   - several passes whose source is the same share one program, which is the common case
+  //     (a five-pass document that compiles 108 ms compiles ~25 ms when the passes share code);
+  //   - a source that stops being used stays compiled, so going back is free as well.
+  //
+  // What a key is: Common + source, exactly what is compiled together. Nothing about the prelude is in
+  // it, because the cache lives as long as the page does and the prelude cannot change under it.
+  const cache = new Map();           // key -> a compiled program
+  const used = [];                   // keys, most recently used last
+  const CACHE_MAX = 24;              // more programs than a performance's set of looks needs
+
+  /** What the player has set, so a program built LATER still has it: a program's own values live in
+   *  the program, and a cache hit or a fresh compile may hand the pass a different one. */
+  const remembered = new Map();      // name -> the value list last accepted
+
+  const keyOf = (common, source) => `${common}\u0000${source}`;
+
+  /** Let a program go -- unless the cache is holding it, in which case it is not this pass's to drop.
+   *  A program no pass draws with stays compiled, because switching back to it should be free. */
+  const release = (program) => {
+    for (const held of cache.values()) if (held === program) return;
+    program.dispose();
+  };
+  const inUse = (program) => { for (const [, e] of passes) if (e.program === program) return true; return false; };
+
+  function evict() {
+    while (cache.size > CACHE_MAX) {
+      // the oldest key that no pass is drawing with: evicting a program in use would blank a pass
+      const at = used.findIndex((k) => !inUse(cache.get(k)));
+      if (at < 0) return;                              // everything is in use: keep them all
+      const [key] = used.splice(at, 1);
+      cache.get(key)?.dispose();
+      cache.delete(key);
+    }
+  }
+
+  /**
+   * A compiled program for this (Common + source): the cached one if there is one, otherwise a new one.
+   * A FAILED compile returns the failure and nothing else -- the pass keeps whatever it was drawing, and
+   * no half-built program is left in the cache. (This is also why a fresh object is built rather than
+   * recompiling into the pass's own: caching needs more than one program per pass to exist at a time.)
+   */
+  function programFor(name, source, common) {
+    const key = keyOf(common, source);
+    const hit = cache.get(key);
+    if (hit) {
+      used.splice(used.indexOf(key), 1);
+      used.push(key);
+      return { program: hit, cached: true };
+    }
+    const fresh = createProgram(gl, { name });
+    const r = fresh.compile({ source, common });
+    if (!r.ok) { fresh.dispose(); return { failure: r, cached: false }; }
+    for (const [n, v] of remembered) fresh.setIfPresent(n, v);   // what the player set, still set
+    cache.set(key, fresh);
+    used.push(key);
+    evict();
+    return { program: fresh, cached: false };
+  }
+
   const floatOK = !!gl.getExtension("EXT_color_buffer_float");
   let W = 1, H = 1;
+  let misses = 0, hits = 0;          // programs actually compiled, and programs reused from the cache
   let lastChannels = [];             // what the four channels are now, for a pass compiled after they moved
 
   // ── textures, targets, and the two stand-ins ───────────────────────────────────────────────────
@@ -157,16 +224,22 @@ export function createRenderer(gl, { onProblem = () => {} } = {}) {
       const off = source.trim() === "";
       const existing = passes.get(name);
       if (off) {
-        if (existing) { existing.program.dispose(); passes.delete(name); }
+        if (existing) { release(existing.program); passes.delete(name); }
         if (isBuffer(name)) dropBuffer(name);
         continue;
       }
       const entry = existing ?? { program: createProgram(gl, { name }), channels: [] };
       passes.set(name, entry);
       entry.channels = channels;                  // the document's four, the same for every pass
-      const r = entry.program.compile({ source, common: doc.common ?? "" });
-      if (r.ok) compiled.push(name);
-      else failures.push({ pass: name, report: r.report, diagnostics: r.diagnostics ?? [], where: r.where });
+      const got = programFor(name, source, doc.common ?? "");
+      if (got.program) {
+        entry.program = got.program;
+        compiled.push(name);
+        if (got.cached) hits++; else misses++;
+      } else {
+        // it did not compile: `entry.program` is untouched, so this pass keeps drawing what it drew
+        failures.push({ pass: name, report: got.failure.report, diagnostics: got.failure.diagnostics ?? [], where: got.failure.where });
+      }
       if (isBuffer(name)) ensureBuffer(name);
     }
     for (const name of BUFFER_PASSES) if (!passes.has(name)) dropBuffer(name);
@@ -268,6 +341,7 @@ export function createRenderer(gl, { onProblem = () => {} } = {}) {
       if (r.ok) took++; else refused.push(`${pass}: ${r.error}`);
     }
     if (took) {
+      remembered.set(name, values.slice());      // for a program that is compiled later
       if (refused.length) say(`"${name}" was set, but not everywhere: ${refused.join("; ")}`);
       return { ok: true };
     }
@@ -300,6 +374,9 @@ export function createRenderer(gl, { onProblem = () => {} } = {}) {
     get live() { return [...passes].filter(([, e]) => !!e.program.program).map(([n]) => n); },
     /** What the four channels read -- the document's, so every pass answers the same. */
     channelsOf() { return lastChannels; },
+
+    /** How the cache is doing, for the probes: programs compiled, programs reused, programs held. */
+    get stats() { return { compiled: misses, reused: hits, held: cache.size, cap: CACHE_MAX }; },
     /** The size of the audio texture, so the editor can say what a shader is reading. */
     get audioSize() { return { w: AUDIO_W, h: AUDIO_H }; },
 
@@ -345,6 +422,10 @@ export function createRenderer(gl, { onProblem = () => {} } = {}) {
     hasImage: (name) => images.has(name),
 
     dispose() {
+      for (const p of cache.values()) p.dispose();
+      cache.clear();
+      used.length = 0;
+      remembered.clear();
       for (const [, e] of passes) e.program.dispose();
       passes.clear();
       for (const name of [...buffers.keys()]) dropBuffer(name);
