@@ -28,6 +28,10 @@ const SET_KEY = "sp-gfx-documents";         // the documents, and which one was 
 const ONE_KEY = "sp-gfx-document";          // the single document this replaced, still read once
 
 const TABS = [SHARED, ...PASS_ORDER];        // Common first, as Shadertoy has it, then the buffers, then Image
+// ...but the tab the pane OPENS on is Image, which is what is on the screen and what a player came to
+// edit. Opening on Common showed an empty editor over a picture that was running: the user's report.
+// (Shadertoy opens on Image too.)
+const FIRST_TAB = "Image";
 
 /**
  * Which document a `:document` order means. Pure, and here rather than in gfx.js, because "next" is
@@ -181,7 +185,7 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
   let loading = null;                // the import, so two opens are one import
   let set = null;                    // every document there is, and which one is on screen
   let doc = null;                    // the document being edited (the set's current one)
-  let tab = SHARED;                  // the tab on screen
+  let tab = FIRST_TAB;               // the tab on screen
   const pictures = new Map();        // name → the picture, THIS SESSION ONLY (never saved)
   let report = null;                 // the last compile's result
 
@@ -795,7 +799,7 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
       editor.setUniformNames(canvasNow()?.usable ?? []);
     }
     for (const p of PASS_ORDER) applyChannels(p);
-    show(TABS.includes(wanted) ? wanted : SHARED);
+    show(TABS.includes(wanted) ? wanted : FIRST_TAB);
     report = null;
     paintReport();
     // the set now says this is the document on screen, and holds it as the editor has it
@@ -807,7 +811,7 @@ export function createShaderPane({ compile, canvas, starter, log, onCompiled }) 
 
   /** Which tab is on screen, and where the caret goes if a line was named. */
   function show(name, line) {
-    if (!TABS.includes(name)) name = SHARED;
+    if (!TABS.includes(name)) name = FIRST_TAB;
     tab = name;
     paintTabs();
     paintChannels();
