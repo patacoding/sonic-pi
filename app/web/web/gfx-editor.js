@@ -29,6 +29,24 @@ const ONE_KEY = "sp-gfx-document";          // the single document this replaced
 
 const TABS = [SHARED, ...PASS_ORDER];        // Common first, as Shadertoy has it, then the buffers, then Image
 
+/**
+ * Which document a `:document` order means. Pure, and here rather than in gfx.js, because "next" is
+ * a fact about the set rather than about the layer that reads the line -- and because the wrapping is
+ * the part worth pinning: an order that silently does nothing mid-performance is worse than one that
+ * says it could not.
+ *
+ * @returns {{name: string} | {error: string}}
+ */
+export function resolveDocument(names, current, arg) {
+  if (!names?.length) return { error: "there are no documents to switch to" };
+  const wanted = String(arg ?? "").trim();
+  const here = Math.max(0, names.indexOf(current));
+  if (/^(next|\+)$/i.test(wanted)) return { name: names[(here + 1) % names.length] };
+  if (/^(prev|previous|-)$/i.test(wanted)) return { name: names[(here - 1 + names.length) % names.length] };
+  if (!names.includes(wanted)) return { error: `there is no document called "${wanted}" — there is ${names.map((n) => `"${n}"`).join(", ")}` };
+  return { name: wanted };
+}
+
 /** Tab labels: the pass names are the document's, but a tab has to fit. */
 const tabLabel = (name) => (name === SHARED ? "Common" : name === "Image" ? "Image" : name.replace("Buffer ", ""));
 
@@ -52,6 +70,7 @@ body[data-drawer="${PANE}"] #gfx-shader-pane { display: flex; }
 .gfx-ed-doc .x { color: var(--faintText, var(--mutedForeground)); padding: 0 1px; border-radius: 2px; }
 .gfx-ed-doc .x:hover { color: var(--accentContrastText); background: var(--ErrorBackground); }
 .gfx-ed-add { font-weight: 700; padding: 2px 6px; }
+.gfx-ed-docbtns { display: flex; gap: 4px; margin-bottom: 4px; }
 .gfx-ed-rename { width: 9em; background: var(--Background); color: var(--DefaultForeground, var(--Foreground)); border: 1px solid var(--HighlightedBackground); border-radius: var(--r-s, 3px); font: 500 var(--t-tiny, 12px) var(--code-font); padding: 1px 4px; }
 .gfx-ed-tabs { display: flex; gap: 2px; flex-shrink: 0; }
 .gfx-ed-tab { position: relative; padding: 3px 9px; border: none; border-radius: var(--r-s, 3px); background: var(--Tab); color: var(--TabText); font: 500 var(--t-tiny, 11px) var(--code-font); cursor: pointer; }
@@ -263,7 +282,86 @@ export function createShaderPane({ compile, canvas, starter, log }) {
   // and a channel is a binding rather than a line of GLSL, so it does not need a compile.
   const chanRefs = {};
   const chanEl = document.createElement("div");
-  side.append(chanEl, reportEl);        // the side of the pane: the cables, then what the compile said
+  // the side of the pane: the set in and out of a file, the cables, then what the compile said
+  side.append(docsSide(), chanEl, reportEl);
+
+  /** The side panel's documents section: the set in and out of a file. Built once -- it is the same
+   *  two controls whatever document is on screen, unlike the channels below it. */
+  function docsSide() {
+    const box = document.createElement("div");
+    box.appendChild(heading("Documents"));
+    const row = document.createElement("div");
+    row.className = "gfx-ed-docbtns";
+    const out = document.createElement("button");
+    out.className = "gfx-ed-btn";
+    out.textContent = "Export to a file";
+    out.title = "Every document, as one JSON file. The code and the channels: a picture a channel wants is named, not carried.";
+    out.addEventListener("click", () => exportSet());
+    const into = document.createElement("button");
+    into.className = "gfx-ed-btn";
+    into.textContent = "Import a file";
+    into.title = "Read a file this exported. Its documents are added, and the first of them is shown.";
+    into.addEventListener("click", () => importPicker());
+    row.append(out, into);
+    box.append(row, note("Saved in this browser as you work, and in a file when you ask. Code only: an uploaded picture is kept for the session and named, never saved."));
+    return box;
+  }
+
+  /** The set as a file's text. Separate from the download, so what is written can be read back. */
+  const exportText = () => (set ? serializeSet(set) : "");
+
+  function exportSet() {
+    const text = exportText();
+    if (!text) return { ok: false, error: "there is nothing to export" };
+    const name = (doc?.name ?? "shaders").replace(/[^\w.-]+/g, "-") || "shaders";
+    const file = `${name}.sonicpi-gfx.json`;
+    const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = file;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+    say(`exported ${set.documents.length} document${set.documents.length > 1 ? "s" : ""}`);
+    return { ok: true, name: file };
+  }
+
+  /** Read a file this exported. Its documents are ADDED rather than put in place of what is here: a
+   *  file is not worth losing what is on screen for, and a name that is taken is made unique. */
+  function importSet(text) {
+    const incoming = deserializeSet(text);
+    if (!incoming) return { ok: false, error: "that file is not a shader set this can read" };
+    save();                                  // what is on screen first: it is about to change
+    const added = [];
+    for (const d of incoming.documents) {
+      d.name = uniqueName(set.documents, d.name);
+      set.documents.push(d);
+      added.push(d.name);
+    }
+    loadDocument(set.documents.find((d) => d.name === added[0]), { compileIt: true });
+    say(`imported ${added.join(", ")}`);
+    log?.(`Graphics — imported ${added.join(", ")}`);
+    return { ok: true, added };
+  }
+
+  function importPicker() {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".json,application/json";
+    input.style.display = "none";
+    input.addEventListener("change", async () => {
+      const file = input.files?.[0];
+      input.remove();
+      if (!file) return;
+      try {
+        const result = importSet(await file.text());
+        if (!result.ok) say(result.error, true);
+      } catch (e) { say(`could not read that file: ${e.message}`, true); }
+    });
+    document.body.appendChild(input);
+    input.click();
+  }
 
   /** The buffers a pass may read: its own (the frame before) and any drawn before it this frame.
    *  A later buffer is not offered -- it would silently be last frame's, since it has not drawn yet. */
@@ -640,6 +738,9 @@ export function createShaderPane({ compile, canvas, starter, log }) {
     remove,
     rename,
     save,
+    exportText,
+    exportSet,
+    importSet,
     pictures,
   };
 }

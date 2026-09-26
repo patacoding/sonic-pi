@@ -52,6 +52,10 @@ const SIGILS = new Map([
   ["gfxv", true], [":gfxv", true],
 ]);
 
+// The names that are orders rather than uniforms: `puts :gfx, :document, "rings"`. Everything else
+// after the sigil is a value for a name the shader declared.
+export const COMMANDS = new Set(["document"]);
+
 const SPACE = /[\s,\[\]{}]/;
 
 /** A quoted run starting at `i` (just past the opening quote): [text, next]. */
@@ -175,6 +179,17 @@ export function parseDirective(text) {
   if (name == null || !name) return { ok: false, verbose, raw, error: `the name after ${sigil} is not a symbol or string` };
 
   const values = toks.slice(2);
+  // ── the words ─────────────────────────────────────────────────────────────
+  // A few names are not uniforms but orders: `:document` is which one is on screen, which is how the
+  // music changes the look without anyone touching the editor. They take a word where a uniform takes
+  // numbers, so they are read before the shapes below and never reach them.
+  if (COMMANDS.has(name)) {
+    if (values.length !== 1) return { ok: false, verbose, raw, error: `${name}: one word after it, as in :gfx, :document, "rings" (or :next)` };
+    const arg = word(values[0]);
+    if (arg == null) return { ok: false, verbose, raw, error: `${name}: ${describe(values[0])} is not a name — :gfx, :document, "rings"` };
+    return { ok: true, verbose, raw, name, command: name, arg, values: [arg], shape: "word" };
+  }
+
   const open = values.find((t) => t.kind === "open" || t.kind === "close");
   if (open) {
     // An array would arrive as `[a, b]`; it is how a player sends a list by

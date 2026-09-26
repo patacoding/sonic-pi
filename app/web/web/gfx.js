@@ -34,7 +34,7 @@ import { createCanvas } from "./gfx-canvas.js";
 import { createGrounds } from "./gfx-grounds.js";
 import { createSettings } from "./gfx-settings.js";
 import { createPanel } from "./gfx-ui.js";
-import { createShaderPane } from "./gfx-editor.js";
+import { createShaderPane, resolveDocument } from "./gfx-editor.js";
 import { emptyDocument } from "./gfx-document.js";
 
 const STYLE_ID = "gfx-style";
@@ -282,12 +282,27 @@ function install() {
     canvas.setIfPresent("uBands", bandValues);
   }
 
+  /** `puts :gfx, :document, "rings"` — which document is on screen, from the music. */
+  function documentDirective(arg) {
+    if (!pane) return problem("the editor is not up yet, so there is nothing to switch to");
+    const target = resolveDocument(pane.documents, pane.current, arg);
+    if (target.error) return problem(target.error);
+    if (target.name === pane.current) return;   // already there: saying so on every beat would flood the Log
+    if (!pane.switchTo(target.name)) problem(`could not switch to "${target.name}"`);
+  }
+
   /** One record, from the hook. Only `output` can carry a directive. */
   function record(r, appLog) {
     if (appLog) log = appLog;
     const d = parseDirective(r?.text);
     if (!d) return;                                            // the player's own output: theirs
     if (!d.ok) return problem(d.error);
+    // an order rather than a value for a name the shader declared
+    if (d.command === "document") {
+      documentDirective(d.arg);
+      if (d.verbose) log?.(`Graphics — document ${d.arg}`);
+      return;
+    }
     if (!canvas) return;                                       // the shader never compiled; the problem is already said
     const result = canvas.set(d.name, d.values);
     if (!result.ok) return problem(result.error);
