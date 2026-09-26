@@ -409,8 +409,9 @@ export function createShaderPane({ compile, canvas, starter, log }) {
         // channel may have been moved since, and rebuilding from a stale copy would undo it
         const now = chanRefs[tab] ?? refs;
         chanRefs[tab] = now.map((r, j) => (j === i ? next : r ?? { kind: "none" }));
-        applyChannels(tab, true);
+        const { gone } = applyChannels(tab, true);
         paintChannels();                 // the row's own preview follows what it now draws
+        if (gone.length) say(`${gone.join(", ")} left this session — nothing wants it now`);
       });
       // a file dropped on the row is chosen for the row, the same as the + is
       row.addEventListener("dragover", (e) => { e.preventDefault(); row.classList.add("over"); });
@@ -421,11 +422,10 @@ export function createShaderPane({ compile, canvas, starter, log }) {
         const f = e.dataTransfer?.files?.[0];
         if (f) upload(f, i);
       });
-      const pick = channelPicker(i);
-      row.append(label, previewOf(current), select, pick);
-      // a picture this row draws can be let go from here -- and only from here, so it is shown once:
-      // a second copy of it somewhere else was the "one big, one small" this had to lose
-      if (current.kind === "image" && pictures.has(current.name)) row.append(forgetButton(current.name));
+      row.append(label, previewOf(current), select, channelPicker(i));
+      // a × beside a dropdown clears it -- for a picture or a buffer, and for a picture it is shown
+      // here and nowhere else: a second copy of it elsewhere was the "one big, one small" this lost
+      if (current.kind !== "none") row.append(clearButton(i));
       chanEl.appendChild(row);
     }
     const missing = missingImages(collect(), new Set(pictures.keys()));
@@ -455,15 +455,36 @@ export function createShaderPane({ compile, canvas, starter, log }) {
     return cell;
   }
 
-  /** Let a picture go: out of this session's textures (it was never written anywhere to begin with). */
-  function forgetPicture(name) {
-    const held = pictures.get(name);
-    if (!held) return;
-    URL.revokeObjectURL(held.url);
-    pictures.delete(name);
-    canvasNow()?.removeImage?.(name);
-    paintChannels();
-    say(`forgot ${name} — the channel that wanted it draws a placeholder`);
+  /** Every picture anything still names: the document on screen live, the others as they are saved. */
+  function wantedEverywhere() {
+    const want = new Set();
+    for (const d of set?.documents ?? []) {
+      const channels = d.name === doc?.name ? chanRefs : d.channels;
+      for (const pass of PASS_ORDER) for (const r of channels?.[pass] ?? []) if (r?.kind === "image") want.add(r.name);
+    }
+    return want;
+  }
+
+  /**
+   * Let go of the pictures nothing names any more -- out of this session's textures, out of the
+   * dropdowns. A picture a channel still names stays: that channel is going to draw it. This is why
+   * clearing a channel RESETS its dropdown but does not take a picture away from the channels that
+   * still want it, and why a document loaded from storage that names a picture this session has not
+   * got still says "(not here)" rather than being quietly tidied away.
+   */
+  function prunePictures(repaint = true) {
+    const want = wantedEverywhere();
+    const gone = [];
+    for (const name of [...pictures.keys()]) {
+      if (want.has(name)) continue;
+      const held = pictures.get(name);
+      URL.revokeObjectURL(held.url);
+      pictures.delete(name);
+      canvasNow()?.removeImage?.(name);
+      gone.push(name);
+    }
+    if (gone.length && repaint) paintChannels();
+    return gone;
   }
 
   /**
@@ -487,14 +508,27 @@ export function createShaderPane({ compile, canvas, starter, log }) {
     return button;
   }
 
-  /** Let this session's copy of a picture go. The channels that name it keep naming it, and draw a
-   *  placeholder -- which is the shape of the rule that pictures are never saved. */
-  function forgetButton(name) {
+  /**
+   * A channel's ×: this channel stops drawing what it draws. It RESETS THE DROPDOWN, because that is
+   * what a × beside a dropdown means -- and it is what the pane got wrong first: the × threw the
+   * picture out of the session while the dropdown went on naming it, so the dropdown looked stuck on
+   * a picture that no longer existed. The picture itself is let go of by `prunePictures`, when nothing
+   * names it any more.
+   */
+  function clearButton(i) {
     const x = document.createElement("button");
     x.className = "gfx-ed-btn gfx-ed-forget";
     x.textContent = "×";
-    x.title = `Forget "${name}" (it was never saved). Any channel that wants it draws a placeholder until it is chosen again.`;
-    x.addEventListener("click", () => forgetPicture(name));
+    x.title = `iChannel${i}: draw nothing. A picture stays in this session while something else still wants it.`;
+    x.addEventListener("click", () => {
+      const refs = chanRefs[tab] ?? [];
+      chanRefs[tab] = refs.map((r, j) => (j === i ? { kind: "none" } : r ?? { kind: "none" }));
+      const { gone } = applyChannels(tab, true);      // saves, and lets go of any picture nothing names
+      paintChannels();
+      say(gone.length
+        ? `${tab} iChannel${i} draws nothing now — ${gone.join(", ")} left this session (never saved)`
+        : `${tab} iChannel${i} draws nothing now`);
+    });
     return x;
   }
 
@@ -539,9 +573,14 @@ export function createShaderPane({ compile, canvas, starter, log }) {
    */
   function applyChannels(pass, notify = false) {
     const refs = chanRefs[pass];
-    if (!refs) return;
+    if (!refs) return { gone: [] };
     canvasNow()?.setChannels(pass, refs);
-    if (notify) save();          // a cable moved, so the document in storage has moved with it
+    if (!notify) return { gone: [] };
+    save();                      // a cable moved, so the document in storage has moved with it
+    // ...and it may have left a picture that nothing names any more: that is when one is let go of.
+    // What that was is RETURNED rather than said, so the caller can say it along with its own news --
+    // two `say`s in a row leave only the second, which is how this lost the more useful of the two.
+    return { gone: prunePictures(false) };
   }
 
   // ── the tabs ────────────────────────────────────────────────────────────────────────────────────
