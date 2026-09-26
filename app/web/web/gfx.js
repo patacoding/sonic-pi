@@ -36,6 +36,7 @@ import { createSettings } from "./gfx-settings.js";
 import { createPanel } from "./gfx-ui.js";
 import { createShaderPane, resolveDocument } from "./gfx-editor.js";
 import { emptyDocument } from "./gfx-document.js";
+import { testCardDocument, TEST_CARD } from "./gfx-testcard.js";
 
 const STYLE_ID = "gfx-style";
 const ALPHA_KEY = "sp-gfx-ui-alpha";
@@ -179,6 +180,17 @@ function install() {
         {
           kind: "list", label: "Uniforms the shader really has (from the link, not its source):",
           items: canvas ? [...canvas.userUniforms, ...canvas.renderer.builtins.map((b) => `${b} (frame)`)] : ["— the shader has not linked yet"],
+        },
+        {
+          kind: "button", label: "Test card: audio + a picture",
+          title: "A new document that draws the spectrum, the waveform and a picture, so all three can be seen working. iChannel0 and iChannel1 are wired to the audio for you; choose a picture on iChannel2 and its swatch turns green.",
+          onClick: () => {
+            const doc = testCardDocument();
+            const name = pane?.addDocument(TEST_CARD, doc.name);
+            pane?.setChannels(doc.channels);
+            ui.close();
+            log?.(`Graphics — the test card is up as "${name}": iChannel0 the spectrum, iChannel1 the waveform, iChannel2 a picture (choose one and its swatch turns green)`);
+          },
         },
         {
           kind: "button", label: "Reset to the default shader",

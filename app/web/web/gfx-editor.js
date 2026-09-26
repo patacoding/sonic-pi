@@ -670,9 +670,9 @@ export function createShaderPane({ compile, canvas, starter, log }) {
     return true;
   }
 
-  function addDocument() {
-    const name = uniqueName(set.documents, "Untitled");
-    const next = emptyDocument(name, starter ? starter() : "");
+  function addDocument(source = null, want = "Untitled") {
+    const name = uniqueName(set.documents, want);
+    const next = emptyDocument(name, source ?? (starter ? starter() : ""));
     set.documents.push(next);
     loadDocument(next, { compileIt: true });
     say(`new document: ${name}`);
@@ -873,6 +873,12 @@ export function createShaderPane({ compile, canvas, starter, log }) {
     remove,
     rename,
     save,
+    /** Wire the four inputs by hand: the test card needs two of them to be the audio. */
+    setChannels(refs) {
+      chanRefs = Array.from({ length: CHANNELS }, (_, i) => refs?.[i] ?? { kind: "none" });
+      applyChannels(true);
+      paintChannels();
+    },
     exportText,
     exportSet,
     importSet,
