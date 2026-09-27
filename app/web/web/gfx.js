@@ -236,7 +236,7 @@ function install() {
   }
 
   function hudOn(v) {
-    if (v == null) return settings.bool(HUD_KEY, false) === true;
+    if (v == null) return settings.bool(HUD_KEY, true) === true;      // ON unless the player turned it off
     settings.set(HUD_KEY, v === true);
     if (v && !hudEl) {
       hudEl = document.createElement("div");
@@ -405,7 +405,9 @@ function install() {
     if (!shader.fromFile) problem(`${shader.why}, so the placeholder shader is running — it declares no uniform and answers no directive`);
     // the documents the editor holds, or a first one from the .frag: which one it lands on is the
     // one that was on screen when the page was left
-    outputChannel();                                  // listen from the start: an output tab may already be
+    hudOn(hudOn());                                   // the readout is ON by default: show it now (the panel
+                                                    // section reads the same setting, so the switch agrees)
+  outputChannel();                                  // listen from the start: an output tab may already be
                                                       // open (a reload, a restored session) and says hello
     const doc = pane.load(() => emptyDocument("Default", shader.source));
     log?.(`Graphics — the document "${doc.name}" (${pane.documents.join(", ")}). Pictures are not saved: a channel that wants one draws a placeholder until it is uploaded again.`);
