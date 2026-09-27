@@ -285,25 +285,24 @@ function install() {
   /**
    * Picture only: hide the app's interface and leave the shader.
    *
-   * F9 toggles it (a pair with F8, which compiles: both are document-level and neither depends on where
-   * the caret is). Going in also asks the browser for fullscreen on OUR canvas -- a keypress is a user
-   * gesture, so this usually works; if it does not, the class alone still fills the window with the
-   * picture. Escape comes back out (the browser's own Escape leaves fullscreen first).
+   * It is EXACTLY one class on <html>, and nothing else: it does not go fullscreen, it does not exit
+   * fullscreen, it does not touch the browser's own state in any way. The picture is already the whole
+   * window (#gfx-canvas is `position: fixed; inset: 0`); the interface is what is on top of it, so
+   * hiding the interface IS the feature. The first version also asked for fullscreen on the way in,
+   * which was wrong twice over: the player said the two have nothing to do with each other, and the
+   * browser consumes Escape to leave fullscreen -- so Escape never reached this handler, the class
+   * stayed on, and the interface did not come back. One thing, one switch.
    *
-   * The readout survives it: it lives in the status bar, and when that is hidden the fallback puts it in
-   * the corner (see placeHud), which is exactly what a projector wants to be able to check.
+   * F9 toggles it (a pair with F8, which compiles: both are document-level and neither depends on where
+   * the caret is). Escape also comes back. The readout survives it: it lives in the status bar, and when
+   * that is hidden the fallback puts it in the corner (see placeHud).
    */
   const PICTURE_KEY = "sp-gfx-picture-only";
   const pictureOnly = (v) => {
     const on = v == null ? settings.bool(PICTURE_KEY, false) === true : v === true;
     if (v != null) settings.set(PICTURE_KEY, on);
     document.documentElement.classList.toggle("gfx-picture-only", on);
-    if (on) {
-      canvas?.canvas?.requestFullscreen?.().catch(() => {});     // best effort: needs a gesture
-      toast("Picture only — F9 or Esc brings the interface back");
-    } else if (document.fullscreenElement === canvas?.canvas) {
-      document.exitFullscreen?.().catch(() => {});
-    }
+    if (on) toast("Picture only — F9 or Esc brings the interface back");
     placeHud();                                                  // the status bar may have just gone away
     return on;
   };
