@@ -76,13 +76,14 @@ html { background: #05070d; }
 /* The shortcut's own readout: a key press that changes something the player cannot see the value of
    has to say what it changed, and the panel's slider is usually shut. A small pill at the foot of the
    window, and it goes away by itself -- nothing to dismiss mid-performance. */
-/* The renderer readout (Ctrl+Alt+G, or the panel switch): TOP-LEFT, because that is the one corner of
-   the window nothing else claims -- the top bar is a strip above it, the drawer/status bar/toast are at
-   the foot, and the rail is on the right. It has to be readable WHILE the shader runs, so it is not in
-   the panel (which is shut during a performance) and not in the editor pane (same). Monospace, the
-   app's own foreground colour, a faint ground of its own, and it never takes a pointer event. */
+/* The renderer readout (Ctrl+Alt+G, or the panel switch): TOP-LEFT, just under the app's own top bar.
+   Where exactly was measured, not guessed: at top:10px the bar (0-38px tall) covered it completely --
+   document.elementFromPoint() at the readout's own position returned sn-brand, so the readout WAS there
+   and invisible, which is exactly how it was reported ("I cannot see fps in the UI"). It has to be
+   readable WHILE the shader runs, so it is not in the panel (shut during a performance) and not in the
+   editor pane (same). Monospace, the app's own foreground, a faint ground, and never a pointer target. */
 #gfx-hud {
-  position: fixed; left: 10px; top: 10px; z-index: 6;
+  position: fixed; left: 10px; top: 102px; z-index: 40;  /* placed at runtime: below the toolbar, clear of the rail */
   font: 11px/1.45 var(--code-font, ui-monospace, monospace);
   color: var(--DefaultForeground, #ddd);
   background: color-mix(in srgb, var(--Background, #101010) 55%, transparent);
@@ -177,7 +178,7 @@ function install() {
   const HUD_KEY = "sp-gfx-hud";
   let hudEl = null, hudTimer = 0;
 
-  const mb = (n) => `${(n / 1048576).toFixed(n < 10485760 ? 1 : 0)} MB`;
+  const mb = (n) => (n < 1048576 ? `${Math.max(1, Math.round(n / 1024))} kB` : `${(n / 1048576).toFixed(n < 10485760 ? 1 : 0)} MB`);
 
   function hudText() {
     const p = canvas?.perf?.();
@@ -191,6 +192,28 @@ function install() {
   function paintHud() {
     if (!hudEl) return;
     hudEl.textContent = hudText();
+  }
+
+  /**
+   * Put the readout somewhere it can actually be seen -- measured, because the first version was not.
+   *
+   * It was `top: 10px; z-index: 6`, which is *inside the app's own toolbar* (the layout is: site-nav
+   * 0-38px, toolbar 38-94px full width, the editor below that) and *below it* in the stacking order, so
+   * the readout was there and invisible: "I cannot see fps in the UI". `elementFromPoint()` is no help
+   * for checking this (the readout is `pointer-events: none`, so it never wins a hit test) -- the check
+   * that works is a screenshot of its own corner with it on and off.
+   *
+   * So: below the toolbar (not over its buttons), clear of the rail whichever side it is on, and at the
+   * toast's z-index, which is measured to sit above the app's chrome.
+   */
+  function placeHud() {
+    if (!hudEl) return;
+    const box = (id) => document.getElementById(id)?.getBoundingClientRect();
+    const nav = box("site-nav"), bar = box("toolbar"), rail = box("drawer-rail");
+    const top = Math.max(nav?.bottom ?? 0, bar?.bottom ?? 0) + 8;
+    const railLeft = rail && rail.width > 0 && rail.left < window.innerWidth / 2;
+    hudEl.style.top = `${Math.round(Math.max(8, top))}px`;
+    hudEl.style.left = `${railLeft ? Math.round(rail.right) + 8 : 10}px`;
   }
 
   /** The numbers with their names, in the Log -- the panel has a button for it. */
@@ -223,9 +246,11 @@ function install() {
     }
     if (hudEl) hudEl.classList.toggle("on", v === true);
     if (v) {
+      placeHud();
       paintHud();
       clearInterval(hudTimer);
-      hudTimer = setInterval(paintHud, 250);         // four times a second: readable, and free
+      hudTimer = setInterval(() => { placeHud(); paintHud(); }, 250);   // four times a second: readable, free,
+                                                                       // and it keeps up with a folding bar
     } else {
       clearInterval(hudTimer);
       hudTimer = 0;
@@ -235,6 +260,7 @@ function install() {
 
   // the key: Ctrl+Alt+G. Measured against the app's own catalogue, Ctrl+Alt is free apart from i/n/p,
   // and a letter with AltGr would type a character on some layouts -- G is not one of those three.
+  window.addEventListener("resize", placeHud);
   document.addEventListener("keydown", (e) => {
     if (!e.ctrlKey || !e.altKey || e.metaKey || e.shiftKey) return;
     if (String(e.key).toLowerCase() !== "g") return;
