@@ -76,6 +76,25 @@ html { background: #05070d; }
 /* The shortcut's own readout: a key press that changes something the player cannot see the value of
    has to say what it changed, and the panel's slider is usually shut. A small pill at the foot of the
    window, and it goes away by itself -- nothing to dismiss mid-performance. */
+/* The renderer readout (Ctrl+Alt+G, or the panel switch): TOP-LEFT, because that is the one corner of
+   the window nothing else claims -- the top bar is a strip above it, the drawer/status bar/toast are at
+   the foot, and the rail is on the right. It has to be readable WHILE the shader runs, so it is not in
+   the panel (which is shut during a performance) and not in the editor pane (same). Monospace, the
+   app's own foreground colour, a faint ground of its own, and it never takes a pointer event. */
+#gfx-hud {
+  position: fixed; left: 10px; top: 10px; z-index: 6;
+  font: 11px/1.45 var(--code-font, ui-monospace, monospace);
+  color: var(--DefaultForeground, #ddd);
+  background: color-mix(in srgb, var(--Background, #101010) 55%, transparent);
+  border: 1px solid color-mix(in srgb, var(--WindowBorder, #444) 60%, transparent);
+  border-radius: var(--r-s, 4px);
+  padding: 3px 7px;
+  pointer-events: none;              /* it sits over the picture: never in the way of a click */
+  white-space: nowrap;
+  opacity: 0; transition: opacity .15s ease;
+}
+#gfx-hud.on { opacity: .92; }
+
 #gfx-toast {
   position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%) translateY(6px);
   z-index: 40; pointer-events: none; opacity: 0; transition: opacity 120ms ease, transform 120ms ease;
@@ -141,6 +160,90 @@ function install() {
 
   const problem = (text) => (log ? log(`Graphics — ${text}`) : console.warn(`Graphics — ${text}`));
 
+  // ── the numbers: fps, frame time, GPU time, memory ────────────────────────────────────────────────
+  //
+  // WHERE, and why there: a small readout in the TOP-LEFT corner of the picture, over the canvas.
+  //   * it has to be visible while the shader is running (that is when the numbers mean anything), so it
+  //     cannot live in the panel or the editor pane, both of which are shut during a performance;
+  //   * the bottom of the window is the app's own: the status bar, the toast pill and the drawer all
+  //     live there, and the rail is on the right -- the top-left corner is the one place nothing else
+  //     claims (the top bar is a strip above it, and nothing is drawn under it);
+  //   * it is OFF until asked for (Ctrl+Alt+G, or the panel switch), because a readout is a tool, not
+  //     part of the picture -- and the output tab has the same readout on its own key, for looking at
+  //     what the projector's machine can do.
+  //
+  // What it shows, in one line: fps, frame ms (and the worst of the window), GPU ms when the browser
+  // will give it, how many passes are drawing, what we have allocated in textures, and the resolution.
+  const HUD_KEY = "sp-gfx-hud";
+  let hudEl = null, hudTimer = 0;
+
+  const mb = (n) => `${(n / 1048576).toFixed(n < 10485760 ? 1 : 0)} MB`;
+
+  function hudText() {
+    const p = canvas?.perf?.();
+    if (!p) return "the shader canvas is not running";
+    const gpu = p.gpuMs == null ? "gpu —" : `gpu ${p.gpuMs.toFixed(1)} ms`;
+    return `${p.fps.toFixed(0)} fps · ${p.ms.toFixed(1)} ms (worst ${p.worstMs.toFixed(0)}) · ${gpu} · `
+      + `${p.passes.length} pass${p.passes.length === 1 ? "" : "es"} · tex ${mb(p.memory?.total ?? 0)} · `
+      + `${p.size.w}x${p.size.h} @${p.dpr.toFixed(2)}`;
+  }
+
+  function paintHud() {
+    if (!hudEl) return;
+    hudEl.textContent = hudText();
+  }
+
+  /** The numbers with their names, in the Log -- the panel has a button for it. */
+  function sayReport() {
+    const p = canvas?.perf?.();
+    if (!p) { log?.("Graphics — the shader canvas is not running, so there is nothing to report."); return; }
+    const m = p.memory ?? {};
+    const lines = [
+      `fps ${p.fps.toFixed(1)} over the last ${p.samples} frames (frame ${p.ms.toFixed(2)} ms, worst ${p.worstMs.toFixed(1)} ms)`,
+      p.gpuMs == null
+        ? "GPU time: not available in this browser (EXT_disjoint_timer_query_webgl2 is missing; a software renderer or a driver that will not say)"
+        : `GPU time: ${p.gpuMs.toFixed(2)} ms per frame`,
+      `resolution ${p.size.w}x${p.size.h} (device pixel ratio ${p.dpr.toFixed(2)}), ${p.passes.length} pass(es) drawing: ${p.passes.join(", ") || "none"}`,
+      `textures this layer allocated: ${mb(m.total ?? 0)} in all — render targets ${mb(m.targets ?? 0)} (${m.precision ?? "?"}), pictures ${mb(m.images ?? 0)}, audio ${mb(m.audio ?? 0)}`,
+      `programs: ${p.programs.compiled} compiled, ${p.programs.reused} reused, ${p.programs.held}/${p.programs.cap} held`,
+      m.renderer ? `GPU: ${m.renderer}${m.vendor ? ` (${m.vendor})` : ""}, max texture ${m.maxTexture}, float+linear ${m.floatLinear ? "yes" : "no"}` : "GPU: the browser hides the renderer string",
+      "note: a browser cannot report the driver's memory, so the texture figure is what THIS layer allocated, not what the GPU holds.",
+    ];
+    log?.(`Graphics — renderer report\n${lines.join("\n")}`);
+  }
+
+  function hudOn(v) {
+    if (v == null) return settings.bool(HUD_KEY, false) === true;
+    settings.set(HUD_KEY, v === true);
+    if (v && !hudEl) {
+      hudEl = document.createElement("div");
+      hudEl.id = "gfx-hud";
+      hudEl.setAttribute("aria-hidden", "true");     // a readout is not something to be read out
+      document.body.appendChild(hudEl);
+    }
+    if (hudEl) hudEl.classList.toggle("on", v === true);
+    if (v) {
+      paintHud();
+      clearInterval(hudTimer);
+      hudTimer = setInterval(paintHud, 250);         // four times a second: readable, and free
+    } else {
+      clearInterval(hudTimer);
+      hudTimer = 0;
+    }
+    return v === true;
+  }
+
+  // the key: Ctrl+Alt+G. Measured against the app's own catalogue, Ctrl+Alt is free apart from i/n/p,
+  // and a letter with AltGr would type a character on some layouts -- G is not one of those three.
+  document.addEventListener("keydown", (e) => {
+    if (!e.ctrlKey || !e.altKey || e.metaKey || e.shiftKey) return;
+    if (String(e.key).toLowerCase() !== "g") return;
+    e.preventDefault();
+    hudOn(!hudOn());
+    toast(`renderer readout ${hudOn() ? "on" : "off"}`);
+  }, true);
+
+
   // ── the document ───────────────────────────────────────────────────────────────────────────────
   // What runs is one of the documents the editor holds (gfx-document.js, gfx-editor.js), and the
   // editor is where they are saved. Only code is ever saved: a picture a channel asks for is named,
@@ -182,6 +285,21 @@ function install() {
       id: "shader",
       title: "Shader",
       items: [
+        {
+          kind: "switch", label: "Renderer readout", value: hudOn(),
+          title: "A one-line readout in the top-left corner of the picture: fps, frame time (and the worst of the window), GPU time when the browser will give it, passes drawing, the textures this layer allocated, and the resolution. Ctrl+Alt+G toggles it.",
+          onChange: (on) => hudOn(on),
+        },
+        {
+          kind: "button", label: "Say the renderer's numbers in the Log",
+          title: "The same readout with every number named, plus the GPU's own name and the program cache: for working out where the milliseconds go.",
+          onClick: () => sayReport(),
+        },
+        {
+          kind: "button", label: "Output window (just the picture)",
+          title: "A new tab that draws the same shader with nothing else on it, for a second screen or a projector. Everything is still controlled from this tab; close that tab to stop feeding it.",
+          onClick: () => window.sonicPiGfx?.openOutput(),
+        },
         {
           kind: "button", label: "Open the shader editor",
           title: "The tabs, the code and the channels, in the panel at the foot of the window (the picture frame in the rail)",
@@ -248,12 +366,21 @@ function install() {
     log: (text) => log?.(text),
   });
 
+  // every compile -- the button, F8, the music's `:document`, a script's setSource -- ends up in the
+  // pane's compileNow, so wrapping the pane's own function is the one place that catches all of them and
+  // tells the output tab that the running document changed. (It must be here, after the pane exists:
+  // wrapping it earlier threw on a null pane and took the whole layer down with it.)
+  const paneCompile = pane.compile;
+  pane.compile = (...args) => { const result = paneCompile(...args); republishSoon(); return result; };
+
   (async () => {
     const shader = await loadShader();
     shaderSource = shader.source;
     if (!shader.fromFile) problem(`${shader.why}, so the placeholder shader is running — it declares no uniform and answers no directive`);
     // the documents the editor holds, or a first one from the .frag: which one it lands on is the
     // one that was on screen when the page was left
+    outputChannel();                                  // listen from the start: an output tab may already be
+                                                      // open (a reload, a restored session) and says hello
     const doc = pane.load(() => emptyDocument("Default", shader.source));
     log?.(`Graphics — the document "${doc.name}" (${pane.documents.join(", ")}). Pictures are not saved: a channel that wants one draws a placeholder until it is uploaded again.`);
     canvas = createCanvas({ document: doc, onProblem: problem });
@@ -523,6 +650,83 @@ function install() {
     return true;
   }
 
+  // ── the output tab: the picture, in a window of its own ────────────────────────────────────────────
+  // A projector wants the picture and nothing else, in a window that can go fullscreen on the second
+  // screen -- while this tab keeps the editor, the Log and the audio. Two tabs cannot share a GL context,
+  // so the output tab draws its own copy of the SAME document with the same renderer (gfx-canvas.js +
+  // gfx-renderer.js, no shader code duplicated), and this tab feeds it the three things that make the
+  // picture what it is:
+  //
+  //   doc      the code and the channels, whenever they change (and on the output tab's hello)
+  //   frame    the audio texture, the music's own uniforms (uLevel/uBands), the pointer and the clock
+  //   images   the pictures the document names, as data URLs -- the output tab has none of its own
+  //
+  // Why BroadcastChannel: same origin, no server, no socket, works in every modern browser, and one line
+  // to send. The cost is one extra compile per document in the other tab, which is what makes the two
+  // pictures identical rather than merely similar.
+  const OUT_CHANNEL = "sonic-pi-gfx-output";
+  let outChannel = null, outOpen = false;
+
+  function outputChannel() {
+    if (!outChannel && typeof BroadcastChannel === "function") {
+      outChannel = new BroadcastChannel(OUT_CHANNEL);
+      outChannel.addEventListener("message", (e) => {
+        const m = e.data;
+        if (!m || typeof m !== "object") return;
+        if (m.t === "hello") { outOpen = true; publishDocument(); publishFrame(true); }
+        if (m.t === "bye") outOpen = false;
+      });
+      window.addEventListener("pagehide", () => outChannel?.close());
+    }
+    return outChannel;
+  }
+
+  /** The document, as the output tab needs it: the code, the channels, and the pictures it names. */
+  function publishDocument() {
+    const channel = outputChannel();
+    if (!channel || !outOpen || !pane) return;
+    const held = pane.document();
+    if (!held) return;
+    const images = {};
+    for (const [name, picture] of pane.pictures) {
+      if (picture?.url?.startsWith("data:")) images[name] = picture.url;
+    }
+    channel.postMessage({ t: "doc", doc: { name: held.name, common: held.common, passes: held.passes, channels: held.channels }, images });
+  }
+
+  let publishedAt = 0;
+  function publishFrame(force = false) {
+    const channel = outChannel;
+    if (!channel || !outOpen || !taps) return;
+    const now = performance.now();
+    if (!force && now - publishedAt < 14) return;       // ~70 Hz at most: the output interpolates nothing
+    publishedAt = now;
+    const held = canvas?.audio;
+    const clock = canvas?.clock ?? { time: 0, frame: 0 };
+    const pointer = canvas?.pointer ?? { xyzw: [0, 0, 0, 0], down: false };
+    const rms = Math.max(0, Math.min(1, level.rms * 6));
+    channel.postMessage({
+      t: "frame",
+      fft: held ? held.fft.slice() : null,              // a copy: the array is filled in place each frame
+      wave: held ? held.wave.slice() : null,
+      // the music's own values, as this tab computed them (the output tab has no analyser of its own)
+      uniforms: { uLevel: [rms], uBands: [...bandValues] },
+      clock: { time: clock.time, frame: clock.frame },
+      mouse: { xyzw: pointer.xyzw, down: pointer.down },
+      down: pointer.down,
+      sampleRate: taps?.ctx?.sampleRate ?? 48000,
+    });
+  }
+
+  /** The running document changed (compile, switch, setSource, test card): tell the output tab. */
+  function republishSoon() {
+    if (!outOpen) return;
+    publishDocument();
+    // the pictures may still be decoding in the main tab when the document lands, so send it twice:
+    // once now, once when the images have had a moment
+    setTimeout(publishDocument, 250);
+  }
+
   function feed() {
     if (!taps) return;
     analyser.getFloatTimeDomainData(taps.time);
@@ -553,6 +757,8 @@ function install() {
     const samples = Math.min(held.wave.length, taps.time.length);
     const from = taps.time.length - samples;                               // the newest samples
     for (let x = 0; x < samples; x++) held.wave[x] = Math.max(0, Math.min(1, (taps.time[from + x] + 1) / 2));
+
+    publishFrame();                                                        // and out to the output tab
   }
 
   /** `puts :gfx, :document, "rings"` — which document is on screen, from the music. */
@@ -614,6 +820,32 @@ function install() {
      * drew" from "that pass is off".
      */
     capture: (opts) => (canvas ? canvas.capture(opts) : Promise.reject(new Error("the shader canvas is not running"))),
+    /**
+     * Open the output tab: the picture, on its own, in a window that can go fullscreen on a second screen.
+     *
+     *     const tab = sonicPiGfx.openOutput();     // a Window, or null if the popup was blocked
+     *
+     * The app keeps the editor, the Log and the audio; that tab draws the same document (same renderer,
+     * its own GL context) and is fed the audio, the music's uniforms, the pointer and this tab's clock.
+     * Close it and the main tab stops broadcasting.
+     */
+    openOutput() {
+      const url = new URL("gfx-out.html", location.href).href;
+      const tab = window.open(url, "sonic-pi-gfx-output", "width=960,height=540");
+      outputChannel();                                  // start listening for its hello
+      outOpen = true;
+      log?.(`Graphics — the output tab is open (${url}). Close it and this tab stops feeding it.`);
+      return tab;
+    },
+    get outputOpen() { return outOpen; },
+    /** The frame's own clock (what `iTime`/`iFrame` are): the output tab follows this one. */
+    get clock() { return canvas?.clock ?? null; },
+    /** What the frame costs: fps, frame ms (window), GPU ms if the browser will say, memory we allocated. */
+    perf: () => canvas?.perf?.() ?? null,
+    /** The readout in the corner: `hud()` reads it, `hud(true|false)` sets it. `Ctrl+Alt+G` toggles it. */
+    hud: (v) => hudOn(v),
+    /** The long version, into the Log: every number with its name, for when one line is not enough. */
+    report() { sayReport(); return true; },
     reload: () => location.reload(),
     alpha(v) { if (v == null) return alpha(); settings.set(ALPHA_KEY, v); applyAlpha(v); ui.rebuild(); return v; },
     canvasOn(v) {
@@ -630,5 +862,15 @@ function install() {
 
 // `app.js` is what sets window.sonicPi, and it is a module: this one runs after it. The engine
 // itself is null until the first Run, so the canvas goes in now and the audio is attached later.
-if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", install);
-else install();
+function installSafely() {
+  try {
+    install();
+  } catch (e) {
+    // nothing here can fix it, but silence cannot be debugged: a throw in install() used to mean the
+    // whole layer was simply absent, and the page went on to behave like an app without graphics
+    console.error("Graphics — the layer could not install, so there is no shader canvas, no editor pane and no directives:", e);
+  }
+}
+
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", installSafely);
+else installSafely();

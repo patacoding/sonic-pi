@@ -71,12 +71,24 @@ export function createCanvas({ document: doc = null, imageSource = "", onProblem
     state.date[3] = now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
   }
 
+  // ── what it costs ─────────────────────────────────────────────────────────────────────────────────
+  // A window of the last ~120 frames rather than the last one: an instantaneous fps is noise, and what
+  // a shader author needs to see is "60 fps steady" versus "58 with a 40 ms spike every second".
+  const times = [];
+  let gpuMs = null;
+  function noteFrame(ms) {
+    times.push(ms);
+    if (times.length > 120) times.shift();
+  }
+
   function frame(now) {
     if (disposed) return;
     raf = requestAnimationFrame(frame);
     const seconds = now / 1000;
     state.delta = last ? seconds - last : 0;
     last = seconds;
+    noteFrame(state.delta * 1000);
+    if (renderer.gpuFrameMs) gpuMs = renderer.gpuFrameMs() ?? gpuMs;      // null where the browser will not say
     state.time += state.delta;
     state.frame++;
     resize();
@@ -171,6 +183,51 @@ export function createCanvas({ document: doc = null, imageSource = "", onProblem
     addImage: (name, source) => renderer.addImage(name, source),
     removeImage: (name) => renderer.removeImage(name),
     get images() { return renderer.images; },
+    /**
+     * Drive this canvas's clock from outside: `setClock(seconds, frame)`.
+     *
+     * Who needs it: the OUTPUT tab (gfx-out.js). It draws the same document on its own context, and its
+     * own rAF clock starts when that tab was opened -- so `iTime`/`iFrame` would differ from the tab the
+     * player is looking at by however long the tab has been open. Handing it the main tab's clock makes
+     * the two pictures the same picture, not just two runs of the same code.
+     */
+    setClock(seconds, frame) {
+      if (Number.isFinite(seconds)) state.time = seconds;
+      if (Number.isFinite(frame)) state.frame = frame;
+      last = null;                                   // and do not add this frame's delta to it
+    },
+    /**
+     * What the frame costs, and what it holds. The honest version of "fps / VRAM":
+     *
+     *   fps, ms, worstMs   the last ~120 frames (a window, not the last frame: spikes matter)
+     *   gpuMs              the GPU's own time per frame, or null when the browser will not tell us
+     *                      (EXT_disjoint_timer_query_webgl2 is absent on software renderers and some
+     *                      drivers -- see gfx-renderer.js `gpuFrameMs()`)
+     *   memory             what THIS renderer allocated (render targets, pictures, audio texture) --
+     *                      a browser cannot see the driver's memory, so this is the only number that
+     *                      can be checked rather than believed
+     */
+    perf() {
+      const recent = times.slice(-60);
+      const ms = recent.length ? recent.reduce((a, b) => a + b, 0) / recent.length : 0;
+      return {
+        fps: ms > 0 ? 1000 / ms : 0,
+        ms,
+        worstMs: times.length ? Math.max(...times) : 0,
+        samples: times.length,
+        gpuMs,
+        memory: renderer.memory ? renderer.memory() : null,
+        programs: renderer.stats,
+        passes: renderer.live,
+        size: { w: canvas.width, h: canvas.height },
+        dpr: window.devicePixelRatio || 1,
+        frame: state.frame,
+        time: state.time,
+      };
+    },
+    /** The frame's own clock and pointer -- what a second context needs to draw the SAME frame. */
+    get clock() { return { time: state.time, frame: state.frame }; },
+    get pointer() { return { xyzw: [...state.mouse], down: state.down }; },
     /** The next drawn frame as a PNG data URL -- see the note above `grab()`. */
     capture,
     onFeed: (fn) => { feed = fn; },

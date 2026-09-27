@@ -103,10 +103,21 @@ export function createRenderer(gl, { onProblem = () => {} } = {}) {
 
   const floatOK = !!gl.getExtension("EXT_color_buffer_float");
   let W = 1, H = 1;
+  const timer = gl.getExtension("EXT_disjoint_timer_query_webgl2") ?? null;    // GPU time, when offered
+  let pending = null, pendingFrame = null, lastGpu = null;
   let misses = 0, hits = 0;          // programs actually compiled, and programs reused from the cache
   let lastChannels = [];             // what the four channels are now, for a pass compiled after they moved
 
   // ── textures, targets, and the two stand-ins ───────────────────────────────────────────────────
+  //
+  // What we allocate, we count. The browser does NOT expose GPU memory (there is no WebGL query for it
+  // and `performance.memory` is the JS heap), so a "VRAM" number can only be honest if it is OUR
+  // bookkeeping: the render targets the passes ping-pong in, the pictures that were uploaded, and the
+  // audio texture. That is what `memory()` reports -- and it says so, rather than pretending to know
+  // what the driver holds.
+  let bytes = { targets: 0, images: 0, audio: 0 };
+  const bytesOf = (w, h, float) => w * h * (float && floatOK ? 8 : 4);   // RGBA16F is 8 B/px, RGBA8 4
+
   function texture(w, h, { float = false, filter = gl.NEAREST, wrap = gl.CLAMP_TO_EDGE, pixels = null }) {
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -116,11 +127,14 @@ export function createRenderer(gl, { onProblem = () => {} } = {}) {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap);
     if (float && floatOK) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, pixels);
     else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    const held = bytesOf(w, h, float);
+    tex.__bytes = held;
     return tex;
   }
 
   function target(w, h) {
     const tex = texture(w, h, { float: true });
+    bytes.targets += tex.__bytes ?? 0;
     const fbo = gl.createFramebuffer();
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
@@ -156,6 +170,7 @@ export function createRenderer(gl, { onProblem = () => {} } = {}) {
   const audioPixels = new Uint8Array(AUDIO_W * AUDIO_H * 4);
   for (let i = 3; i < audioPixels.length; i += 4) audioPixels[i] = 255;      // opaque, whatever is in it
   const audioTex = texture(AUDIO_W, AUDIO_H, { filter: gl.LINEAR, wrap: gl.CLAMP_TO_EDGE, pixels: audioPixels });
+  bytes.audio = bytesOf(AUDIO_W, AUDIO_H, false);
   const audio = { tex: audioTex, w: AUDIO_W, h: AUDIO_H };
 
   // ── buffers ────────────────────────────────────────────────────────────────────────────────────
@@ -326,6 +341,7 @@ export function createRenderer(gl, { onProblem = () => {} } = {}) {
       const b = buffers.get(name);
       if (b?.written) b.cur = b.write;
     }
+    if (pendingFrame) { try { pendingFrame(); } catch { /* lost context */ } pendingFrame = null; }
   }
 
   // ── the player's values, and the editor's questions ────────────────────────────────────────────
@@ -377,6 +393,59 @@ export function createRenderer(gl, { onProblem = () => {} } = {}) {
 
     /** How the cache is doing, for the probes: programs compiled, programs reused, programs held. */
     get stats() { return { compiled: misses, reused: hits, held: cache.size, cap: CACHE_MAX }; },
+    /**
+     * What THIS renderer has allocated, in bytes, plus what the driver says about itself.
+     *
+     * `targets` are the ping-pong render targets (those are the big ones: four buffers x two sides of
+     * 8 bytes per pixel, so 1080p is ~130 MB at the default float precision), `images` the uploaded
+     * pictures, `audio` the 512x2 spectrum/waveform texture. `total` is their sum. It is deliberately
+     * not called "VRAM": a browser cannot see the driver's memory, and a number that cannot be checked
+     * is worse than a number that is small and exact.
+     */
+    memory() {
+      const info = gl.getExtension("WEBGL_debug_renderer_info");
+      return {
+        ...bytes,
+        total: bytes.targets + bytes.images + bytes.audio,
+        targets: bytes.targets,
+        size: { w: W, h: H },
+        precision: floatOK ? "RGBA16F" : "RGBA8",
+        renderer: info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : null,
+        vendor: info ? gl.getParameter(info.UNMASKED_VENDOR_WEBGL) : null,
+        maxTexture: gl.getParameter(gl.MAX_TEXTURE_SIZE),
+        floatLinear: !!(floatOK && gl.getExtension("OES_texture_float_linear")),
+      };
+    },
+    /**
+     * The GPU's own time for the frames just drawn, when the browser will tell us.
+     *
+     * `EXT_disjoint_timer_query_webgl2` is the only way to get this, and it is not always there (a
+     * software renderer such as SwiftShader, some drivers, some privacy settings). When it is missing
+     * this returns null and the caller must say "not available" -- an invented GPU number is worse than
+     * no number, because the whole point of it is to find out where the milliseconds actually go.
+     */
+    gpuFrameMs() {
+      if (!timer) return null;
+      const now = performance.now();
+      if (pending) {
+        if (now - pending.at < 400) return lastGpu;              // poll later: results arrive a frame or two after
+        const done = gl.getQueryParameter(pending.query, gl.QUERY_RESULT_AVAILABLE);
+        const disjoint = gl.getParameter(timer.GPU_DISJOINT_EXT);
+        if (done && !disjoint) {
+          lastGpu = gl.getQueryParameter(pending.query, gl.QUERY_RESULT) / 1e6;   // ns -> ms
+          gl.deleteQuery(pending.query);
+          pending = null;
+          return lastGpu;
+        }
+        if (done || disjoint) { gl.deleteQuery(pending.query); pending = null; }
+        return lastGpu;
+      }
+      const query = gl.createQuery();
+      gl.beginQuery(timer.TIME_ELAPSED_EXT, query);
+      pending = { query, at: now };
+      pendingFrame = () => { gl.endQuery(timer.TIME_ELAPSED_EXT); };      // the frame closes it below
+      return lastGpu;
+    },
     /** The size of the audio texture, so the editor can say what a shader is reading. */
     get audioSize() { return { w: AUDIO_W, h: AUDIO_H }; },
 
@@ -397,7 +466,7 @@ export function createRenderer(gl, { onProblem = () => {} } = {}) {
     /** A picture for a channel. Kept in memory for this session and never written anywhere. */
     addImage(name, source) {
       const old = images.get(name);
-      if (old) gl.deleteTexture(old.tex);
+      if (old) { gl.deleteTexture(old.tex); bytes.images -= old.bytes ?? 0; }
       const w = source.width, h = source.height;
       const tex = gl.createTexture();
       gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -410,7 +479,9 @@ export function createRenderer(gl, { onProblem = () => {} } = {}) {
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-      images.set(name, { tex, w, h });
+      const held = w * h * 4;                                  // RGBA8, whatever the source was
+      images.set(name, { tex, w, h, bytes: held });
+      bytes.images += held;
       return { name, w, h };
     },
     removeImage(name) {
