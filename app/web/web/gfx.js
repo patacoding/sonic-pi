@@ -83,16 +83,20 @@ html { background: #05070d; }
    readable WHILE the shader runs, so it is not in the panel (shut during a performance) and not in the
    editor pane (same). Monospace, the app's own foreground, a faint ground, and never a pointer target. */
 #gfx-hud {
-  position: fixed; left: 10px; top: 102px; z-index: 40;  /* placed at runtime: below the toolbar, clear of the rail */
-  font: 11px/1.45 var(--code-font, ui-monospace, monospace);
+  font: 11px/1.3 var(--code-font, ui-monospace, monospace);
   color: var(--DefaultForeground, #ddd);
-  background: color-mix(in srgb, var(--Background, #101010) 55%, transparent);
-  border: 1px solid color-mix(in srgb, var(--WindowBorder, #444) 60%, transparent);
-  border-radius: var(--r-s, 4px);
-  padding: 3px 7px;
-  pointer-events: none;              /* it sits over the picture: never in the way of a click */
+  pointer-events: none;              /* a readout is never in the way of a click */
   white-space: nowrap;
   opacity: 0; transition: opacity .15s ease;
+}
+#gfx-hud.in-bar {
+  /* laid out BY the status bar: no coordinates, so nothing to get wrong when the interface zooms */
+  align-self: center; margin: 0 10px 0 4px; width: max-content;   /* the box is the text, not the whole gap */
+}
+#gfx-hud:not(.in-bar) {
+  /* no status bar to live in: out of the way in the corner, and the toast's z-index (measured to sit
+     above the app's own chrome) */
+  position: fixed; left: 10px; top: 8px; z-index: 40;
 }
 #gfx-hud.on { opacity: .92; }
 
@@ -208,12 +212,30 @@ function install() {
    */
   function placeHud() {
     if (!hudEl) return;
-    const box = (id) => document.getElementById(id)?.getBoundingClientRect();
-    const nav = box("site-nav"), bar = box("toolbar"), rail = box("drawer-rail");
-    const top = Math.max(nav?.bottom ?? 0, bar?.bottom ?? 0) + 8;
-    const railLeft = rail && rail.width > 0 && rail.left < window.innerWidth / 2;
-    hudEl.style.top = `${Math.round(Math.max(8, top))}px`;
-    hudEl.style.left = `${railLeft ? Math.round(rail.right) + 8 : 10}px`;
+    // IN the status bar's own empty middle -- not positioned over the window at all.
+    //
+    // Two measured reasons. (1) The app's interface is zoomed/transformed, so a fixed element positioned
+    // from getBoundingClientRect() coordinates lands somewhere else entirely: in the probe the readout
+    // came out at y=2 while the bar was at y=248, i.e. "fixed" was not fixed to the viewport at all.
+    // (2) Any overlay has to cover something, and the code buffer is what a player is using: the first
+    // version sat at y=102, over the player's own music ("you mixed this line into my Sonic Pi buffer").
+    // Letting the status bar lay it out removes both problems: the bar runs [status-engine][status-jobs]
+    // [spacer 1042px][status-version], and the spacer is room the app itself left empty.
+    //
+    // The app may rebuild the bar's contents, so this re-checks where the readout lives rather than
+    // trusting one append: it is called on every paint (4x a second) while the readout is on.
+    const bar = document.getElementById("statusbar");
+    const spacer = bar?.querySelector(".spacer");
+    // ...and only when the bar is actually ON SCREEN: with the drawer open (or focus mode) the status bar
+    // can have no layout at all, and a readout appended into a hidden row is a readout that vanished.
+    const showing = !!bar && bar.getBoundingClientRect().height > 0;
+    if (spacer && showing) {
+      if (hudEl.parentElement !== spacer) spacer.appendChild(hudEl);
+      hudEl.classList.add("in-bar");
+      return;
+    }
+    if (hudEl.parentElement !== document.body) document.body.appendChild(hudEl);   // no status bar: fall back
+    hudEl.classList.remove("in-bar");
   }
 
   /** The numbers with their names, in the Log -- the panel has a button for it. */
