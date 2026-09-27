@@ -184,19 +184,6 @@ export function createCanvas({ document: doc = null, imageSource = "", onProblem
     removeImage: (name) => renderer.removeImage(name),
     get images() { return renderer.images; },
     /**
-     * Drive this canvas's clock from outside: `setClock(seconds, frame)`.
-     *
-     * Who needs it: the OUTPUT tab (gfx-out.js). It draws the same document on its own context, and its
-     * own rAF clock starts when that tab was opened -- so `iTime`/`iFrame` would differ from the tab the
-     * player is looking at by however long the tab has been open. Handing it the main tab's clock makes
-     * the two pictures the same picture, not just two runs of the same code.
-     */
-    setClock(seconds, frame) {
-      if (Number.isFinite(seconds)) state.time = seconds;
-      if (Number.isFinite(frame)) state.frame = frame;
-      last = null;                                   // and do not add this frame's delta to it
-    },
-    /**
      * What the frame costs, and what it holds. The honest version of "fps / VRAM":
      *
      *   fps, ms, worstMs   the last ~120 frames (a window, not the last frame: spikes matter)
@@ -225,9 +212,6 @@ export function createCanvas({ document: doc = null, imageSource = "", onProblem
         time: state.time,
       };
     },
-    /** The frame's own clock and pointer -- what a second context needs to draw the SAME frame. */
-    get clock() { return { time: state.time, frame: state.frame }; },
-    get pointer() { return { xyzw: [...state.mouse], down: state.down }; },
     /** The next drawn frame as a PNG data URL -- see the note above `grab()`. */
     capture,
     onFeed: (fn) => { feed = fn; },

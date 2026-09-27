@@ -82,6 +82,18 @@ html { background: #05070d; }
    and invisible, which is exactly how it was reported ("I cannot see fps in the UI"). It has to be
    readable WHILE the shader runs, so it is not in the panel (shut during a performance) and not in the
    editor pane (same). Monospace, the app's own foreground, a faint ground, and never a pointer target. */
+/* "Picture only" (F9): the app's interface is hidden and the shader is what is on screen. It is CSS of
+   ours over the app's own elements -- no upstream file is touched -- and it is meant for a projector or a
+   second screen, or just for looking at the picture without the editor around it. */
+html.gfx-picture-only #site-nav,
+html.gfx-picture-only #site-strip,
+html.gfx-picture-only #toolbar,
+html.gfx-picture-only #main,
+html.gfx-picture-only #statusbar,
+html.gfx-picture-only #drawer,
+html.gfx-picture-only #drawer-rail,
+html.gfx-picture-only #info-card { display: none !important; }
+
 #gfx-hud {
   font: 11px/1.3 var(--code-font, ui-monospace, monospace);
   color: var(--DefaultForeground, #ddd);
@@ -163,7 +175,20 @@ function install() {
   let analyser = null, taps = null, bandBins = null;
   const level = { rms: 0 }, bandValues = [0, 0, 0, 0];
 
-  const problem = (text) => (log ? log(`Graphics — ${text}`) : console.warn(`Graphics — ${text}`));
+  const problem = (text) => {
+    const line = `Graphics — ${text}`;
+    if (!log) console.warn(line);              // said now, where a developer will see it
+    say(line);                                 // and kept for the Log if there is not one yet
+  };
+
+  // The app hands us its own `logInfo` only WITH A RECORD -- that is, the first time the player's code
+  // prints something, which is the first Run. Until then there is no Log to write to, and everything the
+  // layer wanted to say (which shader it loaded, which document is running, the numbers a report asked
+  // for) was silently dropped: a page nobody had run yet looked like a page where nothing had happened.
+  // One of those lines is also the probe's proof that the detached starter reached its end -- so losing
+  // it hid a real bug. What is said while there is no Log is held here and said the moment there is one.
+  const unsaid = [];
+  const say = (text) => { if (log) log(text); else if (unsaid.length < 60) unsaid.push(text); };
 
   // ── the numbers: fps, frame time, GPU time, memory ────────────────────────────────────────────────
   //
@@ -241,7 +266,7 @@ function install() {
   /** The numbers with their names, in the Log -- the panel has a button for it. */
   function sayReport() {
     const p = canvas?.perf?.();
-    if (!p) { log?.("Graphics — the shader canvas is not running, so there is nothing to report."); return; }
+    if (!p) { say("Graphics — the shader canvas is not running, so there is nothing to report."); return; }
     const m = p.memory ?? {};
     const lines = [
       `fps ${p.fps.toFixed(1)} over the last ${p.samples} frames (frame ${p.ms.toFixed(2)} ms, worst ${p.worstMs.toFixed(1)} ms)`,
@@ -254,8 +279,39 @@ function install() {
       m.renderer ? `GPU: ${m.renderer}${m.vendor ? ` (${m.vendor})` : ""}, max texture ${m.maxTexture}, float+linear ${m.floatLinear ? "yes" : "no"}` : "GPU: the browser hides the renderer string",
       "note: a browser cannot report the driver's memory, so the texture figure is what THIS layer allocated, not what the GPU holds.",
     ];
-    log?.(`Graphics — renderer report\n${lines.join("\n")}`);
+    say(`Graphics — renderer report\n${lines.join("\n")}`);
   }
+
+  /**
+   * Picture only: hide the app's interface and leave the shader.
+   *
+   * F9 toggles it (a pair with F8, which compiles: both are document-level and neither depends on where
+   * the caret is). Going in also asks the browser for fullscreen on OUR canvas -- a keypress is a user
+   * gesture, so this usually works; if it does not, the class alone still fills the window with the
+   * picture. Escape comes back out (the browser's own Escape leaves fullscreen first).
+   *
+   * The readout survives it: it lives in the status bar, and when that is hidden the fallback puts it in
+   * the corner (see placeHud), which is exactly what a projector wants to be able to check.
+   */
+  const PICTURE_KEY = "sp-gfx-picture-only";
+  const pictureOnly = (v) => {
+    const on = v == null ? settings.bool(PICTURE_KEY, false) === true : v === true;
+    if (v != null) settings.set(PICTURE_KEY, on);
+    document.documentElement.classList.toggle("gfx-picture-only", on);
+    if (on) {
+      canvas?.canvas?.requestFullscreen?.().catch(() => {});     // best effort: needs a gesture
+      toast("Picture only — F9 or Esc brings the interface back");
+    } else if (document.fullscreenElement === canvas?.canvas) {
+      document.exitFullscreen?.().catch(() => {});
+    }
+    placeHud();                                                  // the status bar may have just gone away
+    return on;
+  };
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "F9") { e.preventDefault(); pictureOnly(!pictureOnly()); return; }
+    if (e.key === "Escape" && document.documentElement.classList.contains("gfx-picture-only")) pictureOnly(false);
+  }, true);
 
   function hudOn(v) {
     if (v == null) return settings.bool(HUD_KEY, true) === true;      // ON unless the player turned it off
@@ -334,6 +390,11 @@ function install() {
       title: "Shader",
       items: [
         {
+          kind: "switch", label: "Picture only (no interface)", value: document.documentElement.classList.contains("gfx-picture-only"),
+          title: "Hide the app's interface and leave the shader filling the window — for a projector or a second screen. F9 toggles it, Escape comes back. The app keeps running: the music, the directives and the readout all carry on.",
+          onChange: (on) => pictureOnly(on),
+        },
+        {
           kind: "switch", label: "Renderer readout", value: hudOn(),
           title: "A one-line readout in the top-left corner of the picture: fps, frame time (and the worst of the window), GPU time when the browser will give it, passes drawing, the textures this layer allocated, and the resolution. Ctrl+Alt+G toggles it.",
           onChange: (on) => hudOn(on),
@@ -342,11 +403,6 @@ function install() {
           kind: "button", label: "Say the renderer's numbers in the Log",
           title: "The same readout with every number named, plus the GPU's own name and the program cache: for working out where the milliseconds go.",
           onClick: () => sayReport(),
-        },
-        {
-          kind: "button", label: "Output window (just the picture)",
-          title: "A new tab that draws the same shader with nothing else on it, for a second screen or a projector. Everything is still controlled from this tab; close that tab to stop feeding it.",
-          onClick: () => window.sonicPiGfx?.openOutput(),
         },
         {
           kind: "button", label: "Open the shader editor",
@@ -369,7 +425,7 @@ function install() {
             const name = pane?.addDocument(TEST_CARD, doc.name);
             pane?.setChannels(doc.channels);
             ui.close();
-            log?.(`Graphics — the test card is up as "${name}": iChannel0 the spectrum, iChannel1 the waveform, iChannel2 a picture (choose one and its swatch turns green)`);
+            say(`Graphics — the test card is up as "${name}": iChannel0 the spectrum, iChannel1 the waveform, iChannel2 a picture (choose one and its swatch turns green)`);
           },
         },
         {
@@ -377,13 +433,13 @@ function install() {
           title: `Put web/${SHADER_FILE} back as this document's Image pass and compile it. The other tabs of this document go.`,
           onClick: () => {
             pane?.loadDocument(emptyDocument("Default", shaderSource), { compileIt: true });
-            log?.("Graphics — the default shader is back");
+            say("Graphics — the default shader is back");
           },
         },
         {
           kind: "button", label: "Say the uniforms in the Log",
           title: "Write the list above into Sonic Pi's own Log panel",
-          onClick: () => log?.(`Graphics — passes: ${canvas ? canvas.live.join(", ") || "none" : "none"}; the shader's own values: ${canvas ? canvas.userUniforms.join(", ") || "none" : "none"}`),
+          onClick: () => say(`Graphics — passes: ${canvas ? canvas.live.join(", ") || "none" : "none"}; the shader's own values: ${canvas ? canvas.userUniforms.join(", ") || "none" : "none"}`),
         },
       ],
     },
@@ -411,17 +467,15 @@ function install() {
     canvas: () => canvas,
     starter: () => shaderSource,           // a new document starts from web/gfx-shader.frag
     onCompiled: (answer, bad) => toast(`Shader: ${answer}`, bad),   // the compile key works from anywhere, so its answer shows anywhere
-    log: (text) => log?.(text),
+    log: (text) => say(text),
   });
 
-  // every compile -- the button, F8, the music's `:document`, a script's setSource -- ends up in the
-  // pane's compileNow, so wrapping the pane's own function is the one place that catches all of them and
-  // tells the output tab that the running document changed. (It must be here, after the pane exists:
-  // wrapping it earlier threw on a null pane and took the whole layer down with it.)
-  const paneCompile = pane.compile;
-  pane.compile = (...args) => { const result = paneCompile(...args); republishSoon(); return result; };
 
+  // Wrapped: this runs detached (an async IIFE nobody awaits), so a throw here used to end in an
+  // unhandled rejection and NO canvas, with the Log saying nothing -- exactly the shape of bug that
+  // costs an afternoon. Whatever goes wrong, it is said out loud and the panel still opens.
   (async () => {
+   try {
     const shader = await loadShader();
     shaderSource = shader.source;
     if (!shader.fromFile) problem(`${shader.why}, so the placeholder shader is running — it declares no uniform and answers no directive`);
@@ -429,12 +483,10 @@ function install() {
     // one that was on screen when the page was left
     hudOn(hudOn());                                   // the readout is ON by default: show it now (the panel
                                                     // section reads the same setting, so the switch agrees)
-  outputChannel();                                  // listen from the start: an output tab may already be
-                                                      // open (a reload, a restored session) and says hello
     const doc = pane.load(() => emptyDocument("Default", shader.source));
-    log?.(`Graphics — the document "${doc.name}" (${pane.documents.join(", ")}). Pictures are not saved: a channel that wants one draws a placeholder until it is uploaded again.`);
+    say(`Graphics — the document "${doc.name}" (${pane.documents.join(", ")}). Pictures are not saved: a channel that wants one draws a placeholder until it is uploaded again.`);
     canvas = createCanvas({ document: doc, onProblem: problem });
-    if (!canvas) return;
+    if (!canvas) { window.sonicPiGfx.started = true; return; }    // no WebGL2: said as a problem, and that is that
     canvas.canvas.setAttribute("aria-hidden", "true");
     canvas.canvas.style.display = canvasOn() ? "" : "none";
     document.body.insertBefore(canvas.canvas, document.body.firstChild);
@@ -446,7 +498,13 @@ function install() {
     pane.uniformsChanged();
     pane.restore();                                  // the pane was open when the page was left
     ui.rebuild();                                    // the uniform list is only knowable now
-    log?.(`Graphics — the shader's own values: ${canvas.userUniforms.join(", ") || "none"}; the frame's: ${canvas.renderer.builtins.join(", ")}`);
+    say(`Graphics — the shader's own values: ${canvas.userUniforms.join(", ") || "none"}; the frame's: ${canvas.renderer.builtins.join(", ")}`);
+    window.sonicPiGfx.started = true;                // read the note on `started`: the starter is detached
+   } catch (e) {
+    window.sonicPiGfx.error = (e && e.message) || String(e);
+    problem(`the layer could not start (${(e && e.message) || e}) — the picture is not running`);
+    console.error("Graphics — start failed:", e);
+   }
   })();
 
   // ── the top bar's tabs leave for sonic-pi.net ───────────────────────────────────────────────────
@@ -599,12 +657,12 @@ function install() {
         const result = await pane?.importSet(text);
         if (!result?.ok) {
           toast(`not a shader document set: ${result?.error ?? "unreadable"}`, true);
-          log?.(`Graphics — that file could not be opened: ${result?.error ?? "unreadable"}`);
+          say(`Graphics — that file could not be opened: ${result?.error ?? "unreadable"}`);
           return;
         }
         const pictures = result.images?.length ? ` and ${result.images.length} picture${result.images.length > 1 ? "s" : ""}` : "";
         toast(`opened ${result.documents.length} shader document${result.documents.length > 1 ? "s" : ""}${pictures}`);
-        log?.(`Graphics — opened ${result.documents.join(", ")}${pictures} from ${file.name}`);
+        say(`Graphics — opened ${result.documents.join(", ")}${pictures} from ${file.name}`);
       }).catch((err) => toast(`could not read ${file.name}: ${err.message}`, true));
     }, true);
   }
@@ -700,83 +758,6 @@ function install() {
     return true;
   }
 
-  // ── the output tab: the picture, in a window of its own ────────────────────────────────────────────
-  // A projector wants the picture and nothing else, in a window that can go fullscreen on the second
-  // screen -- while this tab keeps the editor, the Log and the audio. Two tabs cannot share a GL context,
-  // so the output tab draws its own copy of the SAME document with the same renderer (gfx-canvas.js +
-  // gfx-renderer.js, no shader code duplicated), and this tab feeds it the three things that make the
-  // picture what it is:
-  //
-  //   doc      the code and the channels, whenever they change (and on the output tab's hello)
-  //   frame    the audio texture, the music's own uniforms (uLevel/uBands), the pointer and the clock
-  //   images   the pictures the document names, as data URLs -- the output tab has none of its own
-  //
-  // Why BroadcastChannel: same origin, no server, no socket, works in every modern browser, and one line
-  // to send. The cost is one extra compile per document in the other tab, which is what makes the two
-  // pictures identical rather than merely similar.
-  const OUT_CHANNEL = "sonic-pi-gfx-output";
-  let outChannel = null, outOpen = false;
-
-  function outputChannel() {
-    if (!outChannel && typeof BroadcastChannel === "function") {
-      outChannel = new BroadcastChannel(OUT_CHANNEL);
-      outChannel.addEventListener("message", (e) => {
-        const m = e.data;
-        if (!m || typeof m !== "object") return;
-        if (m.t === "hello") { outOpen = true; publishDocument(); publishFrame(true); }
-        if (m.t === "bye") outOpen = false;
-      });
-      window.addEventListener("pagehide", () => outChannel?.close());
-    }
-    return outChannel;
-  }
-
-  /** The document, as the output tab needs it: the code, the channels, and the pictures it names. */
-  function publishDocument() {
-    const channel = outputChannel();
-    if (!channel || !outOpen || !pane) return;
-    const held = pane.document();
-    if (!held) return;
-    const images = {};
-    for (const [name, picture] of pane.pictures) {
-      if (picture?.url?.startsWith("data:")) images[name] = picture.url;
-    }
-    channel.postMessage({ t: "doc", doc: { name: held.name, common: held.common, passes: held.passes, channels: held.channels }, images });
-  }
-
-  let publishedAt = 0;
-  function publishFrame(force = false) {
-    const channel = outChannel;
-    if (!channel || !outOpen || !taps) return;
-    const now = performance.now();
-    if (!force && now - publishedAt < 14) return;       // ~70 Hz at most: the output interpolates nothing
-    publishedAt = now;
-    const held = canvas?.audio;
-    const clock = canvas?.clock ?? { time: 0, frame: 0 };
-    const pointer = canvas?.pointer ?? { xyzw: [0, 0, 0, 0], down: false };
-    const rms = Math.max(0, Math.min(1, level.rms * 6));
-    channel.postMessage({
-      t: "frame",
-      fft: held ? held.fft.slice() : null,              // a copy: the array is filled in place each frame
-      wave: held ? held.wave.slice() : null,
-      // the music's own values, as this tab computed them (the output tab has no analyser of its own)
-      uniforms: { uLevel: [rms], uBands: [...bandValues] },
-      clock: { time: clock.time, frame: clock.frame },
-      mouse: { xyzw: pointer.xyzw, down: pointer.down },
-      down: pointer.down,
-      sampleRate: taps?.ctx?.sampleRate ?? 48000,
-    });
-  }
-
-  /** The running document changed (compile, switch, setSource, test card): tell the output tab. */
-  function republishSoon() {
-    if (!outOpen) return;
-    publishDocument();
-    // the pictures may still be decoding in the main tab when the document lands, so send it twice:
-    // once now, once when the images have had a moment
-    setTimeout(publishDocument, 250);
-  }
-
   function feed() {
     if (!taps) return;
     analyser.getFloatTimeDomainData(taps.time);
@@ -808,7 +789,6 @@ function install() {
     const from = taps.time.length - samples;                               // the newest samples
     for (let x = 0; x < samples; x++) held.wave[x] = Math.max(0, Math.min(1, (taps.time[from + x] + 1) / 2));
 
-    publishFrame();                                                        // and out to the output tab
   }
 
   /** `puts :gfx, :document, "rings"` — which document is on screen, from the music. */
@@ -822,20 +802,23 @@ function install() {
 
   /** One record, from the hook. Only `output` can carry a directive. */
   function record(r, appLog) {
-    if (appLog) log = appLog;
+    if (appLog) {
+      log = appLog;
+      while (unsaid.length) log(unsaid.shift());    // what was said while there was no Log, in order
+    }
     const d = parseDirective(r?.text);
     if (!d) return;                                            // the player's own output: theirs
     if (!d.ok) return problem(d.error);
     // an order rather than a value for a name the shader declared
     if (d.command === "document") {
       documentDirective(d.arg);
-      if (d.verbose) log?.(`Graphics — document ${d.arg}`);
+      if (d.verbose) say(`Graphics — document ${d.arg}`);
       return;
     }
     if (!canvas) return;                                       // the shader never compiled; the problem is already said
     const result = canvas.set(d.name, d.values);
     if (!result.ok) return problem(result.error);
-    if (d.verbose) log?.(`Graphics — ${d.name} = ${d.values.join(" ")} (${d.shape})`);
+    if (d.verbose) say(`Graphics — ${d.name} = ${d.values.join(" ")} (${d.shape})`);
   }
 
   // The engine is null until the first Run, and its audio context is made then: watch until it
@@ -849,6 +832,14 @@ function install() {
   window.sonicPiGfx = {
     record,
     canvas: null,
+    /**
+     * Has the layer finished starting? The starter below runs DETACHED, and a throw in it used to leave
+     * the interface, the panel and this whole API perfectly installed with no canvas and no word said --
+     * so "is the picture up?" needs an answer that is not read off the interface. It becomes true only
+     * on the last line of the starter; `error` is what stopped it, or null.
+     */
+    started: false,
+    error: null,
     /** The extension panel (gfx-ui.js): the place every feature we add puts its controls. */
     ui,
     /** The shader editor's pane (gfx-editor.js): the tabs, the code and the channels. */
@@ -870,28 +861,11 @@ function install() {
      * drew" from "that pass is off".
      */
     capture: (opts) => (canvas ? canvas.capture(opts) : Promise.reject(new Error("the shader canvas is not running"))),
-    /**
-     * Open the output tab: the picture, on its own, in a window that can go fullscreen on a second screen.
-     *
-     *     const tab = sonicPiGfx.openOutput();     // a Window, or null if the popup was blocked
-     *
-     * The app keeps the editor, the Log and the audio; that tab draws the same document (same renderer,
-     * its own GL context) and is fed the audio, the music's uniforms, the pointer and this tab's clock.
-     * Close it and the main tab stops broadcasting.
-     */
-    openOutput() {
-      const url = new URL("gfx-out.html", location.href).href;
-      const tab = window.open(url, "sonic-pi-gfx-output", "width=960,height=540");
-      outputChannel();                                  // start listening for its hello
-      outOpen = true;
-      log?.(`Graphics — the output tab is open (${url}). Close it and this tab stops feeding it.`);
-      return tab;
-    },
-    get outputOpen() { return outOpen; },
-    /** The frame's own clock (what `iTime`/`iFrame` are): the output tab follows this one. */
-    get clock() { return canvas?.clock ?? null; },
+
     /** What the frame costs: fps, frame ms (window), GPU ms if the browser will say, memory we allocated. */
     perf: () => canvas?.perf?.() ?? null,
+    /** Picture only: `pictureOnly()` reads it, `pictureOnly(true|false)` sets it. `F9` toggles it. */
+    pictureOnly,
     /** The readout in the corner: `hud()` reads it, `hud(true|false)` sets it. `Ctrl+Alt+G` toggles it. */
     hud: (v) => hudOn(v),
     /** The long version, into the Log: every number with its name, for when one line is not enough. */
