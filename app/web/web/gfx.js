@@ -15,7 +15,11 @@
 // and beside it, with no hook at all:
 //
 //   window.sonicPi.engine.audioContext / .node  ->  AnalyserNode  ->  uLevel, uBands
-//   window.sonicPi.session.clockNow()           ->  iTime (the engine's own clock, not the wall)
+//
+// That is the ONLY thing this layer reads off `window.sonicPi`, and `iTime`/`iFrame` are its OWN clock
+// (gfx-canvas.js: one rAF delta per frame). The engine's clock (`session.clockNow()`) is deliberately
+// not used: it was only needed while a SECOND drawing context had to be kept in step with this one --
+// the output tab, which was removed (see docs/graphics-web-canvas.md §4.12).
 //
 // Why there is a hook at all, since it is the only line of upstream this feature costs. A record
 // reaches the page through the `on` handlers given to `createLiveSession` (sonic_pi.js:476), which
