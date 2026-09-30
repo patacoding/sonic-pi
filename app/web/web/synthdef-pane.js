@@ -20,7 +20,7 @@ const ACTIVE_KEY = "sp-synthdef-active";
 const URL_KEY = "sp-synthdef-url";
 const STYLE_ID = "gfx-synthdef-style";
 /** Bump when the pane changes shape: it is printed in the pane and in the Log, so a cached page is obvious. */
-export const PANE_VERSION = "synthdef-pane 2026-09-30b";
+export const PANE_VERSION = "synthdef-pane 2026-09-30c";
 
 export const SYNTHDEF_PANE = "gfx-synthdef";
 
@@ -117,7 +117,10 @@ export function createSynthdefPane({
     if (has("amp")) opts.push("amp: 0.6");
     if (has("gate")) opts.push("sustain: 1.5");
     if (has("release")) opts.push("release: 0.4");
-    return `synth :${name}${opts.length ? `, ${opts.join(", ")}` : ""}\nsleep 3\n`;
+    // It MUST end. A def with no `gate` and no envelope ignores sustain/release and simply drones on -- which
+    // is exactly what an audition must never leave behind (measured: it did). `kill` on the node the runtime
+    // hands back is what makes this safe whatever the def looks like.
+    return `s = synth :${name}${opts.length ? `, ${opts.join(", ")}` : ""}\nsleep 2\ns.kill\nsleep 0.2\n`;
   }
 
   async function refresh() {
@@ -198,7 +201,8 @@ export function createSynthdefPane({
       const known = controls ?? state.defs.find((d) => d.name === name)?.controls ?? [];
       const line = `load_synthdef "${api(`/defs/${name}.scsyndef`)}"\nsleep 0.25\n` + (play ? auditionLine(name, known) : "");
       await s.run(line);
-      setNote(`loaded ${name}${play ? " and played a note" : ""}: it is registered, so \`synth :${name}\` works now`);
+      setNote(`loaded ${name}${play ? " and played a note" : ""}: \`synth :${name}\` works in code run FROM NOW ON ` +
+        "(run your music again -- code that already ran does not retroactively know the name)");
       say(`loaded ${name}${play ? " and auditioned it" : ""} (its .json beside it gives the Docs page and the knobs)`);
       return true;
     } catch (e) {
