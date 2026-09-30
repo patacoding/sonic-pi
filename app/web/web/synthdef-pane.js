@@ -20,7 +20,7 @@ const ACTIVE_KEY = "sp-synthdef-active";
 const URL_KEY = "sp-synthdef-url";
 const STYLE_ID = "gfx-synthdef-style";
 /** Bump when the pane changes shape: it is printed in the pane and in the Log, so a cached page is obvious. */
-export const PANE_VERSION = "synthdef-pane 2026-09-30e";
+export const PANE_VERSION = "synthdef-pane 2026-09-30f";
 
 export const SYNTHDEF_PANE = "gfx-synthdef";
 
@@ -336,6 +336,25 @@ body[data-drawer="${SYNTHDEF_PANE}"] #gfx-synthdef-pane { display: flex; }
         setNote(`this line makes the name available, whatever ran before:\n${line}`, false);
       }
     });
+    const copyRuby = el("button", "gfx-ed-btn", "copy play code");
+    copyRuby.title = "Ruby that plays this def AND STOPS: `synth` on its own never ends unless the def has an envelope";
+    copyRuby.addEventListener("click", async () => {
+      const d = active();
+      const name = state.defs[0]?.name ?? d.name;
+      const has = (c) => (state.defs.find((x) => x.name === name)?.controls ?? []).includes(c);
+      const opts = [];
+      if (has("note")) opts.push("note: 36");
+      if (has("amp")) opts.push("amp: 0.6");
+      if (has("gate")) opts.push("sustain: 0.4");
+      if (has("release")) opts.push("release: 0.4");
+      const ruby = `s = synth :${name}${opts.length ? `, ${opts.join(", ")}` : ""}\nsleep 2\ns.kill\n`;
+      try {
+        await navigator.clipboard?.writeText(ruby);
+        setNote(`copied play code for :${name} (it stops itself):\n${ruby}`);
+      } catch {
+        setNote(`play code for :${name} -- note the kill: a bare \`synth\` never ends:\n${ruby}`);
+      }
+    });
     const reload = el("button", "gfx-ed-btn", "reload");
     reload.title = "load the active document without compiling (it must have been compiled before)";
     reload.addEventListener("click", () => {
@@ -343,7 +362,7 @@ body[data-drawer="${SYNTHDEF_PANE}"] #gfx-synthdef-pane { display: flex; }
       const name = state.defs[0]?.name ?? active().name;
       loadDef(name, { play: true, controls: state.defs.find((d) => d.name === name)?.controls });
     });
-    head.append(compilePlay, compileOnly, copyLine, reload, el("span", "gfx-ed-spacer"));
+    head.append(compilePlay, compileOnly, copyLine, copyRuby, reload, el("span", "gfx-ed-spacer"));
     pane.appendChild(head);
     // the status gets a row of its own (a small line in the header was easy to miss, and a compile that fails
     // silently is the worst thing an editor can do)
