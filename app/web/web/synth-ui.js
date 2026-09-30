@@ -51,6 +51,9 @@ const CSS = `
 .synth-editor .synth-readout{font-size:var(--code-font,11px);opacity:.9}
 .synth-editor .synth-section{display:flex;flex-wrap:wrap;gap:.5em;align-items:flex-start}
 .synth-editor .synth-row{display:flex;align-items:center;gap:.4em;width:100%}
+.synth-editor .synth-banner{grid-column:1/-1;display:flex;align-items:center;gap:.5em;flex-wrap:wrap;
+  padding:.45em .7em;border-radius:8px;border:1px solid var(--pop-border,#3a3a42);opacity:.95}
+.synth-editor .synth-banner-bad{border-color:#b4762a;background:rgb(180 118 42 / 12%)}
 .synth-editor webaudio-keyboard{display:block;margin:.4em auto 0}
 `;
 function installStyle() {
@@ -71,10 +74,10 @@ const el = (tag, cls = "", text = null) => {
 /**
  * @param {{synth: object, onSay?: (text: string) => void, onProblem?: (text: string) => void}} opts
  */
-export function createSynthEditor({ synth, onSay = null, onProblem = null }) {
+export function createSynthEditor({ synth, onSay = null, onProblem = null, reader = null, makeAudible = null }) {
   const say = (t) => (onSay ? onSay(t) : console.info(`Synth — ${t}`));
   const problem = (t) => (onProblem ? onProblem(t) : console.warn(t));
-  let root = null, window_ = null, status = null, keyboard = null;
+  let root = null, window_ = null, status = null, keyboard = null, banner = null;
   const held = new Set();
   const values = {};                      // the editor's own copy of what the controls show
 
@@ -162,6 +165,11 @@ export function createSynthEditor({ synth, onSay = null, onProblem = null }) {
     window_.appendChild(head);
 
     const body = el("div", "synth-body");
+    // Our sound goes INTO the engine: with nothing reading it, every knob here is silent. Say so, and offer
+    // to start a reader (one line of Sonic Pi, run through the app's own session).
+    banner = el("div", "synth-banner");
+    body.appendChild(banner);
+    updateBanner();
     body.append(
       section("Oscillator",
         chooser("waveform", WAVES.map((w) => [w, w]), () => values.wave ?? patch.wave ?? "saw",
@@ -211,6 +219,26 @@ export function createSynthEditor({ synth, onSay = null, onProblem = null }) {
     say("editor opened (knobs turn the synth live; the keyboard plays it)");
   }
 
+  /**
+   * The banner: is anything reading the synth? Without a reader nothing here can be heard, and that is the
+   * one failure a player cannot diagnose from the window.
+   */
+  function updateBanner() {
+    if (!banner) return;
+    const started = typeof reader === "function" ? !!reader() : false;
+    banner.textContent = "";
+    banner.classList.toggle("synth-banner-bad", !started);
+    banner.appendChild(el("span", "", "To be heard, the running music has to read the synth: "));
+    const code = el("code", "", "synth :sound_in_stereo, sustain: 3600, amp: 1");
+    banner.appendChild(code);
+    const b = el("button", "sp-mini-btn", started ? "start another reader" : "start a reader");
+    b.addEventListener("click", () => { Promise.resolve(makeAudible?.()).then(() => updateBanner()); });
+    banner.appendChild(b);
+    banner.appendChild(el("span", "synth-readout", started
+      ? "  (one has been started from here — if you still cannot hear it, no reader is left in the current run)"
+      : "  (or put that line in your own code)"));
+  }
+
   /** A real file picker, from a real click, so the browser allows it -- then the file becomes the table. */
   function pickWaveform() {
     const input = document.createElement("input");
@@ -234,7 +262,13 @@ export function createSynthEditor({ synth, onSay = null, onProblem = null }) {
 
   async function show() {
     if (!root) await build();
-    else root.style.display = "";
+    else {
+      // it may have been taken out of the document (a re-render, or a probe cleaning up after itself): a
+      // detached window can never be opened again, and nothing would say why
+      if (!root.isConnected) document.body.appendChild(root);
+      root.style.display = "";
+    }
+    updateBanner();
     synth.ensure().catch((e) => problem(`the synth is not ready: ${e.message}`));
   }
 
@@ -244,6 +278,9 @@ export function createSynthEditor({ synth, onSay = null, onProblem = null }) {
     close: hide,
     get isOpen() { return !!root && root.style.display !== "none"; },
     get values() { return { ...values }; },
+    /** Re-read whether something is reading the synth (the host calls this when it sees a reader start). */
+    refresh: updateBanner,
+    makeAudible: () => Promise.resolve(makeAudible?.()),
     /** For probes (and for the panel, if it ever wants to show a value): press a control programmatically. */
     setValue(key, value) {
       const k = root?.querySelector(`webaudio-knob[data-key="${key}"]`);

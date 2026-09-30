@@ -34,7 +34,38 @@ export function createSynthHost({ say = null, problem = null, section = null } =
   const synth = createSynth({ log: text });
   const tap = createTap({ log: text });
   // the editor is built the first time it is opened (its 72 KB of panel parts load then too)
-  const editor = createSynthEditor({ synth, onSay: text, onProblem: warn });
+  const editor = createSynthEditor({ synth, onSay: text, onProblem: warn, reader: () => readerStarted,
+                                     makeAudible: () => makeAudible(), readerStarted: () => readerStarted });
+
+  /**
+   * Is anything reading our synth? Its sound goes INTO the engine's input, and only a `sound_in_stereo`
+   * synth in the running music takes it from there -- without one the editor is silent and nothing says so.
+   * The app hands us every record, so we can see the reader being started.
+   */
+  /** Start a reader for the player: one line of Sonic Pi, run through the session the app itself uses. */
+  async function makeAudible() {
+    const session = globalThis.sonicPi?.session;
+    if (typeof session?.run !== "function") {
+      warn("nothing is reading the synth (run `synth :sound_in_stereo, sustain: 3600, amp: 1`)");
+      return false;
+    }
+    try {
+      await synth.ensure();
+      await session.run("synth :sound_in_stereo, sustain: 3600, amp: 1\nsleep 3600\n");
+      readerStarted = true;
+      text("started `synth :sound_in_stereo` so the synth can be heard");
+      editor.refresh();
+      return true;
+    } catch (e) {
+      warn(`could not start the reader: ${e.message ?? e}`);
+      return false;
+    }
+  }
+
+  // Whether something is reading our synth CANNOT be known from here: a new run does not stop the previous
+  // one's voices, and neither does Stop (both measured). So the editor never claims it -- it offers to start
+  // a reader. A wrong claim is worse than no claim: the player would hear nothing and be told all is well.
+  let readerStarted = false;
 
   /**
    * A record, if it is one of ours. Returns true when it was (so the caller stops looking at it).
@@ -150,6 +181,8 @@ export function createSynthHost({ say = null, problem = null, section = null } =
   const api = Object.defineProperties({}, Object.getOwnPropertyDescriptors(synth));
   api.tap = tap;                    // the lossless measuring tap
   api.editor = editor;              // the knobs (synth-ui.js), built on first open
+  api.makeAudible = makeAudible;    // start a `sound_in_stereo` so the synth can be heard
+  Object.defineProperty(api, "readerStarted", { get: () => readerStarted });
   api.host = { handleRecord, panelSection, pickWaveform, get synth() { return synth; }, get tap() { return tap; } };
   return api;
 }
