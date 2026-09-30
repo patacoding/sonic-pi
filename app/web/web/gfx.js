@@ -41,6 +41,7 @@ import { createPanel } from "./gfx-ui.js";
 import { createShaderPane, resolveDocument } from "./gfx-editor.js";
 import { emptyDocument } from "./gfx-document.js";
 import { testCardDocument, TEST_CARD } from "./gfx-testcard.js";
+import { createSynth } from "./gfx-synth.js";
 
 const STYLE_ID = "gfx-style";
 const ALPHA_KEY = "sp-gfx-ui-alpha";
@@ -832,8 +833,13 @@ function install() {
     if (attachAudio(engine)) clearInterval(watch);
   }, 500);
 
+  // Our own synthesizer (gfx-synth.js + gfx-synth-worklet.js): its own DSP, sounding THROUGH the engine
+  // by feeding the engine's input, so `with_fx`, the scope and the Recorder all apply.
+  const synth = createSynth({ log: (text) => say(text) });
+
   window.sonicPiGfx = {
     record,
+    synth,
     canvas: null,
     /**
      * Has the layer finished starting? The starter below runs DETACHED, and a throw in it used to leave
