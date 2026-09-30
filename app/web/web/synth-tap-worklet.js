@@ -8,7 +8,7 @@
 // anything: the processor copies every block straight into a shared buffer until it is full, and the page
 // reads it afterwards.
 //
-// Protocol (from web/gfx-tap.js):
+// Protocol (from web/synth-tap.js):
 //   { type: "start", sab, capacity }   begin writing at sample 0
 //   { type: "stop" }                   stop writing
 //   the header (Int32Array of 2) is [written samples, capacity]; the samples follow as Float32.
@@ -59,4 +59,4 @@ class GfxTap extends AudioWorkletProcessor {
   }
 }
 
-registerProcessor("gfx-tap", GfxTap);
+registerProcessor("synth-tap", GfxTap);

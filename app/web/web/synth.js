@@ -49,7 +49,7 @@ export function createSynth({ log = null } = {}) {
       if (!context.audioWorklet) throw new Error("this browser has no AudioWorklet");
       if (context.state !== "running") await context.resume().catch(() => {});   // a suspended context is silence with no error
       await context.audioWorklet.addModule(WORKLET);
-      node = new AudioWorkletNode(context, "gfx-synth", {
+      node = new AudioWorkletNode(context, "synth", {
         numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2],
       });
       ctx = context;

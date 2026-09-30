@@ -909,9 +909,25 @@ function installSafely() {
   try {
     install();
   } catch (e) {
-    // nothing here can fix it, but silence cannot be debugged: a throw in install() used to mean the
-    // whole layer was simply absent, and the page went on to behave like an app without graphics
+    // nothing here can fix it, but silence cannot be debugged: a throw in install() used to mean the whole
+    // layer was simply absent, and the page went on to behave like an app without graphics. That happened
+    // for real (a wiring member that was never exported), and the only trace was in the console -- so now
+    // the reason is ON THE PAGE, where whoever notices "everything is gone" is actually looking.
+    const why = String(e?.message ?? e);
     console.error("Graphics — the layer could not install, so there is no shader canvas, no editor pane and no directives:", e);
+    try {
+      window.sonicPiGfx = { ...(window.sonicPiGfx ?? {}), error: why };
+      if (!document.getElementById("gfx-install-error")) {
+        const bar = document.createElement("div");
+        bar.id = "gfx-install-error";
+        bar.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:9999;padding:6px 10px;" +
+          "background:rgb(150 40 30 / 92%);color:#fff;font:12px/1.45 system-ui,sans-serif;white-space:pre-wrap";
+        bar.textContent = `Graphics — the layer could not install, so there is no shader canvas, no editor ` +
+          `pane and no directives:\n${why}`;
+        bar.addEventListener("click", () => bar.remove());
+        (document.body ?? document.documentElement).appendChild(bar);
+      }
+    } catch { /* showing the reason must never be the thing that breaks */ }
   }
 }
 

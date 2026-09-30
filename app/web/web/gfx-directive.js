@@ -58,21 +58,6 @@ const SIGILS = new Map([
 // after the sigil is a value for a name the shader declared.
 export const COMMANDS = new Set(["document"]);
 
-// The names that play OUR OWN synthesizer (web/gfx-synth.js) instead of setting a shader uniform. They are
-// read before the shapes below because they take MIDI numbers, not vector values:
-//
-//     puts :gfx, :note, 69               a note (velocity 1, held 0.5 s)
-//     puts :gfx, :note, 69, 0.8, 2       velocity 0.8, held 2 s
-//     puts :gfx, :off, 69                release it now
-//     puts :gfx, :alloff                 release everything
-//     puts :gfx, :cutoff, 900            its filter, from the music
-//     puts :gfx, :res, 0.8  /  :gain, 0.2
-//
-// The instant they land on is the record's own `time` (the engine clock), which is the same instant a
-// `synth`/`sample` on that line lands on -- measured to 1.5 ms: docs/web-synth-engine.md §7.
-export const SYNTH_COMMANDS = new Set(["note", "off", "alloff", "cutoff", "res", "gain"]);
-
-
 const SPACE = /[\s,\[\]{}]/;
 
 /** A quoted run starting at `i` (just past the opening quote): [text, next]. */

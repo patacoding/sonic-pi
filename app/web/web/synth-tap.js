@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// The page's side of the tap (web/gfx-tap-worklet.js): a lossless recording of what the engine's output
+// The page's side of the tap (web/synth-tap-worklet.js): a lossless recording of what the engine's output
 // sounds like, for measuring rather than for listening.
 //
 // It exists because the app's own capture ring drops samples between drains (see the worklet's header), and
@@ -33,7 +33,7 @@ export function createTap({ log = null } = {}) {
       sab = new SharedArrayBuffer(8 + capacity * 4);
       header = new Int32Array(sab, 0, 2);
       data = new Float32Array(sab, 8);
-      node = new AudioWorkletNode(context, "gfx-tap", { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
+      node = new AudioWorkletNode(context, "synth-tap", { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
       node.port.postMessage({ type: "start", sab });      // configured once; start/stop just flips the flag
       ctx = context;
       sink = new GainNode(context, { gain: 0 });          // keep the node in the graph without being heard

@@ -10,7 +10,7 @@
 // it back with `synth :sound_in_stereo` -- so `with_fx`, the scope and the Recorder all apply (verified,
 // see docs/web-synth-engine.md §5).
 //
-// The message protocol (from web/gfx-synth.js):
+// The message protocol (from web/synth.js):
 //   { type: "patch", patch: {…} }                  parameters, applied immediately
 //   { type: "table", harmonics: [...] }            a wavetable, as harmonic amplitudes
 //   { type: "noteOn", note, velocity, when }       `when` is absolute AudioContext seconds (or null = now)
@@ -252,4 +252,4 @@ class GfxSynth extends AudioWorkletProcessor {
   }
 }
 
-registerProcessor("gfx-synth", GfxSynth);
+registerProcessor("synth", GfxSynth);

@@ -19,6 +19,7 @@ import { createTap } from "./synth-tap.js";
 import { parseSynthDirective, isSynthOrder, SYNTH_SIGIL, SYNTH_SIGIL_VERBOSE, SYNTH_COMMANDS } from "./synth-directive.js";
 import { createSynthEditor } from "./synth-ui.js";
 import { createSynthdefs } from "./synthdefs.js";
+import { createSynthdefPane } from "./synthdef-pane.js";
 
 export { SYNTH_SIGIL, SYNTH_SIGIL_VERBOSE, isSynthOrder, SYNTH_COMMANDS };
 
@@ -40,7 +41,9 @@ export function createSynthHost({ say = null, problem = null, section = null } =
   // SynthDefs: a SuperCollider COMPILE SERVICE (tools/synthdef-server) does the compiling; this panel sends
   // source, polls the job, and loads what comes back. If the service is not running, it says so and nothing
   // else in the app is affected.
-  const synthdefs = createSynthdefs({ synth, onSay: text, onProblem: warn });
+  // the writing area: its own pane in the drawer (synthdef-pane.js); the panel section below is only a way in
+  const synthdefPane = createSynthdefPane({ onSay: text, onProblem: warn });
+  const synthdefs = createSynthdefs({ pane: synthdefPane, onSay: text, onProblem: warn });
 
   /**
    * Is anything reading our synth? Its sound goes INTO the engine's input, and only a `sound_in_stereo`
@@ -186,9 +189,14 @@ export function createSynthHost({ say = null, problem = null, section = null } =
   const api = Object.defineProperties({}, Object.getOwnPropertyDescriptors(synth));
   api.tap = tap;                    // the lossless measuring tap
   api.editor = editor;              // the knobs (synth-ui.js), built on first open
-  api.synthdefs = synthdefs;        // the compile service's panel (synthdefs.js)
+  api.synthdefs = synthdefs;        // the panel section: a launcher + the service's library
+  api.synthdefPane = synthdefPane;  // the editor pane itself (synthdef-pane.js)
   api.makeAudible = makeAudible;    // start a `sound_in_stereo` so the synth can be heard
   Object.defineProperty(api, "readerStarted", { get: () => readerStarted });
-  api.host = { handleRecord, panelSection, pickWaveform, get synth() { return synth; }, get tap() { return tap; } };
+  api.host = {
+    handleRecord, panelSection, pickWaveform,
+    synthdefSection: () => synthdefs.panelSection(),      // the SynthDefs section (gfx.js asks for both)
+    get synth() { return synth; }, get tap() { return tap; }, get editor() { return editor; },
+  };
   return api;
 }
