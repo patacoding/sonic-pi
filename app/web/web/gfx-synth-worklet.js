@@ -114,7 +114,8 @@ class GfxSynth extends AudioWorkletProcessor {
   }
 
   #schedule(when, run) {
-    if (when == null || when <= currentTime) return run();
+    if (when == null || when <= currentTime) { this.port.postMessage({ type: "sched", when: when ?? null, now: Number(currentTime.toFixed(4)), immediate: true }); return run(); }
+    this.port.postMessage({ type: "sched", when: Number(when.toFixed(4)), now: Number(currentTime.toFixed(4)), immediate: false });
     this.events.push({ when, run });
     if (this.events.length > 256) this.events.splice(0, this.events.length - 256);
   }
@@ -127,7 +128,8 @@ class GfxSynth extends AudioWorkletProcessor {
     if (!v.freq) v.freq = v.freqTarget;
     v.ampStage = "a"; v.modStage = "a";
     if (v.amp <= 0) { v.phase = 0; v.ic1 = 0; v.ic2 = 0; v.mod = 0; }
-    this.port.postMessage({ type: "voice", note, on: true, voices: this.voices.filter((x) => x.active).length });
+    this.port.postMessage({ type: "voice", note, on: true, at: Number(currentTime.toFixed(4)),
+                            voices: this.voices.filter((x) => x.active).length });
   }
 
   #release(v) { if (v.active) { v.ampStage = "r"; v.modStage = "r"; } }
@@ -150,7 +152,7 @@ class GfxSynth extends AudioWorkletProcessor {
       let keep = 0;
       for (let i = 0; i < this.events.length; i++) {
         const e = this.events[i];
-        if (e.when <= limit) e.run();
+        if (e.when <= limit) { this.port.postMessage({ type: "fired", when: Number(e.when.toFixed(4)), now: Number(currentTime.toFixed(4)) }); e.run(); }
         else this.events[keep++] = e;
       }
       this.events.length = keep;
