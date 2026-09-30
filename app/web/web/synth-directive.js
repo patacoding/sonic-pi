@@ -26,7 +26,7 @@ const SIGILS = new Map([
 ]);
 
 /** The names that play the synthesizer rather than set one of its values. */
-export const SYNTH_COMMANDS = new Set(["note", "off", "alloff", "cutoff", "res", "gain"]);
+export const SYNTH_COMMANDS = new Set(["note", "off", "alloff", "cutoff", "res", "gain", "use"]);
 
 /** Is this name an order for our synthesizer? (gfx.js uses it to answer a `puts :gfx, :note, …` helpfully.) */
 export const isSynthOrder = (name) => SYNTH_COMMANDS.has(name);
@@ -54,6 +54,14 @@ export function parseSynthDirective(text) {
   if (name === "alloff") {
     if (values.length) return { ok: false, verbose, raw, error: "alloff takes nothing after it" };
     return { ok: true, verbose, raw, name, command: "alloff", values: [] };
+  }
+  // `use` takes a NAME (a symbol or a string), not a number: the music says which synth it wants and the PAGE
+  // decides where it comes from -- so no service URL ever appears in a piece of music somebody shares.
+  if (name === "use") {
+    if (values.length !== 1) return { ok: false, verbose, raw, error: "use: one name after it, as in :synth, :use, :sqfm" };
+    const wanted = word(values[0]);
+    if (!wanted) return { ok: false, verbose, raw, error: `use: ${describe(values[0])} is not a name — :synth, :use, :sqfm` };
+    return { ok: true, verbose, raw, name, command: "use", synth: wanted, values: [wanted] };
   }
   if (!SYNTH_COMMANDS.has(name)) {
     return { ok: false, verbose, raw, error: `${name} is not one of ours — note, off, alloff, cutoff, res, gain` };

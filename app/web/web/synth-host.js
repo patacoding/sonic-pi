@@ -98,6 +98,13 @@ export function createSynthHost({ say = null, problem = null, section = null } =
       }
       if (d.command === "off") { synth.noteOff(d.note, { when: delay() }); if (d.verbose) text(`off ${d.note}`); return; }
       if (d.command === "alloff") { synth.allNotesOff({ when: delay() }); if (d.verbose) text("all notes off"); return; }
+      if (d.command === "use") {
+        // the music names a synthdef; the URL is resolved HERE, from the page's own setting
+        synthdefPane.loadDef(d.synth, { play: false }).then((did) => {
+          if (d.verbose) text(did ? `:${d.synth} is ready` : `could not prepare :${d.synth}`);
+        });
+        return;
+      }
       synth.set(d.param === "cutoff" ? { filter: { cutoff: d.value } }
               : d.param === "res" ? { filter: { q: d.value } }
               : { gain: d.value });

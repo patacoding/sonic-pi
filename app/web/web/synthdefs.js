@@ -76,6 +76,8 @@ export function createSynthdefs({ pane, onSay = null, onProblem = null } = {}) {
     compile: (...a) => pane.compile(...a),
     loadDef: (...a) => pane.loadDef(...a),
     refresh: () => pane.refresh(),
+    knownNames: () => pane.knownNames(),
+    autoLoadKnown: () => pane.autoLoadKnown(),
     pane,
     get state() { return pane.state; },
   };

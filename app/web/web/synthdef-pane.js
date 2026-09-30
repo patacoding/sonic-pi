@@ -20,7 +20,7 @@ const ACTIVE_KEY = "sp-synthdef-active";
 const URL_KEY = "sp-synthdef-url";
 const STYLE_ID = "gfx-synthdef-style";
 /** Bump when the pane changes shape: it is printed in the pane and in the Log, so a cached page is obvious. */
-export const PANE_VERSION = "synthdef-pane 2026-09-30f";
+export const PANE_VERSION = "synthdef-pane 2026-09-30g";
 
 export const SYNTHDEF_PANE = "gfx-synthdef";
 
@@ -32,7 +32,7 @@ SynthDef(\\spfm, { |out = 0, note = 60, amp = 0.3, ratio = 2, index = 3, cutoff 
     var mod  = SinOsc.ar(freq * ratio, 0, freq * ratio * index);
     var env  = EnvGen.kr(Env.asr(0.01, 1, release), gate, doneAction: 2);
     var sig  = RLPF.ar(SinOsc.ar(freq + mod) * 0.5, cutoff.midicps, 0.4);
-    Out.ar(out, Pan2.ar(sig * env * amp, 0));
+    Out.ar(out_bus, Pan2.ar(sig * env * amp, 0));
 }).add;
 `;
 
@@ -189,6 +189,29 @@ export function createSynthdefPane({
     }
   }
 
+  // Every def this browser has compiled, by name: they are loaded for the player when the engine starts, so
+  // that `synth :name` works without a `load_synthdef` line -- and therefore without a URL -- in the music.
+  const KNOWN_KEY = "sp-synthdef-known";
+  let known = [];
+  try { known = JSON.parse(read(KNOWN_KEY, "[]")) || []; } catch { known = []; }
+  const remember = (name) => { if (name && !known.includes(name)) { known.push(name); write(KNOWN_KEY, JSON.stringify(known)); } };
+  const knownNames = () => [...known];
+
+  /**
+   * Load every remembered def, silently, as soon as there is a session. Registration persists for the page's
+   * lifetime, so doing this once means the music only ever has to say `synth :name`.
+   */
+  async function autoLoadKnown() {
+    for (let waited = 0; !sessionOf()?.run && waited < 120000; waited += 1000) {
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    if (!sessionOf()?.run) return false;
+    const names = knownNames();
+    if (!names.length) return false;
+    for (const name of names) await loadDef(name, { play: false });
+    return true;
+  }
+
   /** `load_synthdef "<url>"`, through the app's own session (the path probe-browser measures). */
   async function loadDef(name, { play = false, controls = null } = {}) {
     // The engine is booted by the app's Run button, so a load attempted before that has no session to run in.
@@ -212,6 +235,7 @@ export function createSynthdefPane({
       await s.run(line);
       setNote(`loaded ${name}${play ? " and played a note" : ""}: \`synth :${name}\` works in code run FROM NOW ON ` +
         "(run your music again -- code that already ran does not retroactively know the name)");
+      remember(name);
       say(`loaded ${name}${play ? " and auditioned it" : ""} (its .json beside it gives the Docs page and the knobs)`);
       return true;
     } catch (e) {
@@ -298,7 +322,7 @@ body[data-drawer="${SYNTHDEF_PANE}"] #gfx-synthdef-pane { display: flex; }
       add.title = "a new SynthDef document";
       add.addEventListener("click", () => {
         const id = `d${Date.now().toString(36)}`;
-        state.docs.push({ id, name: `synth${state.docs.length + 1}`, source: "SynthDef(\\new, { |out = 0, note = 60, amp = 0.3, gate = 1|\n    var env = EnvGen.kr(Env.asr(0.01, 1, 0.5), gate, doneAction: 2);\n    Out.ar(out, SinOsc.ar(note.midicps) * env * amp);\n}).add;\n" });
+        state.docs.push({ id, name: `synth${state.docs.length + 1}`, source: "SynthDef(\\new, { |out = 0, note = 60, amp = 0.3, gate = 1|\n    var env = EnvGen.kr(Env.asr(0.01, 1, 0.5), gate, doneAction: 2);\n    Out.ar(out_bus, SinOsc.ar(note.midicps) * env * amp);\n}).add;\n" });
         state.activeId = id;
         saveDocs(); paint();
         if (codeEl) { codeEl.value = active().source; syncHighlight(); codeEl.focus(); }
@@ -328,12 +352,12 @@ body[data-drawer="${SYNTHDEF_PANE}"] #gfx-synthdef-pane { display: flex; }
     copyLine.title = "puts `load_synthdef \"<url>\"` on the clipboard: at the top of your music it makes the name exist whatever order things run in";
     copyLine.addEventListener("click", async () => {
       const name = state.defs[0]?.name ?? active().name;
-      const line = `load_synthdef \"${api(`/defs/${name}.scsyndef`)}\"`;
+      const line = `puts :synth, :use, :${name}      # the page resolves this to the service: no URL in your music`;
       try {
         await navigator.clipboard?.writeText(line);
-        setNote(`copied to the clipboard: ${line}\nPut it at the TOP of your music before you use :${name}`);
+        setNote(`copied: ${line}\n(or just play it -- every def this browser compiled is loaded for you when the engine starts)`);
       } catch {
-        setNote(`this line makes the name available, whatever ran before:\n${line}`, false);
+        setNote(`the music only needs the name:\n${line}`, false);
       }
     });
     const copyRuby = el("button", "gfx-ed-btn", "copy play code");
@@ -427,7 +451,7 @@ body[data-drawer="${SYNTHDEF_PANE}"] #gfx-synthdef-pane { display: flex; }
     }
     paint();
     syncHighlight();
-    queueMicrotask(() => refresh());
+    queueMicrotask(() => { refresh(); autoLoadKnown(); });
   }
 
   // ── built NOW, not on first open ────────────────────────────────────────────────────────────────────────
@@ -488,6 +512,7 @@ body[data-drawer="${SYNTHDEF_PANE}"] #gfx-synthdef-pane { display: flex; }
   return {
     open, close, toggle, isOpen,
     compile, loadDef, refresh,
+    knownNames, autoLoadKnown,
     get state() { return { ...state, status: [state.note, state.library].filter(Boolean).join("\n") }; },
     get active() { return { ...active() }; },
     get documents() { return state.docs.map((d) => ({ ...d })); },
