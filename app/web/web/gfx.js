@@ -370,6 +370,7 @@ function install() {
 
   const sections = () => [
     synthHost.host.panelSection(),
+    synthHost.host.synthdefSection(),
     {
       id: "interface",
       title: "Interface",
