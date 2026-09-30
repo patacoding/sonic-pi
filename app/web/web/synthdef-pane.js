@@ -19,6 +19,8 @@ const DOCS_KEY = "sp-synthdef-docs";
 const ACTIVE_KEY = "sp-synthdef-active";
 const URL_KEY = "sp-synthdef-url";
 const STYLE_ID = "gfx-synthdef-style";
+/** Bump when the pane changes shape: it is printed in the pane and in the Log, so a cached page is obvious. */
+export const PANE_VERSION = "synthdef-pane 2026-09-30b";
 
 export const SYNTHDEF_PANE = "gfx-synthdef";
 
@@ -72,7 +74,7 @@ export function createSynthdefPane({
   service = SERVICE_DEFAULT, session = null, onSay = null, onProblem = null,
   store = globalThis.localStorage ?? null, fetchImpl = globalThis.fetch?.bind(globalThis) ?? null,
 } = {}) {
-  const say = (t) => (onSay ? onSay(t) : console.info(`Synth — ${t}`));
+  const say = (t) => { console.info(`Synth — ${t}`); if (onSay) onSay(t); };
   const problem = (t) => (onProblem ? onProblem(t) : console.warn(t));
   const read = (k, d) => { try { return store?.getItem(k) ?? d; } catch { return d; } };
   const write = (k, v) => { try { store?.setItem(k, v); } catch { /* private mode */ } };
@@ -101,7 +103,10 @@ export function createSynthdefPane({
 
   const sessionOf = () => session ?? globalThis.sonicPi?.session ?? null;
   const api = (p) => `${state.url}${p}`;
-  const setNote = (t, bad = false) => { state.note = t; state.bad = bad; paint(); changed(); };
+  const setNote = (t, bad = false) => {
+    state.note = t; state.bad = bad; paint(); changed();
+    if (t && bad) problem(`the SynthDef editor: ${t}`);      // a failure also reaches the app's Log
+  };
   const setLibrary = (t, bad = false) => { state.library = t; state.bad = bad; paint(); changed(); };
 
   /** A short note to play after a compile, built ONLY from controls the def has (Sonic Pi validates them). */
@@ -213,6 +218,8 @@ export function createSynthdefPane({
     style.textContent = `
 body[data-drawer="${SYNTHDEF_PANE}"] #main { grid-template-rows: minmax(80px, 1fr) 6px var(--drawer-size); }
 body[data-drawer="${SYNTHDEF_PANE}"] #drawer { display: flex; }
+#gfx-synthdef-pane.sd-floating { position: fixed; left: 0; right: 0; bottom: 0; height: 46vh; z-index: 98;
+  border-top: 1px solid var(--WindowBorder); box-shadow: 0 -8px 30px rgb(0 0 0 / 35%); }
 #gfx-synthdef-pane { display: none; flex: 1; min-width: 0; min-height: 0; flex-direction: column;
   background: var(--PaneBackground); color: var(--WindowForeground); }
 body[data-drawer="${SYNTHDEF_PANE}"] #gfx-synthdef-pane { display: flex; }
@@ -233,7 +240,10 @@ body[data-drawer="${SYNTHDEF_PANE}"] #gfx-synthdef-pane { display: flex; }
 .sd-def { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
 .sd-def span { flex: 1; min-width: 0; font: var(--t-tiny, 11px) var(--code-font); overflow: hidden; text-overflow: ellipsis; }
 .sd-defstatus { font: var(--t-tiny, 11px)/1.5 var(--code-font); white-space: pre-wrap; margin-bottom: 8px; }
-.sd-defstatus.bad { color: var(--ErrorBackground); }`;
+.sd-defstatus.bad { color: var(--ErrorBackground); }
+.sd-statusrow { flex-shrink: 0; padding: 4px 10px 6px; border-bottom: 1px solid var(--WindowBorder); }
+.sd-statusrow .sd-note { white-space: pre-wrap; }
+.sd-statusrow .sd-note.bad { color: var(--ErrorBackground); }`;
     document.head.appendChild(style);
   }
 
@@ -295,6 +305,7 @@ body[data-drawer="${SYNTHDEF_PANE}"] #gfx-synthdef-pane { display: flex; }
 
     const head = el("div", "gfx-ed-head");
     head.appendChild(el("strong", "", "SynthDefs"));
+    head.appendChild(el("span", "gfx-ed-say", PANE_VERSION));
     const compilePlay = el("button", "gfx-ed-btn primary", "compile & play");
     compilePlay.title = "compile the active document, load it, and play a note (Ctrl/Cmd+Enter)";
     compilePlay.addEventListener("click", () => compile(null, { play: true }));
@@ -308,9 +319,13 @@ body[data-drawer="${SYNTHDEF_PANE}"] #gfx-synthdef-pane { display: flex; }
       loadDef(name, { play: true, controls: state.defs.find((d) => d.name === name)?.controls });
     });
     head.append(compilePlay, compileOnly, reload, el("span", "gfx-ed-spacer"));
-    noteEl = el("div", "gfx-ed-say");
-    head.appendChild(noteEl);
     pane.appendChild(head);
+    // the status gets a row of its own (a small line in the header was easy to miss, and a compile that fails
+    // silently is the worst thing an editor can do)
+    const statusRow = el("div", "sd-statusrow");
+    noteEl = el("div", "gfx-ed-say sd-note");
+    statusRow.appendChild(noteEl);
+    pane.appendChild(statusRow);
 
     docsEl = el("div", "gfx-ed-docs");
     pane.appendChild(docsEl);
@@ -339,9 +354,8 @@ body[data-drawer="${SYNTHDEF_PANE}"] #gfx-synthdef-pane { display: flex; }
     body.appendChild(wrap);
 
     const side = el("div", "gfx-ed-side");
-    const st = el("div", "sd-defstatus"); noteEl = noteEl;           // the pane's own status lives in the head
-    st.textContent = "";
     side.appendChild(el("div", "gfx-ed-note", "The service compiles SuperCollider into a def the engine loads. `synth :name` then works in your music."));
+    const st = el("div", "sd-defstatus");
     libEl = st;
     side.appendChild(st);
     side.appendChild(el("div", "gfx-ed-note", "Compiled defs"));
@@ -355,9 +369,13 @@ body[data-drawer="${SYNTHDEF_PANE}"] #gfx-synthdef-pane { display: flex; }
 
     const rail = document.getElementById("drawer-rail");
     if (rail) {
-      railButton = el("button", "drawer-button");
+      // NO class: the app styles `#drawer-rail > button` by element, so an extra class makes the button match
+      // nothing and it lays out at 0x0 -- in the DOM, invisible, unclickable. (The shader pane's button has no
+      // class either; that is the whole trick.)
+      railButton = document.createElement("button");
       railButton.dataset.drawer = SYNTHDEF_PANE;
       railButton.title = "SynthDefs — write SuperCollider and hear it";
+      railButton.setAttribute("aria-label", "SynthDefs");
       railButton.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">` +
         `<path fill="none" stroke="currentColor" stroke-width="2" d="M2 14c2.5 0 2.5-8 5-8s2.5 12 5 12 2.5-8 5-8 2.5 4 5 4"/></svg>`;
       railButton.addEventListener("click", () => toggle());
@@ -368,9 +386,34 @@ body[data-drawer="${SYNTHDEF_PANE}"] #gfx-synthdef-pane { display: flex; }
     queueMicrotask(() => refresh());
   }
 
-  const isOpen = () => document.body?.dataset.drawer === SYNTHDEF_PANE;
+  // ── built NOW, not on first open ────────────────────────────────────────────────────────────────────────
+  // A pane whose rail button is created by opening it can never be opened: the rail button is the way in.
+  // (Measured: `#drawer-rail [data-drawer="gfx-synthdef"]` was absent, so the editor was unreachable by mouse
+  // -- while an API call to open() built it and "passed" every probe that did not click.)
+  build();
+  if (railButton && !document.getElementById(`sd-rail-${SYNTHDEF_PANE}`)) {
+    railButton.id = `sd-rail-${SYNTHDEF_PANE}`;
+    railButton.dataset.drawer = SYNTHDEF_PANE;
+  }
+  // the app builds its drawer early, but if the rail is not there yet, take the first chance to appear in it
+  if (!railButton?.isConnected) {
+    const attach = () => {
+      const rail = document.getElementById("drawer-rail");
+      if (rail && railButton && !railButton.isConnected) rail.appendChild(railButton);
+    };
+    attach();
+    document.addEventListener("DOMContentLoaded", attach, { once: true });
+    setTimeout(attach, 1000);
+  }
+
+  const isOpen = () => document.body?.dataset.drawer === SYNTHDEF_PANE || pane?.classList.contains("sd-floating");
   function open() {
     if (!pane) build();
+    // the app's drawer is the intended home, but it can be collapsed or absent -- and an editor nobody can
+    // see is worse than an editor in the wrong place, so fall back to a floating pane that always shows
+    const drawer = document.getElementById("drawer") ?? document.getElementById("drawer-panes");
+    const usable = !!drawer && !!document.getElementById("drawer-panes");
+    if (!usable) { pane.classList.add("sd-floating"); pane.style.display = "flex"; }
     document.body.dataset.drawer = SYNTHDEF_PANE;
     for (const b of document.querySelectorAll("#drawer-rail [data-drawer]")) b.classList.toggle("on", b.dataset.drawer === SYNTHDEF_PANE);
     codeEl?.focus();
@@ -378,12 +421,25 @@ body[data-drawer="${SYNTHDEF_PANE}"] #gfx-synthdef-pane { display: flex; }
   }
   function close() {
     if (!isOpen()) return false;
+    if (pane?.classList.contains("sd-floating")) { pane.classList.remove("sd-floating"); pane.style.display = "none"; }
     document.body.dataset.drawer = "";
     document.body.classList.remove("panel-open");
     for (const b of document.querySelectorAll("#drawer-rail [data-drawer]")) b.classList.toggle("on", false);
     return true;
   }
   const toggle = () => (isOpen() ? close() : open());
+
+  // the shortcut is the way in that cannot be hidden by a layout: Ctrl/Cmd+Alt+D
+  if (!globalThis.__sdPaneKey) {
+    globalThis.__sdPaneKey = true;
+    document.addEventListener("keydown", (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.altKey && (e.key === "d" || e.key === "D")) {
+        e.preventDefault();
+        e.stopPropagation();
+        toggle();
+      }
+    }, true);
+  }
 
   return {
     open, close, toggle, isOpen,
