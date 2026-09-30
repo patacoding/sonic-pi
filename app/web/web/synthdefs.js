@@ -75,6 +75,21 @@ export function createSynthdefs({
   let listBox = null, statusBox = null, sourceBox = null;
 
   const sessionOf = () => session ?? globalThis.sonicPi?.session ?? null;
+
+  /**
+   * A short note to play after a compile, built ONLY from controls the def actually has (Sonic Pi validates
+   * what you pass, and a def without `gate` has no `sustain`). The point is that compiling and hearing the
+   * result is one action -- otherwise every iteration ends with writing Ruby by hand.
+   */
+  function auditionLine(name, controls = []) {
+    const has = (c) => controls.includes(c);
+    const opts = [];
+    if (has("note")) opts.push("note: 60");
+    if (has("amp")) opts.push("amp: 0.6");
+    if (has("gate")) opts.push("sustain: 1.5");
+    if (has("release")) opts.push("release: 0.4");
+    return `synth :${name}${opts.length ? `, ${opts.join(", ")}` : ""}\nsleep 3\n`;
+  }
   const api = (p) => `${state.url}${p}`;
 
   function paint() {
@@ -89,7 +104,7 @@ export function createSynthdefs({
         const row = el("div", "sd-def");
         row.appendChild(el("span", "", `${d.name}${d.controls?.length ? ` — ${d.controls.length} controls` : ""}`));
         const load = el("button", "sp-mini-btn", "load");
-        load.addEventListener("click", () => loadDef(d.name));
+        load.addEventListener("click", () => loadDef(d.name, { play: true, controls: d.controls }));
         row.appendChild(load);
         listBox.appendChild(row);
       }
@@ -120,7 +135,7 @@ export function createSynthdefs({
   }
 
   /** One compile: POST, then poll the job the plain-HTTP way. The service caches by source hash. */
-  async function compile(code = null) {
+  async function compile(code = null, { play = true } = {}) {
     const src = code ?? sourceBox?.value ?? state.source;
     if (!src.trim()) { setStatus("nothing to compile: write a SynthDef first", true); return null; }
     state.source = src;
@@ -165,8 +180,8 @@ export function createSynthdefs({
         `${job.defs?.[0]?.bytes ? ` — ${job.defs[0].bytes} B` : ""}`, false);
       say(`compiled ${names.join(", ")}${job.cached ? " (from the cache)" : ""}`);
       await refresh();
-      for (const d of job.defs ?? []) if (d.url) await loadDef(d.name);   // in order, and awaited: the
-      // status must end up saying what actually happened, and a failure to load must not be silent
+      for (const d of job.defs ?? []) if (d.url) await loadDef(d.name, { play, controls: d.controls });  // in
+      // order and awaited: the status must end up saying what actually happened, and a failure is not silent
       return job;
     } catch (e) {
       setStatus(`the service is not reachable at ${state.url} (${e.message ?? e})`, true);
@@ -177,7 +192,7 @@ export function createSynthdefs({
   }
 
   /** `load_synthdef "<url>"`, run through the app's own session -- the path the probes verified end to end. */
-  async function loadDef(name) {
+  async function loadDef(name, { play = false, controls = null } = {}) {
     const s = sessionOf();
     if (!s?.run) {
       // say it WHERE THE PLAYER IS LOOKING (the row above the list), not only in the Log
@@ -186,9 +201,11 @@ export function createSynthdefs({
       return false;
     }
     try {
-      await s.run(`load_synthdef "${api(`/defs/${name}.scsyndef`)}"\nsleep 0.25\n`);
-      setStatus(`loaded ${name}: it is registered, so \`synth :${name}\` works now`, false);
-      say(`loaded ${name} (its .json beside it gives the Docs page and the knobs)`);
+      const known = controls ?? state.defs.find((d) => d.name === name)?.controls ?? [];
+      const line = `load_synthdef "${api(`/defs/${name}.scsyndef`)}"\nsleep 0.25\n` + (play ? auditionLine(name, known) : "");
+      await s.run(line);
+      setStatus(`loaded ${name}${play ? " and played a note" : ""}: it is registered, so \`synth :${name}\` works now`, false);
+      say(`loaded ${name}${play ? " and auditioned it" : ""} (its .json beside it gives the Docs page and the knobs)`);
       return true;
     } catch (e) {
       setStatus(`could not load ${name}: ${e.message ?? e}`, true);
@@ -211,9 +228,11 @@ export function createSynthdefs({
     const head = el("div", "sd-row");
     const refreshBtn = el("button", "sp-mini-btn", "refresh the library");
     refreshBtn.addEventListener("click", () => refresh());
-    const compileBtn = el("button", "sp-mini-btn", "compile");
-    compileBtn.addEventListener("click", () => compile());
-    head.append(compileBtn, refreshBtn);
+    const compilePlayBtn = el("button", "sp-mini-btn", "compile & play");
+    compilePlayBtn.addEventListener("click", () => compile(null, { play: true }));
+    const compileBtn = el("button", "sp-mini-btn", "compile only");
+    compileBtn.addEventListener("click", () => compile(null, { play: false }));
+    head.append(compilePlayBtn, compileBtn, refreshBtn);
     rows.push(head);
 
     sourceBox = el("textarea", "sd-source");
@@ -221,7 +240,7 @@ export function createSynthdefs({
     sourceBox.spellcheck = false;
     sourceBox.addEventListener("input", () => { state.source = sourceBox.value; write("sp-synthdef-source", state.source); });
     sourceBox.addEventListener("keydown", (e) => {                     // Ctrl/Cmd+Enter compiles, as in an IDE
-      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); e.stopPropagation(); compile(); }
+      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); e.stopPropagation(); compile(null, { play: true }); }
       e.stopPropagation();                                             // the app's shortcuts are not for this box
     });
     rows.push(sourceBox);
@@ -233,7 +252,8 @@ export function createSynthdefs({
     listBox = list;
     rows.push(list);
 
-    rows.push(el("div", "sd-status", `service: ${state.url}  (compile → load → ` + "`synth :name` in your code)"));
+    rows.push(el("div", "sd-status",
+      `service: ${state.url}   Ctrl/Cmd+Enter = compile & play; then play it from your code: synth :name`));
     const wrap = el("div", "sd-panel");
     wrap.append(...rows);
     paint();
