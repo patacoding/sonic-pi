@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Our own synthesizer, from the page's side: load the worklet, connect it to the engine's INPUT so Sonic
+// Our own synthesizer, from the page's side (window.sonicPiSynth; the glue is synth-host.js): load the worklet, connect it to the engine's INPUT so Sonic
 // Pi plays it, and expose an API a script or a panel can drive.
 //
 // Where it sits in the audio graph (the contract verified in docs/web-synth-engine.md §5):
 //
-//     gfx-synth-worklet.js  --connect-->  engine.node.input  --read by-->  synth :sound_in_stereo
+//     synth-worklet.js  --connect-->  engine.node.input  --read by-->  synth :sound_in_stereo
 //                                                                              |
 //                                            mix / with_fx / scope / Recorder <
 //
@@ -14,7 +14,7 @@
 //
 // The engine boots lazily (on the first Run), so everything here waits for `window.sonicPi.engine`.
 
-const WORKLET = new URL("gfx-synth-worklet.js", import.meta.url);
+const WORKLET = new URL("synth-worklet.js", import.meta.url);
 
 export const SYNTH_DEFAULTS = Object.freeze({
   gain: 0.25, wave: "saw", detune: 0,
@@ -28,7 +28,7 @@ export const SYNTH_DEFAULTS = Object.freeze({
  * @param {{log?: (text: string) => void, say?: (text: string) => void}} opts
  */
 export function createSynth({ log = null } = {}) {
-  const say = (t) => (log ? log(`Graphics — ${t}`) : console.info(`Graphics — ${t}`));
+  const say = (t) => (log ? log(`Synth — ${t}`) : console.info(`Synth — ${t}`));
   let node = null, ctx = null, loading = null, failed = null;
   const inbox = [];                    // the last few things the processor said (diagnostics)
   const patch = structuredClone(SYNTH_DEFAULTS);
@@ -100,6 +100,72 @@ export function createSynth({ log = null } = {}) {
       return patch;
     },
     get patch() { return patch; },
+    /**
+     * A WAVETABLE the player supplies: a single-cycle .wav (or any audio file, squeezed into one cycle).
+     *
+     * Why it becomes harmonics instead of raw samples: the oscillator's tables are built additively, one
+     * mipmap per bandwidth, so a table given as harmonic amplitudes arrives BAND-LIMITED for free (the
+     * alternative -- shipping raw samples into the worklet -- would need its own anti-aliasing). The
+     * conversion is a DFT of the cycle on this (non-audio) thread: 2048 samples x 512 harmonics.
+     *
+     * @param {File|Blob|Float32Array|AudioBuffer} source
+     * @returns {Promise<{harmonics: Float32Array, samples: number, cycle: number, peak: number}>}
+     */
+    async loadWaveform(source) {
+      const context = ctx ?? engine()?.audioContext ?? engine()?.node?.context;
+      if (!context) throw new Error("the engine is not up yet (press Run once)");
+      let data = null, name = "waveform";
+      if (source instanceof AudioBuffer) data = source.getChannelData(0);
+      else if (source instanceof Float32Array) data = source;
+      else if (source && (source instanceof Blob || source instanceof File)) {
+        name = source.name ?? name;
+        const bytes = await source.arrayBuffer();
+        const buffer = await context.decodeAudioData(bytes.slice(0));
+        data = buffer.getChannelData(0);
+      } else throw new Error("loadWaveform wants a File, a Blob, an AudioBuffer or a Float32Array");
+      if (!data || !data.length) throw new Error(`${name}: no samples in it`);
+
+      // One cycle, 2048 samples: a single-cycle file is used as it is; anything longer is squeezed into one
+      // cycle (a wavetable is periodic by definition -- a proper period search is a later refinement).
+      const CYCLE = 2048;
+      let cycle = new Float32Array(CYCLE);
+      let peak = 0;
+      for (let i = 0; i < CYCLE; i++) {
+        const x = (i / CYCLE) * data.length;
+        const i0 = Math.floor(x), frac = x - i0;
+        const a = data[i0 % data.length], b = data[(i0 + 1) % data.length];
+        const v = a + (b - a) * frac;
+        cycle[i] = v;
+        if (Math.abs(v) > peak) peak = Math.abs(v);
+      }
+      if (peak > 0) for (let i = 0; i < CYCLE; i++) cycle[i] /= peak;
+
+      // the harmonic amplitudes: a straight DFT, up to Nyquist/2 of the table (512 harmonics is plenty)
+      const HARMONICS = 512;
+      const harmonics = new Float32Array(HARMONICS);
+      const cos = new Float32Array(HARMONICS + 1), sin = new Float32Array(HARMONICS + 1);
+      for (let h = 1; h <= HARMONICS; h++) {
+        const w = (2 * Math.PI * h) / CYCLE;
+        cos[h] = Math.cos(w); sin[h] = Math.sin(w);
+      }
+      for (let h = 1; h <= HARMONICS; h++) {
+        // Goertzel-style accumulation, one harmonic at a time (no complex bookkeeping)
+        let re = 0, im = 0;
+        let c = 1, s2 = 0;                       // cos(h*w*i), sin(h*w*i) by rotation
+        for (let i = 0; i < CYCLE; i++) {
+          re += cycle[i] * c;
+          im += cycle[i] * s2;
+          const nc = c * cos[h] - s2 * sin[h];
+          s2 = c * sin[h] + s2 * cos[h];
+          c = nc;
+        }
+        harmonics[h - 1] = (2 * Math.sqrt(re * re + im * im)) / CYCLE;
+      }
+      this.loadHarmonics(harmonics);
+      say(`wavetable "${name}": ${data.length} samples -> one cycle of ${CYCLE}, ${HARMONICS} harmonics`);
+      return { harmonics, samples: data.length, cycle: CYCLE, peak };
+    },
+
     /** A wavetable, as harmonic amplitudes (additive: this is what the oscillator reads). */
     loadHarmonics(list) {
       if (!Array.isArray(list) && !(list instanceof Float32Array)) return false;

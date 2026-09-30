@@ -41,8 +41,7 @@ import { createPanel } from "./gfx-ui.js";
 import { createShaderPane, resolveDocument } from "./gfx-editor.js";
 import { emptyDocument } from "./gfx-document.js";
 import { testCardDocument, TEST_CARD } from "./gfx-testcard.js";
-import { createSynth } from "./gfx-synth.js";
-import { createTap } from "./gfx-tap.js";
+import { createSynthHost, isSynthOrder } from "./synth-host.js";
 
 const STYLE_ID = "gfx-style";
 const ALPHA_KEY = "sp-gfx-ui-alpha";
@@ -363,7 +362,14 @@ function install() {
   // Every feature we add gets a section here and draws nothing of its own: see gfx-ui.js. The spec is
   // rebuilt rather than mutated, so a value that changes (the uniform list, once the shader links) is
   // just the next rebuild.
+  // Our own synthesizer lives in its own namespace (synth-host.js + synth.js + synth-worklet.js) and
+  // publishes itself as `window.sonicPiSynth`. This layer only hands it the records it owns and its own
+  // section of the panel -- nothing about the synth itself is written here.
+  const synthHost = createSynthHost({ say: (t) => say(t), problem: (t) => problem(t) });
+  window.sonicPiSynth = synthHost;
+
   const sections = () => [
+    synthHost.host.panelSection(),
     {
       id: "interface",
       title: "Interface",
@@ -805,47 +811,17 @@ function install() {
     if (!pane.switchTo(target.name)) problem(`could not switch to "${target.name}"`);
   }
 
-  /**
-   * Our own synthesizer, played from the music: `puts :synth, :note, 69`. The record's `time` is in the engine
-   * clock's seconds, so `time - clockNow()` is the delay until that instant -- the same instant the line's
-   * other sounds land on. A note also gets its release scheduled (`hold`), so nothing is left hanging.
-   */
-  function synthCommand(d, r) {
-    const at = () => {
-      const now = window.sonicPi?.session?.clockNow?.();
-      return typeof now === "number" && typeof r?.time === "number" ? Math.max(0, r.time - now) : 0;
-    };
-    synth.ensure().then(() => {
-      if (d.command === "note") {
-        const delay = at();
-        synth.noteOn(d.note, { velocity: d.velocity, when: delay });
-        synth.noteOff(d.note, { when: delay + d.hold });
-        if (d.verbose) say(`Graphics — note ${d.note} (velocity ${d.velocity}, held ${d.hold}s)`);
-        return;
-      }
-      if (d.command === "off") { synth.noteOff(d.note, { when: at() }); return; }
-      if (d.command === "alloff") { synth.allNotesOff({ when: at() }); return; }
-      synth.set({ filter: d.param === "cutoff" ? { cutoff: d.value } : d.param === "res" ? { q: d.value } : undefined,
-                  gain: d.param === "gain" ? d.value : undefined });
-      if (d.verbose) say(`Graphics — ${d.param} = ${d.value}`);
-    }).catch((e) => problem(`the synth could not be played: ${e.message}`));
-  }
-
   /** One record, from the hook. Only `output` can carry a directive. */
   function record(r, appLog) {
     if (appLog) {
       log = appLog;
       while (unsaid.length) log(unsaid.shift());    // what was said while there was no Log, in order
     }
+    // `puts :synth, …` is the synthesizer's language, not ours (synth-directive.js)
+    if (synthHost.host.handleRecord(r)) return;
     const d = parseDirective(r?.text);
     if (!d) return;                                            // the player's own output: theirs
     if (!d.ok) return problem(d.error);
-    // the music playing OUR synthesizer (gfx-synth.js): the note lands on the record's own instant, which is
-    // the instant the same line's `synth`/`sample` lands on (measured to 1.5 ms, docs/web-synth-engine.md §7)
-    if (d.command === "note" || d.command === "off" || d.command === "alloff" || d.command === "param") {
-      synthCommand(d, r);
-      return;
-    }
     // an order rather than a value for a name the shader declared
     if (d.command === "document") {
       documentDirective(d.arg);
@@ -854,7 +830,12 @@ function install() {
     }
     if (!canvas) return;                                       // the shader never compiled; the problem is already said
     const result = canvas.set(d.name, d.values);
-    if (!result.ok) return problem(result.error);
+    if (!result.ok) {
+      // `puts :gfx, :note, 69`: that name belongs to the synthesizer, and saying so beats "the shader
+      // declares no uniform called note"
+      if (isSynthOrder(d.name)) return problem(`${d.name} is an order for the synthesizer: say :synth, :${d.name} (the :gfx sigil is for the shader's own values)`);
+      return problem(result.error);
+    }
     if (d.verbose) say(`Graphics — ${d.name} = ${d.values.join(" ")} (${d.shape})`);
   }
 
@@ -866,16 +847,8 @@ function install() {
     if (attachAudio(engine)) clearInterval(watch);
   }, 500);
 
-  // Our own synthesizer (gfx-synth.js + gfx-synth-worklet.js): its own DSP, sounding THROUGH the engine
-  // by feeding the engine's input, so `with_fx`, the scope and the Recorder all apply.
-  const synth = createSynth({ log: (text) => say(text) });
-  // a lossless recording of the engine's output, for measuring rather than listening (gfx-tap.js)
-  const tap = createTap({ log: (text) => say(text) });
-
   window.sonicPiGfx = {
     record,
-    synth,
-    tap,
     canvas: null,
     /**
      * Has the layer finished starting? The starter below runs DETACHED, and a throw in it used to leave

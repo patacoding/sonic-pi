@@ -7,11 +7,11 @@
 //
 // It is a pass-through node, kept alive by a zero-gain path to the speakers: nothing is added to the sound.
 
-const TAP_WORKLET = new URL("gfx-tap-worklet.js", import.meta.url);
+const TAP_WORKLET = new URL("synth-tap-worklet.js", import.meta.url);
 const SECONDS = 8;                       // enough for a few bars of measurement
 
 export function createTap({ log = null } = {}) {
-  const say = (t) => (log ? log(`Graphics — ${t}`) : console.info(`Graphics — ${t}`));
+  const say = (t) => (log ? log(`Synth — ${t}`) : console.info(`Synth — ${t}`));
   let node = null, ctx = null, sab = null, header = null, data = null, sink = null, loading = null, failed = null;
 
   const engine = () => globalThis.sonicPi?.engine ?? null;
