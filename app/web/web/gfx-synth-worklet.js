@@ -173,22 +173,11 @@ class GfxSynth extends AudioWorkletProcessor {
       if (!v.active) continue;
       // frequency (with portamento off: set at note-on; detune is a patch value)
       v.freq = v.freqTarget * gTarget;
-      // envelopes: linear segments, cheap and predictable
-      let ampCoef, modCoef;
-      const step = 1 / sr;
-      switch (v.ampStage) {
-        case "a": v.amp += step / Math.max(0.0005, amp.a); if (v.amp >= 1) { v.amp = 1; v.ampStage = "d"; } break;
-        case "d": v.amp -= step / Math.max(0.0005, amp.d) * (1 - amp.s); if (v.amp <= amp.s) { v.amp = amp.s; v.ampStage = "s"; } break;
-        case "s": v.amp = amp.s; break;
-        case "r": v.amp -= step / Math.max(0.0005, amp.r) * Math.max(0.0001, amp.s); if (v.amp <= 0) { v.amp = 0; v.active = false; } break;
-      }
-      switch (v.modStage) {
-        case "a": v.mod += step / Math.max(0.0005, mod.a); if (v.mod >= 1) { v.mod = 1; v.modStage = "d"; } break;
-        case "d": v.mod -= step / Math.max(0.0005, mod.d) * (1 - mod.s); if (v.mod <= mod.s) { v.mod = mod.s; v.modStage = "s"; } break;
-        case "s": v.mod = mod.s; break;
-        case "r": v.mod -= step / Math.max(0.0005, mod.r) * Math.max(0.0001, mod.s); if (v.mod <= 0) { v.mod = 0; v.modStage = "idle"; } break;
-      }
-      if (!v.active) continue;
+      // the envelopes (amp + mod) are advanced INSIDE the sample loop below: their increments are
+      // per-sample, and running them once per block made every stage 128x too long (a 0.1 s release took
+      // 12.8 s, which is what made `noteOff` look broken). The FILTER coefficients stay per block, using
+      // the modulation envelope's value at the start of the block: recomputing `tan()` per sample per voice
+      // would cost more than the block-rate stepping is worth.
 
       // the mipmap level a band-limited table for this frequency needs
       const harmonicsWanted = Math.max(1, Math.floor(sr / (2 * Math.max(1, v.freq))));
@@ -209,7 +198,22 @@ class GfxSynth extends AudioWorkletProcessor {
       const inc = v.freq / sr;
       const pitchMod = Math.pow(2, (lfo.pitch || 0) * lfoValue);
       const ampMod = 1 + (lfo.amp || 0) * lfoValue;
+      const step = 1 / sr;
       for (let i = 0; i < n; i++) {
+        // envelopes, per sample (linear segments: cheap and predictable)
+        switch (v.ampStage) {
+          case "a": v.amp += step / Math.max(0.0005, amp.a); if (v.amp >= 1) { v.amp = 1; v.ampStage = "d"; } break;
+          case "d": v.amp -= step / Math.max(0.0005, amp.d) * (1 - amp.s); if (v.amp <= amp.s) { v.amp = amp.s; v.ampStage = "s"; } break;
+          case "s": v.amp = amp.s; break;
+          case "r": v.amp -= step / Math.max(0.0005, amp.r) * Math.max(0.0001, amp.s); if (v.amp <= 0) { v.amp = 0; v.active = false; } break;
+        }
+        switch (v.modStage) {
+          case "a": v.mod += step / Math.max(0.0005, mod.a); if (v.mod >= 1) { v.mod = 1; v.modStage = "d"; } break;
+          case "d": v.mod -= step / Math.max(0.0005, mod.d) * (1 - mod.s); if (v.mod <= mod.s) { v.mod = mod.s; v.modStage = "s"; } break;
+          case "s": v.mod = mod.s; break;
+          case "r": v.mod -= step / Math.max(0.0005, mod.r) * Math.max(0.0001, mod.s); if (v.mod <= 0) { v.mod = 0; v.modStage = "idle"; } break;
+        }
+        if (!v.active) break;                       // the release finished mid-block: nothing more to add
         // wavetable read, linear interpolation, pitch modulation per sample
         v.phase += inc * pitchMod;
         if (v.phase >= 1) v.phase -= Math.floor(v.phase);
