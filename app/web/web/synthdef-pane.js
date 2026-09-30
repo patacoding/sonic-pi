@@ -20,7 +20,7 @@ const ACTIVE_KEY = "sp-synthdef-active";
 const URL_KEY = "sp-synthdef-url";
 const STYLE_ID = "gfx-synthdef-style";
 /** Bump when the pane changes shape: it is printed in the pane and in the Log, so a cached page is obvious. */
-export const PANE_VERSION = "synthdef-pane 2026-09-30c";
+export const PANE_VERSION = "synthdef-pane 2026-09-30e";
 
 export const SYNTHDEF_PANE = "gfx-synthdef";
 
@@ -191,10 +191,19 @@ export function createSynthdefPane({
 
   /** `load_synthdef "<url>"`, through the app's own session (the path probe-browser measures). */
   async function loadDef(name, { play = false, controls = null } = {}) {
-    const s = sessionOf();
+    // The engine is booted by the app's Run button, so a load attempted before that has no session to run in.
+    // It used to fail there and leave the player with "There's no synth called :name" later -- the load simply
+    // never happened. Now it WAITS for the engine (up to a minute) and lands as soon as there is one, which is
+    // what pressing compile & play and then Run should do.
+    let s = sessionOf();
+    for (let waited = 0; !s?.run && waited < 60000; waited += 500) {
+      setNote(`waiting for the engine: press Run once and ${name} will be loaded by itself` +
+        (waited ? ` (${Math.round(waited / 1000)}s)` : ""));
+      await new Promise((r) => setTimeout(r, 500));
+      s = sessionOf();
+    }
     if (!s?.run) {
-      setNote(`cannot load ${name}: the session is not available yet -- press Run once, then load again`, true);
-      problem(`cannot load ${name}: the session is not available (press Run once)`);
+      setNote(`cannot load ${name}: the engine was never started -- press Run, then compile & play again`, true);
       return false;
     }
     try {
@@ -315,6 +324,18 @@ body[data-drawer="${SYNTHDEF_PANE}"] #gfx-synthdef-pane { display: flex; }
     compilePlay.addEventListener("click", () => compile(null, { play: true }));
     const compileOnly = el("button", "gfx-ed-btn", "compile");
     compileOnly.addEventListener("click", () => compile(null, { play: false }));
+    const copyLine = el("button", "gfx-ed-btn", "copy the load line");
+    copyLine.title = "puts `load_synthdef \"<url>\"` on the clipboard: at the top of your music it makes the name exist whatever order things run in";
+    copyLine.addEventListener("click", async () => {
+      const name = state.defs[0]?.name ?? active().name;
+      const line = `load_synthdef \"${api(`/defs/${name}.scsyndef`)}\"`;
+      try {
+        await navigator.clipboard?.writeText(line);
+        setNote(`copied to the clipboard: ${line}\nPut it at the TOP of your music before you use :${name}`);
+      } catch {
+        setNote(`this line makes the name available, whatever ran before:\n${line}`, false);
+      }
+    });
     const reload = el("button", "gfx-ed-btn", "reload");
     reload.title = "load the active document without compiling (it must have been compiled before)";
     reload.addEventListener("click", () => {
@@ -322,7 +343,7 @@ body[data-drawer="${SYNTHDEF_PANE}"] #gfx-synthdef-pane { display: flex; }
       const name = state.defs[0]?.name ?? active().name;
       loadDef(name, { play: true, controls: state.defs.find((d) => d.name === name)?.controls });
     });
-    head.append(compilePlay, compileOnly, reload, el("span", "gfx-ed-spacer"));
+    head.append(compilePlay, compileOnly, copyLine, reload, el("span", "gfx-ed-spacer"));
     pane.appendChild(head);
     // the status gets a row of its own (a small line in the header was easy to miss, and a compile that fails
     // silently is the worst thing an editor can do)
