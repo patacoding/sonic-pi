@@ -805,6 +805,32 @@ function install() {
     if (!pane.switchTo(target.name)) problem(`could not switch to "${target.name}"`);
   }
 
+  /**
+   * Our own synthesizer, played from the music: `puts :synth, :note, 69`. The record's `time` is in the engine
+   * clock's seconds, so `time - clockNow()` is the delay until that instant -- the same instant the line's
+   * other sounds land on. A note also gets its release scheduled (`hold`), so nothing is left hanging.
+   */
+  function synthCommand(d, r) {
+    const at = () => {
+      const now = window.sonicPi?.session?.clockNow?.();
+      return typeof now === "number" && typeof r?.time === "number" ? Math.max(0, r.time - now) : 0;
+    };
+    synth.ensure().then(() => {
+      if (d.command === "note") {
+        const delay = at();
+        synth.noteOn(d.note, { velocity: d.velocity, when: delay });
+        synth.noteOff(d.note, { when: delay + d.hold });
+        if (d.verbose) say(`Graphics — note ${d.note} (velocity ${d.velocity}, held ${d.hold}s)`);
+        return;
+      }
+      if (d.command === "off") { synth.noteOff(d.note, { when: at() }); return; }
+      if (d.command === "alloff") { synth.allNotesOff({ when: at() }); return; }
+      synth.set({ filter: d.param === "cutoff" ? { cutoff: d.value } : d.param === "res" ? { q: d.value } : undefined,
+                  gain: d.param === "gain" ? d.value : undefined });
+      if (d.verbose) say(`Graphics — ${d.param} = ${d.value}`);
+    }).catch((e) => problem(`the synth could not be played: ${e.message}`));
+  }
+
   /** One record, from the hook. Only `output` can carry a directive. */
   function record(r, appLog) {
     if (appLog) {
@@ -814,6 +840,12 @@ function install() {
     const d = parseDirective(r?.text);
     if (!d) return;                                            // the player's own output: theirs
     if (!d.ok) return problem(d.error);
+    // the music playing OUR synthesizer (gfx-synth.js): the note lands on the record's own instant, which is
+    // the instant the same line's `synth`/`sample` lands on (measured to 1.5 ms, docs/web-synth-engine.md §7)
+    if (d.command === "note" || d.command === "off" || d.command === "alloff" || d.command === "param") {
+      synthCommand(d, r);
+      return;
+    }
     // an order rather than a value for a name the shader declared
     if (d.command === "document") {
       documentDirective(d.arg);

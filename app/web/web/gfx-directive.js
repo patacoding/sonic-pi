@@ -52,9 +52,30 @@ const SIGILS = new Map([
   ["gfxv", true], [":gfxv", true],
 ]);
 
+// Our own synthesizer gets a sigil of its own -- `puts :synth, :note, 69`. It has to be a separate one:
+// the orders below include names a shader may well declare as a uniform (`cutoff`, `res`, `gain`), and a
+// player's existing document must not change behaviour because we added a synth.
+export const SYNTH_SIGIL = ":synth";
+const SYNTH_SIGILS = new Map([["synth", false], [":synth", false], ["synthv", true], [":synthv", true]]);
+
 // The names that are orders rather than uniforms: `puts :gfx, :document, "rings"`. Everything else
 // after the sigil is a value for a name the shader declared.
 export const COMMANDS = new Set(["document"]);
+
+// The names that play OUR OWN synthesizer (web/gfx-synth.js) instead of setting a shader uniform. They are
+// read before the shapes below because they take MIDI numbers, not vector values:
+//
+//     puts :gfx, :note, 69               a note (velocity 1, held 0.5 s)
+//     puts :gfx, :note, 69, 0.8, 2       velocity 0.8, held 2 s
+//     puts :gfx, :off, 69                release it now
+//     puts :gfx, :alloff                 release everything
+//     puts :gfx, :cutoff, 900            its filter, from the music
+//     puts :gfx, :res, 0.8  /  :gain, 0.2
+//
+// The instant they land on is the record's own `time` (the engine clock), which is the same instant a
+// `synth`/`sample` on that line lands on -- measured to 1.5 ms: docs/web-synth-engine.md §7.
+export const SYNTH_COMMANDS = new Set(["note", "off", "alloff", "cutoff", "res", "gain"]);
+const NUM = (t) => (t && (t.kind === "int" || t.kind === "float") ? t.value : null);
 
 const SPACE = /[\s,\[\]{}]/;
 
@@ -171,8 +192,9 @@ export function parseDirective(text) {
   if (!toks.length) return null;
 
   const sigil = word(toks[0]);
-  if (sigil == null || !SIGILS.has(sigil)) return null;      // not a directive: leave it alone
-  const verbose = SIGILS.get(sigil);
+  const isSynth = sigil != null && SYNTH_SIGILS.has(sigil);
+  if (sigil == null || (!SIGILS.has(sigil) && !isSynth)) return null;   // not a directive: leave it alone
+  const verbose = isSynth ? SYNTH_SIGILS.get(sigil) : SIGILS.get(sigil);
 
   if (toks.length < 2) return { ok: false, verbose, raw, error: `${sigil} needs a name` };
   const name = word(toks[1]);
@@ -183,6 +205,35 @@ export function parseDirective(text) {
   // A few names are not uniforms but orders: `:document` is which one is on screen, which is how the
   // music changes the look without anyone touching the editor. They take a word where a uniform takes
   // numbers, so they are read before the shapes below and never reach them.
+  if (SYNTH_COMMANDS.has(name) && !isSynth) {
+    return { ok: false, verbose, raw, error: `${name} is an order for our synthesizer: say :synth, :${name} (the :gfx sigil is for the shader's own values)` };
+  }
+  if (SYNTH_COMMANDS.has(name)) {
+    if (name === "alloff") {
+      if (values.length) return { ok: false, verbose, raw, error: "alloff takes nothing after it" };
+      return { ok: true, verbose, raw, name, command: "alloff", values: [] };
+    }
+    const nums = values.map(NUM);
+    if (nums.some((v) => v == null)) {
+      return { ok: false, verbose, raw, error: `${name}: numbers only — e.g. :gfx, :${name}, 69${name === "note" ? ", 0.8, 2" : ""}` };
+    }
+    if (name === "note") {
+      if (nums.length < 1 || nums.length > 3) return { ok: false, verbose, raw, error: "note: :gfx, :note, <midi> [, <velocity> [, <seconds held>]]" };
+      if (nums[0] < 0 || nums[0] > 127) return { ok: false, verbose, raw, error: `note: ${nums[0]} is not a MIDI note (0–127)` };
+      const velocity = nums.length > 1 ? nums[1] : 1;
+      if (velocity < 0 || velocity > 1) return { ok: false, verbose, raw, error: `note: velocity ${velocity} is not between 0 and 1` };
+      const hold = nums.length > 2 ? nums[2] : 0.5;
+      if (hold <= 0) return { ok: false, verbose, raw, error: `note: held for ${hold}s — say a positive number, or use :off` };
+      return { ok: true, verbose, raw, name, command: "note", note: nums[0], velocity, hold, values: nums };
+    }
+    if (nums.length !== 1) return { ok: false, verbose, raw, error: `${name}: one number after it, as in :gfx, :${name}, ${name === "off" ? 69 : 900}` };
+    if (name === "off") {
+      if (nums[0] < 0 || nums[0] > 127) return { ok: false, verbose, raw, error: `off: ${nums[0]} is not a MIDI note (0–127)` };
+      return { ok: true, verbose, raw, name, command: "off", note: nums[0], values: nums };
+    }
+    return { ok: true, verbose, raw, name, command: "param", param: name, value: nums[0], values: nums };
+  }
+
   if (COMMANDS.has(name)) {
     if (values.length !== 1) return { ok: false, verbose, raw, error: `${name}: one word after it, as in :gfx, :document, "rings" (or :next)` };
     const arg = word(values[0]);
