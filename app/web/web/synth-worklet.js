@@ -100,7 +100,10 @@ class GfxSynth extends AudioWorkletProcessor {
         if (k === "filter" || k === "amp" || k === "mod" || k === "lfo") Object.assign(this.patch[k], v);
         else this.patch[k] = v;
       }
-      if (p.wave && !this.harmonics) this.tables = buildTables(profile(p.wave));
+      // Choosing a waveform REPLACES a wavetable the player had loaded (and loading one replaces the
+      // waveform). Without this, the wave buttons were dead as soon as a table had been loaded -- found by
+      // the editor check, which kept hearing the uploaded sine after asking for a saw.
+      if (p.wave) { this.harmonics = null; this.tables = buildTables(profile(p.wave)); }
       return;
     }
     if (m.type === "table") {                                  // a wavetable the player supplied

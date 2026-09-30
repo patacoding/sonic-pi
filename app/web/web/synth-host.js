@@ -17,6 +17,7 @@
 import { createSynth } from "./synth.js";
 import { createTap } from "./synth-tap.js";
 import { parseSynthDirective, isSynthOrder, SYNTH_SIGIL, SYNTH_SIGIL_VERBOSE, SYNTH_COMMANDS } from "./synth-directive.js";
+import { createSynthEditor } from "./synth-ui.js";
 
 export { SYNTH_SIGIL, SYNTH_SIGIL_VERBOSE, isSynthOrder, SYNTH_COMMANDS };
 
@@ -32,6 +33,8 @@ export function createSynthHost({ say = null, problem = null, section = null } =
   const warn = (t) => (problem ? problem(t) : console.warn(t));
   const synth = createSynth({ log: text });
   const tap = createTap({ log: text });
+  // the editor is built the first time it is opened (its 72 KB of panel parts load then too)
+  const editor = createSynthEditor({ synth, onSay: text, onProblem: warn });
 
   /**
    * A record, if it is one of ours. Returns true when it was (so the caller stops looking at it).
@@ -116,6 +119,8 @@ export function createSynthHost({ say = null, problem = null, section = null } =
           onInput: (v) => { state.cutoff = v; push(); } },
         { kind: "slider", label: "Gain", min: 0, max: 0.8, step: 0.01, value: state.gain,
           onInput: (v) => { state.gain = v; push(); } },
+        { kind: "button", label: "Open the synth editor", title: "knobs, an on-screen keyboard, and the wavetable loader",
+          onClick: () => editor.toggle() },
         { kind: "button", label: "Load a wavetable…", title: "a single-cycle .wav (decoded, turned into harmonics)",
           onClick: () => pickWaveform() },
         { kind: "note", text: "Play it from the music: puts :synth, :note, 69" },
@@ -144,6 +149,7 @@ export function createSynthHost({ say = null, problem = null, section = null } =
   // whatever they were when this line ran.
   const api = Object.defineProperties({}, Object.getOwnPropertyDescriptors(synth));
   api.tap = tap;                    // the lossless measuring tap
+  api.editor = editor;              // the knobs (synth-ui.js), built on first open
   api.host = { handleRecord, panelSection, pickWaveform, get synth() { return synth; }, get tap() { return tap; } };
   return api;
 }
