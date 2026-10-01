@@ -15,6 +15,7 @@
 #include "GraphicsLog.h"
 #include "GraphicsPacer.h"
 #include "GraphicsSettings.h"
+#include "GraphicsBufferTargets.h"
 
 #include <QElapsedTimer>
 #include <QOffscreenSurface>
@@ -326,6 +327,20 @@ bool GraphicsRenderThread::applyRenderTargetSizeRequest()
     GraphicsLog::info(QStringLiteral("render targets: %1 buffers at %2x%3 (double buffered)")
                           .arg(kTargetCount).arg(w).arg(h));
 
+
+    // The front/back pair a multi-pass buffer needs, exercised here, where a GL context is certainly
+    // current: created, reported, released - and deliberately not drawn into yet. P2a added the class
+    // and nothing referenced it, so the linker dropped it and its log line could not be verified; this
+    // puts the path in the binary and proves a pair of same-size FBOs can be held at once, which is
+    // what channel sampling will rest on. See GraphicsBufferTargets.h and
+    // docs/graphics-desktop-multipass-plan.md 13 and 14.
+    {
+        GraphicsBufferTargets bufferPair;
+        if (bufferPair.create(wanted)) {
+            GraphicsLog::info(bufferPair.describe());
+            bufferPair.destroy();
+        }
+    }
     // Spout publishing follows the output size: the read-back buffers are the target's size, and the
     // sender is created at a size. A receiver will therefore see the sender disappear and come back when
     // the user changes the output resolution - stated, because from a receiver's side that looks like a
