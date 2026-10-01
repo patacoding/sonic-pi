@@ -357,6 +357,13 @@ private:
         int timeDelta = -1;
         int frame = -1;
         int resolution = -1;
+
+        // The four Shadertoy channels. Located like any other uniform, but NOT set as values: the
+        // multi-pass pipeline binds a texture to each unit (another pass's texture, or this pass's
+        // previous frame), so what matters is the location and which ones this program declares.
+        // -1 means "not declared here", which is normal. See docs/graphics-desktop-multipass-plan.md
+        // (P1) and ShaderText.h, where the declarations live - that pair is the contract.
+        int channel[4] = { -1, -1, -1, -1 };
     };
 
     // Uniform locations for an arbitrary program, or -1 for each it does not declare.

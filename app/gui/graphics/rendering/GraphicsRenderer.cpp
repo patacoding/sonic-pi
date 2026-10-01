@@ -1014,6 +1014,21 @@ GraphicsRenderer::Uniforms GraphicsRenderer::queryUniforms(QOpenGLShaderProgram*
     u.timeDelta  = program->uniformLocation("iTimeDelta");
     u.frame      = program->uniformLocation("iFrame");
     u.resolution = program->uniformLocation("iResolution");
+
+    // The channels. Located, never set here: the pipeline binds textures (P2). Which of the four a
+    // program declares is worth one line per compile - it is the L1 evidence that the declarations in
+    // ShaderText.h reached the shader, and it is cheap because compiles are rare, unlike frames (the
+    // per-frame-number rule: docs/graphics-phase01-spec.md 449-453).
+    QString declaredChannels;
+    for (int i = 0; i < 4; ++i) {
+        const QString name = QStringLiteral("iChannel%1").arg(i);
+        u.channel[i] = program->uniformLocation(name);
+        if (u.channel[i] >= 0)
+            declaredChannels += declaredChannels.isEmpty() ? name : QStringLiteral(" ") + name;
+    }
+    GraphicsLog::info(QStringLiteral("uniforms: channels declared: %1")
+                          .arg(declaredChannels.isEmpty() ? QStringLiteral("(none)") : declaredChannels));
+
     program->release();
     return u;
 }
