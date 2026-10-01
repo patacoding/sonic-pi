@@ -16,6 +16,7 @@
 #include "GraphicsRenderer.h"
 #include "GraphicsSharedFrame.h"
 #include "GraphicsTarget.h"
+#include "GraphicsBufferTargets.h"
 // The Spout sender. Held by unique_ptr, so the complete type is needed here - and it is Windows-only by
 // construction (its .cpp includes the Spout SDK), which is why the class itself is declared for every
 // platform and simply never started elsewhere.
@@ -484,6 +485,17 @@ private:
     // consumer is reading is never written until the next publish.
     static constexpr int kTargetCount = 2;
     std::unique_ptr<GraphicsTarget> m_targets[kTargetCount];
+
+    // One front/back pair per buffer, for the multi-pass pipeline (P2c): a buffer draws into `back`
+    // while its dependants sample `front`, then swaps. Separate from m_targets above on purpose - those
+    // two are the producer/consumer handoff and are published to the consumers every frame, so drawing
+    // a buffer into them would fight that.
+    //
+    // Created and replaced in applyRenderTargetSizeRequest() (where the context is certainly current),
+    // and NOT drawn into yet: the per-frame A -> B -> C -> D -> Image ordering is the next step, so
+    // behaviour is still exactly as before.
+    // See GraphicsBufferTargets.h and docs/graphics-desktop-multipass-plan.md 13/14.
+    std::unique_ptr<GraphicsBufferTargets> m_bufferTargets;
     // Index of the target currently published for consumers, or -1 before the first
     // frame. Written only by this thread.
     int m_readyIndex = -1;

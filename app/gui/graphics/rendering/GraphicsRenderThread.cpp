@@ -328,18 +328,19 @@ bool GraphicsRenderThread::applyRenderTargetSizeRequest()
                           .arg(kTargetCount).arg(w).arg(h));
 
 
-    // The front/back pair a multi-pass buffer needs, exercised here, where a GL context is certainly
-    // current: created, reported, released - and deliberately not drawn into yet. P2a added the class
-    // and nothing referenced it, so the linker dropped it and its log line could not be verified; this
-    // puts the path in the binary and proves a pair of same-size FBOs can be held at once, which is
-    // what channel sampling will rest on. See GraphicsBufferTargets.h and
-    // docs/graphics-desktop-multipass-plan.md 13 and 14.
-    {
-        GraphicsBufferTargets bufferPair;
-        if (bufferPair.create(wanted)) {
-            GraphicsLog::info(bufferPair.describe());
-            bufferPair.destroy();
-        }
+    // The front/back pair a multi-pass buffer needs, held persistently from here on: created at the
+    // output size, replaced when the size changes (create() destroys the previous pair first), and
+    // reported once so the log shows what it made. Deliberately NOT drawn into yet - the per-frame
+    // A -> B -> C -> D -> Image ordering that uses it is the next step, so what the screen shows is
+    // unchanged. See GraphicsBufferTargets.h and docs/graphics-desktop-multipass-plan.md 13/14.
+    m_bufferTargets = std::make_unique<GraphicsBufferTargets>();
+    if (m_bufferTargets->create(wanted)) {
+        GraphicsLog::info(m_bufferTargets->describe());
+    } else {
+        GraphicsLog::error(QStringLiteral("buffer targets: no ping-pong pair at %1x%2; multi-pass "
+                                          "buffers cannot run until the size changes again")
+                               .arg(w).arg(h));
+        m_bufferTargets.reset();
     }
     // Spout publishing follows the output size: the read-back buffers are the target's size, and the
     // sender is created at a size. A receiver will therefore see the sender disappear and come back when
@@ -1740,6 +1741,14 @@ void GraphicsRenderThread::run()
 
         for (int i = 0; i < kTargetCount; ++i)
             m_targets[i].reset();
+
+        // The multi-pass pair is a GL object too, so it goes while the context is still current - the
+        // same reason the two above are reset here rather than left to member destruction, which runs
+        // long after the context is gone.
+        if (m_bufferTargets) {
+            m_bufferTargets->destroy();
+            m_bufferTargets.reset();
+        }
 
         // The query objects belong to this context, so they go while it is still current - for every
         // buffer's renderer, not just the one that happened to be on screen.
