@@ -115,6 +115,7 @@ set(GRAPHICS_SOURCES
     ${QTAPP_ROOT}/graphics/rendering/GraphicsBufferTargets.h
     ${QTAPP_ROOT}/graphics/rendering/GraphicsPasses.h
     ${QTAPP_ROOT}/graphics/rendering/GraphicsDocuments.h
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsPassPrograms.h
     ${QTAPP_ROOT}/graphics/rendering/GraphicsTarget.h
     ${QTAPP_ROOT}/graphics/rendering/GraphicsRenderThread.cpp
     ${QTAPP_ROOT}/graphics/rendering/GraphicsRenderThread.h
