@@ -183,7 +183,7 @@ module SonicPi
     end
 
     def init_studio
-      @server.load_synthdefs(Paths.synthdef_path)
+      @server.load_synthdefs(Paths.synthdef_path, timeout: SonicPi::Server::BOOT_LOAD_TIMEOUT)
       load_piano_wavetable
       @amp = [0.0, 1.0]
       @server.add_event_handler("/sonic-pi/amp", "/sonic-pi/amp") do |payload|
@@ -1084,7 +1084,7 @@ module SonicPi
         # Phase 3 — the server-info query there runs the
         # sonic-pi-server-info synthdef.
         begin
-          @server.load_synthdefs(Paths.synthdef_path)
+          @server.load_synthdefs(Paths.synthdef_path, timeout: SonicPi::Server::BOOT_LOAD_TIMEOUT)
           STDOUT.puts "Studio - Phase 2: Synthdefs (#{(Time.now - start).round(2)}s)"
           STDOUT.flush
         rescue Exception => e
