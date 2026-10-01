@@ -333,14 +333,22 @@ bool GraphicsRenderThread::applyRenderTargetSizeRequest()
     // reported once so the log shows what it made. Deliberately NOT drawn into yet - the per-frame
     // A -> B -> C -> D -> Image ordering that uses it is the next step, so what the screen shows is
     // unchanged. See GraphicsBufferTargets.h and docs/graphics-desktop-multipass-plan.md 13/14.
-    m_bufferTargets = std::make_unique<GraphicsBufferTargets>();
-    if (m_bufferTargets->create(wanted)) {
-        GraphicsLog::info(m_bufferTargets->describe());
-    } else {
-        GraphicsLog::error(QStringLiteral("buffer targets: no ping-pong pair at %1x%2; multi-pass "
-                                          "buffers cannot run until the size changes again")
-                               .arg(w).arg(h));
-        m_bufferTargets.reset();
+    // One front/back pair per pass - Image and Buffer A-D - so a pass can be sampled while another is
+    // being written, which is what the ordering step needs. Five pairs is ten textures at the output
+    // size: the fixed cost of Shadertoy's shape, reported below rather than estimated.
+    for (int i = 0; i < kPassCount; ++i) {
+        m_bufferTargets[i] = std::make_unique<GraphicsBufferTargets>();
+        if (!m_bufferTargets[i]->create(wanted)) {
+            GraphicsLog::error(QStringLiteral("buffer targets: pass %1 of %2 could not get a ping-pong "
+                                              "pair at %3x%4; multi-pass cannot run until the size "
+                                              "changes again")
+                                   .arg(i + 1).arg(kPassCount).arg(w).arg(h));
+            for (int j = 0; j < kPassCount; ++j)
+                m_bufferTargets[j].reset();
+            break;
+        }
+        GraphicsLog::info(QStringLiteral("buffer targets: pass %1 of %2: %3")
+                              .arg(i + 1).arg(kPassCount).arg(m_bufferTargets[i]->describe()));
     }
     // Spout publishing follows the output size: the read-back buffers are the target's size, and the
     // sender is created at a size. A receiver will therefore see the sender disappear and come back when
@@ -1745,9 +1753,11 @@ void GraphicsRenderThread::run()
         // The multi-pass pair is a GL object too, so it goes while the context is still current - the
         // same reason the two above are reset here rather than left to member destruction, which runs
         // long after the context is gone.
-        if (m_bufferTargets) {
-            m_bufferTargets->destroy();
-            m_bufferTargets.reset();
+        for (int i = 0; i < kPassCount; ++i) {
+            if (m_bufferTargets[i]) {
+                m_bufferTargets[i]->destroy();
+                m_bufferTargets[i].reset();
+            }
         }
 
         // The query objects belong to this context, so they go while it is still current - for every

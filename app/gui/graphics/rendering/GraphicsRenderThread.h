@@ -495,7 +495,10 @@ private:
     // and NOT drawn into yet: the per-frame A -> B -> C -> D -> Image ordering is the next step, so
     // behaviour is still exactly as before.
     // See GraphicsBufferTargets.h and docs/graphics-desktop-multipass-plan.md 13/14.
-    std::unique_ptr<GraphicsBufferTargets> m_bufferTargets;
+    // Image plus Buffer A-D: Shadertoy's five passes, four buffers fixed by decision (2026-10-02).
+    // One entry per pass.
+    static constexpr int kPassCount = 5;
+    std::unique_ptr<GraphicsBufferTargets> m_bufferTargets[kPassCount];
     // Index of the target currently published for consumers, or -1 before the first
     // frame. Written only by this thread.
     int m_readyIndex = -1;
