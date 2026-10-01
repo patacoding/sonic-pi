@@ -141,6 +141,27 @@ public:
     // have already cost this feature a rewrite.
     GraphicsCompileResult buildAndInstall();
 
+    // Multi-pass: compile an EXPLICIT fragment file with a document's Common text prepended, instead
+    // of letting the buffer name decide "<name>.frag". Everything else is buildAndInstall()'s contract,
+    // including the one that matters most here: a failure leaves the previous program alone, which is
+    // what gives each pass of a document its own protection ("never half broken").
+    //
+    // Why it is needed at all (measured, not assumed): this renderer resolves the fragment file from the
+    // buffer name (:157-161) and buildProgram() is private (:288-289), so there is no public way to point
+    // it at another file or to give it text of its own - and Prepending is how Shadertoy's Common works
+    // (docs/graphics-desktop-multipass-plan.md 15, 17.3, 17.4).
+    //
+    // `prependedText` goes in AFTER #include expansion and BEFORE the built-in uniform declarations:
+    // after, because expansion writes the #line source-string numbers that attach diagnostics to files,
+    // and inserting text ahead of that would move every line the driver reports; before, because the
+    // built-in declarations are skipped for names the shader already declares, which stays true either
+    // way. An empty prependedText is the plain buildAndInstall() case.
+    //
+    // Not implemented yet: this declaration states the contract first, so the implementation has one
+    // shape to hit rather than several to invent.
+    GraphicsCompileResult buildAndInstallFrom(const QString& fragmentFile,
+                                              const QString& prependedText = QString());
+
     // Builds the quad geometry and loads the shader files. Requires a current
     // context. Returns false and logs why on failure.
     //
