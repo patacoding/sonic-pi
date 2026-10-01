@@ -144,9 +144,6 @@ module SonicPi
         # use a value within the valid range for a 32 bit signed complement integer
         @daemon_token =  rand(-2147483647..2147483647)
 
-        # Uncomment for debugging purposes
-        # Util.log "Daemon token: #{@daemon_token}"
-
         @safe_exit = SafeExit.new do
           @exit_prom.deliver! true
           # Register exit routine
@@ -184,8 +181,24 @@ module SonicPi
         # if there are problems detecting port numbers to use.
         @ports = PortDiscovery.new(@safe_exit).ports
 
-        # Uncomment for debugging purposes
-        # Util.log "Ports: #{@ports.inspect}"
+        # The ports and the token, said out loud at BOOT as well as at exit.
+        #
+        # They used to be logged only from the exit routine, which made them unknowable while a session
+        # was actually running - and that is exactly when an external tool needs them. The VS Code
+        # bridge (~/.sonic-pi/vscode-bridge/) reads them from the spider process's command line
+        # instead, which works where the command line is readable and returns nothing where it is not:
+        # measured on Windows, `Get-CimInstance Win32_Process` gives an EMPTY CommandLine for the
+        # server the daemon starts, so the bridge reported "Sonic Pi is not running" against a Sonic Pi
+        # that was running, and nothing could drive the session from outside.
+        #
+        # Ports are picked per session and the token is random per session, so this is not a secret
+        # being leaked: it is the same information the exit log has always written, at the time it is
+        # actually useful.
+        Util.log "---- booting ----"
+        Util.log "Selected ports: "
+        Util.log @ports.inspect
+        Util.log "Token: #{@daemon_token}"
+        Util.log "-----------------"
 
         @kill_switch = KillSwitch.new(@safe_exit)
 
