@@ -1,0 +1,138 @@
+//--
+// This file is part of Sonic Pi: http://sonic-pi.net
+// Full project source: https://github.com/sonic-pi-net/sonic-pi
+// License: https://github.com/sonic-pi-net/sonic-pi/blob/main/LICENSE.md
+//
+// Copyright 2026 by Sam Aaron (http://sam.aaron.name).
+// All rights reserved.
+//
+// Permission is granted for use, copying, modification, and
+// distribution of modified versions of this work as long as this
+// notice is included.
+//++
+
+#include "GraphicsPassPrograms.h"
+
+#include <QFile>
+
+#include "GraphicsLog.h"
+
+namespace SonicPi
+{
+
+GraphicsPassPrograms::~GraphicsPassPrograms() = default;
+
+bool GraphicsPassPrograms::create(const GraphicsDocument& document, const QString& vertexFile)
+{
+    (void)vertexFile;   // the renderer owns its vertex half (passthrough.vert); named here for the caller's sake
+
+    destroy();
+
+    if (!document.isValid()) {
+        GraphicsLog::error(QStringLiteral("pass programs: no document to compile"));
+        return false;
+    }
+
+    // Common is text, not a pass: read once, hand the same text to every pass. Absent is empty and is not
+    // an error - a document need not have one.
+    m_commonText.clear();
+    const QString commonFile = document.passPath(GraphicsPass::Common);
+    if (!commonFile.isEmpty()) {
+        QFile common(commonFile);
+        if (common.open(QIODevice::ReadOnly))
+            m_commonText = QString::fromUtf8(common.readAll());
+        else
+            GraphicsLog::error(QStringLiteral("pass programs: document '%1' has a Common that cannot be read "
+                                              "(%2); compiling the passes without it")
+                                   .arg(document.name, common.errorString()));
+    }
+
+    // One renderer per pass it actually has. A pass with no file is an empty pass: no renderer, nothing
+    // drawn, and sampling it is black - the rule the web renderer settled on - so a document with only an
+    // Image is perfectly valid.
+    for (int i = 0; i < kDrawOrderCount; ++i) {
+        const GraphicsPass pass = kDrawOrder[i];
+        const QString file = document.passPath(pass);
+        if (file.isEmpty())
+            continue;
+
+        auto renderer = std::make_unique<GraphicsRenderer>();
+        // Named before compiling, because the name is what the log lines and the compile result carry: a
+        // picture showing the wrong pass has to be attributable to a pass.
+        renderer->setShaderName(document.name + QLatin1Char('/') + graphicsPassName(pass));
+
+        if (!renderer->prepare()) {
+            GraphicsLog::error(QStringLiteral("pass programs: %1 could not prepare its geometry; "
+                                              "it stays an empty pass")
+                                   .arg(graphicsPassLabel(pass)));
+            continue;
+        }
+
+        // The entry point multi-pass needed, which turned out to exist already (GraphicsRenderer.cpp:251):
+        // explicit file, document's Common, and a failure that keeps the previous program - which is what
+        // gives each pass its own protection rather than one bad pass taking the frame down.
+        const GraphicsCompileResult result = renderer->buildAndInstallFrom(file, m_commonText);
+        if (!result.ok() && !result.installed) {
+            GraphicsLog::error(QStringLiteral("pass programs: %1 did not build from %2; it stays an empty "
+                                              "pass. %3")
+                                   .arg(graphicsPassLabel(pass), file, result.log.trimmed()));
+            continue;
+        }
+
+        m_passes[i] = std::move(renderer);
+    }
+
+    GraphicsLog::info(describe());
+    return passCount() > 0;
+}
+
+void GraphicsPassPrograms::destroy()
+{
+    for (auto& renderer : m_passes)
+        renderer.reset();
+    m_commonText.clear();
+}
+
+bool GraphicsPassPrograms::isValid() const
+{
+    return passCount() > 0;
+}
+
+GraphicsRenderer* GraphicsPassPrograms::pass(GraphicsPass pass) const
+{
+    const int index = graphicsPassDrawIndex(pass);
+    if (index < 0)
+        return nullptr;   // Common: text, not a pass
+    return m_passes[index].get();
+}
+
+int GraphicsPassPrograms::passCount() const
+{
+    int count = 0;
+    for (const auto& renderer : m_passes) {
+        if (renderer && renderer->hasProgram())
+            ++count;
+    }
+    return count;
+}
+
+QString GraphicsPassPrograms::describe() const
+{
+    QStringList parts;
+    for (int i = 0; i < kDrawOrderCount; ++i) {
+        const GraphicsPass pass = kDrawOrder[i];
+        const GraphicsRenderer* renderer = m_passes[i].get();
+        if (!renderer)
+            parts << QStringLiteral("%1=empty").arg(graphicsPassLabel(pass));
+        else
+            parts << QStringLiteral("%1=%2").arg(graphicsPassLabel(pass),
+                                                 renderer->fragmentShaderPath());
+    }
+    return QStringLiteral("pass programs: %1 of %2 compiled, common %3 bytes: %4")
+        .arg(passCount())
+        .arg(kDrawOrderCount)
+        .arg(m_commonText.size())
+        .arg(parts.join(QStringLiteral(", ")));
+}
+
+} // namespace SonicPi
