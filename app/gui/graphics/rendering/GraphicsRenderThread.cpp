@@ -362,7 +362,19 @@ bool GraphicsRenderThread::applyRenderTargetSizeRequest()
             names << (document.singlePass ? document.name + QStringLiteral(" (single pass)") : document.name);
         GraphicsLog::info(QStringLiteral("graphics documents: %1 found: %2")
                               .arg(documents.size())
+
                               .arg(names.isEmpty() ? QStringLiteral("(none)") : names.join(QStringLiteral(", "))));
+
+    // The order the multi-pass pipeline will run in, said once here so the vocabulary in GraphicsPasses.h
+    // is visible in the log rather than only in the code. One array decides it for everything that cares:
+    // the pipeline, the channel rules, and (later) the editor showing it to a person.
+    {
+        QStringList order;
+        for (int i = 0; i < kDrawOrderCount; ++i)
+            order << graphicsPassLabel(kDrawOrder[i]);
+        GraphicsLog::info(QStringLiteral("pass order: %1 (Common is text, prepended to each, not a pass)")
+                              .arg(order.join(QStringLiteral(" -> "))));
+    }
     }
     // Spout publishing follows the output size: the read-back buffers are the target's size, and the
     // sender is created at a size. A receiver will therefore see the sender disappear and come back when
