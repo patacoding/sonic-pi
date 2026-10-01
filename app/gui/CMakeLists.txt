@@ -111,6 +111,8 @@ set(GRAPHICS_SOURCES
     ${QTAPP_ROOT}/graphics/rendering/GraphicsRenderer.h
     ${QTAPP_ROOT}/graphics/rendering/GraphicsSharedFrame.h
     ${QTAPP_ROOT}/graphics/rendering/GraphicsTarget.cpp
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsBufferTargets.cpp
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsBufferTargets.h
     ${QTAPP_ROOT}/graphics/rendering/GraphicsTarget.h
     ${QTAPP_ROOT}/graphics/rendering/GraphicsRenderThread.cpp
     ${QTAPP_ROOT}/graphics/rendering/GraphicsRenderThread.h
