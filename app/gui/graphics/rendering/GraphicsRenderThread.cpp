@@ -350,6 +350,20 @@ bool GraphicsRenderThread::applyRenderTargetSizeRequest()
         GraphicsLog::info(QStringLiteral("buffer targets: pass %1 of %2: %3")
                               .arg(i + 1).arg(kPassCount).arg(m_bufferTargets[i]->describe()));
     }
+
+    // What the multi-pass pipeline will read: the documents on disk. A directory holding image.frag
+    // is one document; a top-level .frag stays a single-pass document, exactly as before. Reported
+    // once, where the size is set up - deliberately not per frame.
+    {
+        const QList<GraphicsDocument> documents =
+            scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath());
+        QStringList names;
+        for (const GraphicsDocument& document : documents)
+            names << (document.singlePass ? document.name + QStringLiteral(" (single pass)") : document.name);
+        GraphicsLog::info(QStringLiteral("graphics documents: %1 found: %2")
+                              .arg(documents.size())
+                              .arg(names.isEmpty() ? QStringLiteral("(none)") : names.join(QStringLiteral(", "))));
+    }
     // Spout publishing follows the output size: the read-back buffers are the target's size, and the
     // sender is created at a size. A receiver will therefore see the sender disappear and come back when
     // the user changes the output resolution - stated, because from a receiver's side that looks like a

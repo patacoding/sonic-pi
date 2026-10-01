@@ -18,6 +18,7 @@
 #include "GraphicsTarget.h"
 #include "GraphicsBufferTargets.h"
 #include "GraphicsPasses.h"
+#include "GraphicsDocuments.h"
 // The Spout sender. Held by unique_ptr, so the complete type is needed here - and it is Windows-only by
 // construction (its .cpp includes the Spout SDK), which is why the class itself is declared for every
 // platform and simply never started elsewhere.
