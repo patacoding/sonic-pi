@@ -157,10 +157,18 @@ public:
     // built-in declarations are skipped for names the shader already declares, which stays true either
     // way. An empty prependedText is the plain buildAndInstall() case.
     //
-    // Not implemented yet: this declaration states the contract first, so the implementation has one
-    // shape to hit rather than several to invent.
+    // `fragmentFile` is a path, not a buffer name: an absolute one (a document's image.frag /
+    // bufferA.frag, from GraphicsDocuments.h) or a name inside the shader directory. A path that does
+    // not exist is a reported failure that leaves the previous program alone, exactly as a compile
+    // error is - so an empty pass costs nothing and cannot take the picture away.
     GraphicsCompileResult buildAndInstallFrom(const QString& fragmentFile,
                                               const QString& prependedText = QString());
+
+    // The document's Common text, prepended to every pass this renderer compiles. Empty by default,
+    // which is exactly the single-shader case. It is a setter rather than a constructor argument
+    // because a document is switched at runtime and the renderer outlives the switch.
+    void setPrependedText(const QString& text) { m_prependedText = text; }
+    QString prependedText() const { return m_prependedText; }
 
     // Builds the quad geometry and loads the shader files. Requires a current
     // context. Returns false and logs why on failure.
@@ -291,6 +299,14 @@ public:
     QString fragmentShaderPath() const { return m_fragmentPath; }
     QString vertexShaderPath() const { return m_vertexPath; }
 
+    // Which file each source string number of the CURRENT program belongs to: the Common block and any
+    // `#include`d library, both of which are files the pass's own text is not. Source string 0 is the
+    // pass itself and is not listed (the same convention ShaderInclude::Result uses).
+    //
+    // Public because a compile report is not the only reader: the editor uses it to decide whether a
+    // diagnostic's line is a line it can scroll to. Only meaningful for the currently installed program.
+    QHash<int, QString> fragmentSourceStrings() const { return m_fragmentSourceStrings; }
+
     // The colour a target is cleared to before drawing, and the colour used when
     // there is no usable shader. Kept as named constants so the clear and any check
     // against it cannot drift apart.
@@ -306,8 +322,19 @@ private:
     // Compile a vertex/fragment pair from disk, carrying the compiler's output whether or not the
     // build succeeded: on failure that output IS the message the user needs, and on success an empty
     // string is itself information - nothing to report.
+    //
+    // `commonText` is a document's Common block (Shadertoy's, not a file this renderer reads): it is
+    // prepended to the fragment source so that one document's shared functions are available to every
+    // one of its passes. Empty for a single-pass shader, which is what keeps the old path unchanged.
     GraphicsCompileResult buildProgram(const QString& vertexFile,
-                                      const QString& fragmentFile);
+                                       const QString& fragmentFile,
+                                       const QString& commonText = QString());
+
+    // Compile one fragment file (a path) with an optional Common block, then report it the way the log
+    // wants it - the shared body of the single-pass and multi-pass entry points, so the two cannot drift
+    // into reporting differently or into one of them forgetting to keep the previous program.
+    GraphicsCompileResult compileFile(const QString& fragmentFile, const QString& commonText);
+    void logCompiled(const GraphicsCompileResult& result, const QString& fragmentFile);
 
     // Compile the self-test's own shader pair. Both halves are string literals in the
     // .cpp, so this cannot be broken by an edit to the shader directory, and cannot
@@ -316,7 +343,6 @@ private:
 
     // Load the default shader pair into m_program. Leaves m_program untouched on failure.
     bool loadShaders();
-
     // Build the built-in fallback shader and install it, for the one case where there is no previous
     // program to keep: a shader that will not compile at startup. Returns false if even the fallback
     // cannot be built, in which case the output is a flat clear colour and the log says so.
@@ -392,6 +418,7 @@ private:
     // own program WITHOUT disturbing the cached locations belonging to m_program.
     static Uniforms queryUniforms(QOpenGLShaderProgram* program);
     Uniforms m_uniforms;
+    QString m_prependedText;
 
     // Whether "this program declares no uniforms at all" has already been reported,
     // so the note appears once per program rather than once per frame.
@@ -450,6 +477,13 @@ private:
     std::unique_ptr<QOpenGLBuffer> m_vbo;
     QString m_vertexPath;
     QString m_fragmentPath;
+
+    // Which file each source string number belongs to, for the CURRENT program - the very table
+    // buildProgram used to attribute its own diagnostics. Kept because a report is not the only reader:
+    // an editor asking "is the line I am being sent to a line of my document, or of a Common block I
+    // cannot scroll to?" needs the same answer, and re-deriving it by expanding the includes a second
+    // time would be a second answer waiting to disagree with the first.
+    QHash<int, QString> m_fragmentSourceStrings;
 
     // ---- GPU timing (GL_ARB_timer_query) ------------------------------------------------
     //

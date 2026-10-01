@@ -248,6 +248,69 @@ GraphicsCompileResult GraphicsRenderer::buildAndInstall()
     return result;
 }
 
+GraphicsCompileResult GraphicsRenderer::buildAndInstallFrom(const QString& fragmentFile,
+                                                           const QString& prependedText)
+{
+    // The same two halves buildAndInstall() keeps together - compile, then install only if it built -
+    // with the file and the Common text supplied from outside instead of derived from a buffer name.
+    // Nothing else differs on purpose: this is the entry point multi-pass needs, not a second compile
+    // path, so a failure here keeps the previous program exactly as a failure there does.
+    GraphicsCompileResult result = compileFile(fragmentFile, prependedText);
+    if (!result.ok())
+        return result;
+
+    adoptProgram(std::move(result.program));
+    result.installed = true;
+    return result;
+}
+
+GraphicsCompileResult GraphicsRenderer::compileFile(const QString& fragmentFile,
+                                                    const QString& commonText)
+{
+    const QString vertexFile = QString::fromLatin1(kVertexShaderFile);
+    GraphicsCompileResult result = buildProgram(vertexFile, fragmentFile, commonText);
+    if (!result.ok())
+    {
+        GraphicsLog::error(QStringLiteral("shader load FAILED; keeping the previous program. "
+                                          "buffer was: %1  fragment file was: %2")
+                               .arg(m_shaderName, result.fragmentPath));
+        return result;
+    }
+
+    logCompiled(result, fragmentFile);
+    return result;
+}
+
+void GraphicsRenderer::logCompiled(const GraphicsCompileResult& result, const QString& fragmentFile)
+{
+    // The file's size and modification time.
+    //
+    // So a reload that read a stale copy is distinguishable from one that read the current bytes:
+    // compare these against the file on disk. Two rounds of explaining "editing has no effect" would
+    // have been settled by these two numbers.
+    //
+    // The explicit path is what a document's pass is read from, and it is NOT derivable from the buffer
+    // name, so it is named here as well: a log line that pointed at "<name>.frag" while the pipeline
+    // actually compiled a document file would send the reader to the wrong file.
+    const QFileInfo fragInfo(result.fragmentPath);
+    QString line = QStringLiteral("shader: compiled  buffer=%1  fragment=%2  bytes=%3  mtime=%4")
+                       .arg(m_shaderName)
+                       .arg(result.fragmentPath)
+                       .arg(fragInfo.size())
+                       .arg(fragInfo.lastModified().toString(QStringLiteral("HH:mm:ss.zzz")));
+    if (!fragmentFile.isEmpty())
+    {
+        // Named by canonical path, so "requested" is only added when the file really came from somewhere
+        // else - a different capitalisation, or a shipped copy under the user's copy - rather than for
+        // every pass of a document just because the two spellings differ.
+        const QString asked = QFileInfo(fragmentFile).canonicalFilePath();
+        const QString read = QFileInfo(result.fragmentPath).canonicalFilePath();
+        if (!asked.isEmpty() && !read.isEmpty() && asked != read)
+            line += QStringLiteral("  requested=%1").arg(fragmentFile);
+    }
+    GraphicsLog::info(line);
+}
+
 bool GraphicsRenderer::initialize(bool fallbackWhenNothingBuilds)
 {
     if (!prepare())
@@ -447,7 +510,8 @@ bool GraphicsRenderer::readExpandedShader(const QString& path, QString* text, QS
 }
 
 GraphicsCompileResult GraphicsRenderer::buildProgram(const QString& vertexFile,
-                                                     const QString& fragmentFile)
+                                                     const QString& fragmentFile,
+                                                     const QString& commonText)
 {
     GraphicsCompileResult result;
     result.fragmentPath = resolveShaderPath(fragmentFile);
@@ -497,6 +561,34 @@ GraphicsCompileResult GraphicsRenderer::buildProgram(const QString& vertexFile,
         return result;
     }
 
+    // Shadertoy's Common, prepended to THIS pass. One document's shared functions, available to every
+    // pass of that document and to nothing else (docs/graphics-desktop-multipass-plan.md 15: documents
+    // do not share, which is what makes the compile key "(Common + this pass)" and nothing more).
+    //
+    // Placed here rather than before the expansion above, because the expansion is what writes the
+    // `#line` directives that attach diagnostics to files: prepending ahead of it would shift every
+    // line the driver reports. ShaderText::withCommon gives Common a source string number of its own,
+    // so an error written in Common is reported against Common rather than against a line of this pass.
+    if (!commonText.isEmpty())
+    {
+        const ShaderText::CommonSource common =
+            ShaderText::withCommon(fragSource, commonText, frag, fragSourceStrings);
+        fragSource = common.text;
+        if (!common.fileBySourceString.isEmpty())
+        {
+            for (auto it = common.fileBySourceString.constBegin();
+                 it != common.fileBySourceString.constEnd(); ++it)
+            {
+                fragSourceStrings.insert(it.key(), it.value());
+            }
+        }
+        GraphicsLog::info(QStringLiteral("shader: prepended %1 lines of Common from %2 "
+                                         "(source string %3, so its errors are named against it)")
+                              .arg(ShaderInclude::countLines(commonText))
+                              .arg(frag)
+                              .arg(common.assignedSourceString));
+    }
+
     // The frame values the shader is allowed to use without declaring them: iTime, iTimeDelta, iFrame and
     // iResolution, named and typed exactly as ShaderToy names and types them (docs/graphics-uniforms.md
     // 1). The fragment half only: the vertex half is a fixed passthrough that uses none of them, and
@@ -512,6 +604,17 @@ GraphicsCompileResult GraphicsRenderer::buildProgram(const QString& vertexFile,
     // four is mine and which is the framework's" is exactly the kind of thing that should not have to be
     // deduced from a compile error.
     {
+    // The document's Common, if it has one: ahead of the built-in declarations below, because those are
+    // skipped for names the shader declares itself (so the order does not matter to them), and after
+    // #include expansion above, which is what wrote the #line source-string numbers that attach the
+    // driver's diagnostics to files - text inserted ahead of that would move every reported line.
+    // Empty for a single-pass shader, in which case this is a no-op.
+    if (!m_prependedText.isEmpty()) {
+        fragSource = m_prependedText + QLatin1Char('\n') + fragSource;
+        GraphicsLog::info(QStringLiteral("shader: prepended %1 bytes of the document's Common")
+                              .arg(m_prependedText.size()));
+    }
+
         const ShaderText::BuiltinUniforms builtins = ShaderText::withBuiltinUniforms(fragSource);
         fragSource = builtins.text;
         if (!builtins.declared.isEmpty())
@@ -571,6 +674,9 @@ GraphicsCompileResult GraphicsRenderer::buildProgram(const QString& vertexFile,
     }
 
     result.program = std::move(program);
+    // Kept with the program the table belongs to: a diagnostic, or a request from the editor, is always
+    // about the source that is CURRENTLY linked, never about one that was replaced.
+    m_fragmentSourceStrings = fragSourceStrings;
     return result;
 }
 
@@ -612,34 +718,12 @@ GraphicsCompileResult GraphicsRenderer::compileReplacement()
     // Both halves come from names rather than from literals written here: the buffer's own name for the
     // fragment, and the shared name for the vertex. This is what "the identity travels" means in
     // practice - a second buffer changes the name, not this function.
-    const QString vertexFile = QString::fromLatin1(kVertexShaderFile);
-    const QString fragmentFile = GraphicsSettings::fragmentFileName(m_shaderName);
-
-    GraphicsCompileResult result = buildProgram(vertexFile, fragmentFile);
-    if (!result.ok())
-    {
-        // Names the buffer and the file, and states that the previous program survives, so a compile
-        // failure cannot be mistaken for a reload that never arrived. The same explanation goes to the
-        // user through the returned log; this is the record.
-        GraphicsLog::error(QStringLiteral("shader load FAILED; keeping the previous program. "
-                                          "buffer was: %1  fragment file was: %2")
-                               .arg(m_shaderName, result.fragmentPath));
-        return result;
-    }
-
-    // The file's size and modification time.
     //
-    // So a reload that read a stale copy is distinguishable from one that read the current bytes:
-    // compare these against the file on disk. Two rounds of explaining "editing has no effect" would
-    // have been settled by these two numbers.
-    const QFileInfo fragInfo(result.fragmentPath);
-    GraphicsLog::info(QStringLiteral("shader: compiled  buffer=%1  fragment=%2  bytes=%3  mtime=%4")
-                          .arg(m_shaderName)
-                          .arg(result.fragmentPath)
-                          .arg(fragInfo.size())
-                          .arg(fragInfo.lastModified().toString(QStringLiteral("HH:mm:ss.zzz"))));
-
-    return result;
+    // The name is turned into a file HERE and handed on as a path, so the single-pass path and the
+    // multi-pass one (buildAndInstallFrom) differ in one argument and share everything after it: one
+    // place that compiles, one place that reports, one place that keeps the previous program.
+    const QString fragmentFile = GraphicsSettings::fragmentFileName(m_shaderName);
+    return compileFile(fragmentFile, QString());
 }
 
 void GraphicsRenderer::adoptProgram(std::unique_ptr<QOpenGLShaderProgram> program)
@@ -654,7 +738,13 @@ void GraphicsRenderer::adoptProgram(std::unique_ptr<QOpenGLShaderProgram> progra
     // Resolved from the same two names the compile used, so the paths reported to the user cannot
     // describe a different file from the one that was built.
     m_vertexPath = resolveShaderPath(QString::fromLatin1(kVertexShaderFile));
-    m_fragmentPath = resolveShaderPath(GraphicsSettings::fragmentFileName(m_shaderName));
+    // The fragment path is the one the compile just read, NOT a second resolution from the buffer name:
+    // for a single-pass buffer the two agree by construction, and for a multi-pass pass only the compile
+    // knows which file of the document was read. Re-deriving it here would let the reported path name a
+    // different file from the compiled one - the exact confusion this pair of members exists to prevent.
+    // buildProgram always fills it in, so the fallback is only for a hypothetical bare adoptProgram().
+    if (m_fragmentPath.isEmpty())
+        m_fragmentPath = resolveShaderPath(GraphicsSettings::fragmentFileName(m_shaderName));
     cacheUniformLocations();
 }
 
