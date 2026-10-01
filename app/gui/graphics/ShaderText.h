@@ -260,6 +260,15 @@ inline BuiltinUniforms withBuiltinUniforms(const QString& source)
         { "iTime", "uniform float iTime;" },
         { "iTimeDelta", "uniform float iTimeDelta;" },
         { "iFrame", "uniform int   iFrame;" },
+        // Shadertoy 的通道。类型同样是契约：多 pass 管线把别的 buffer 的纹理绑到纹理单元 0..3
+        // （设计见 docs/graphics-desktop-multipass-plan.md）。**没有东西可绑时不绑纹理**，采样按
+        // GL 规范返回 (0,0,0,1) —— "指向空的东西是黑，不是异常"，与 web 侧一致。
+        // 它们**不能由 OSC 设置**（通道由管线绑定，不是一个值）：见 GraphicsRenderer.cpp 的
+        // isFrameValueName()，那里的规则是"帧自己的值不许设"。
+        { "iChannel0", "uniform sampler2D iChannel0;" },
+        { "iChannel1", "uniform sampler2D iChannel1;" },
+        { "iChannel2", "uniform sampler2D iChannel2;" },
+        { "iChannel3", "uniform sampler2D iChannel3;" },
     };
 
     BuiltinUniforms result;

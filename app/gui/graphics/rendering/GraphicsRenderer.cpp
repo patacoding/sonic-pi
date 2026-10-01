@@ -60,8 +60,21 @@ constexpr int kChannelTolerance = 2;
 // and graphics-uniforms.md 1.1 is the contract they both serve.
 bool isFrameValueName(const QString& name)
 {
-    return name == QLatin1String("iTime") || name == QLatin1String("iTimeDelta")
-           || name == QLatin1String("iFrame") || name == QLatin1String("iResolution");
+    if (name == QLatin1String("iTime") || name == QLatin1String("iTimeDelta")
+        || name == QLatin1String("iFrame") || name == QLatin1String("iResolution"))
+        return true;
+
+    // The four channels belong to the same set, for the same reason: a channel is not a value OSC may
+    // set - it is a texture the multi-pass pipeline binds (another buffer, or this one's previous
+    // frame). Letting OSC "set iChannel0" would promise something the renderer cannot honour, and it
+    // would surface as a uniform that silently never arrives. ShaderText.h declares these; that pair is
+    // the contract, as this comment says for the four above.
+    // See docs/graphics-desktop-multipass-plan.md.
+    for (int i = 0; i < 4; ++i) {
+        if (name == QStringLiteral("iChannel%1").arg(i))
+            return true;
+    }
+    return false;
 }
 
 int toByte(float v)
