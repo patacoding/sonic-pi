@@ -102,27 +102,28 @@ public:
     // Show the window on one buffer, creating its tab if it is not there yet, and make it current.
     void showBuffer(const QString& shaderName);
 
-    // Import a shader from an arbitrary file into the editor, and export the editor's text to one.
+    // A DOCUMENT is what is saved, loaded and created - never a single pass. An Image that samples a Buffer
+    // that is fed by a Common function is one thing; saving one text of it saves something that cannot run.
     //
-    // These are NOT the same thing as the buffer's own file, and the difference is the whole point of
-    // having both: the buffer's file is what gets rendered, and these are how a shader gets in from or
-    // out to the rest of the machine. Neither one compiles - importing changes what is being edited,
-    // and the user decides when to put it into the renderer.
+    //   newDocument()      pick an empty folder; the six passes and the record are written into it
+    //   loadFromFile()     pick a saved document's shadertoy.json
+    //   saveToFile()       pick a folder to save the whole document into
+    //   reloadFromDisk()   re-read the document from the shaders directory, discarding unsaved edits
+    //
+    // The reading and writing is separated from the dialogs that choose a path (GraphicsDocumentFile.h), so
+    // the round trip is exercised by a probe rather than through a modal dialog - and the dialog is the only
+    // part left untested.
+    void newDocument();
     void loadFromFile();
     void saveToFile();
+    void reloadFromDisk();
 
-    // The actual reading and writing, separated from the dialogs that choose a path.
-    //
-    // Not tidiness: while these were welded to a modal QFileDialog, nothing about them could be
-    // exercised by an automated run, and "import a shader" is the kind of logic that is wrong in
-    // small ways - a BOM, a truncated read, an extension that does not get appended. Split, the
-    // dialog is the only untested part and the logic is testable.
-    //
-    // As of the document save/load these two are about a WHOLE DOCUMENT: see GraphicsDocumentFile.h for
-    // the format. `importDocumentFrom` takes the record (shadertoy.json) and puts the document into the
-    // shaders directory, where the renderer reads documents from; `saveDocumentTo` takes a directory.
     bool importDocumentFrom(const QString& recordPath);
     bool saveDocumentTo(const QString& targetDirectory);
+    bool createDocumentIn(const QString& targetDirectory, const QString& name);
+    // Re-read the document being edited from the shaders directory into this session's editors. Shared by
+    // Reload and New, because both mean "the files on disk are now the truth".
+    void reloadEditorsFromDisk(const QString& name);
     // The document as the EDITOR has it - six texts, channels included - which is what a save must write:
     // the user may have typed without compiling, and those keystrokes are the point of saving.
     GraphicsDocumentFile currentDocumentFile() const;
@@ -131,8 +132,7 @@ signals:
     // Emitted when the user closes this window, so the menu action that opened it can be un-ticked.
     void closedByUser();
 
-public slots:
-    // The render thread's verdict. Connected to GraphicsRenderThread::shaderCompileFinished.
+public slots:    // The render thread's verdict. Connected to GraphicsRenderThread::shaderCompileFinished.
     //
     // `errorFile` is named the way ShaderText::diagnosticName() names files - relative to the shader
     // directory when it is inside it - which is what makes it comparable with this window's own file.

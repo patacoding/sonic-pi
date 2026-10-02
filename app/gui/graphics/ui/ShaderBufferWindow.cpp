@@ -177,15 +177,19 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
             jumpToLine(m_lastErrorLine);
     });
     QPushButton* newButton = new QPushButton(tr("New"), this);
-    // The six passes always exist, so creating one is not a thing the user does (2026-10-02). The
-    // control is hidden rather than deleted in this commit so the change stays one line wide.
-    newButton->setVisible(false);
-    QPushButton* loadButton = new QPushButton(tr("Load into Buffer..."), this);
-    QPushButton* saveButton = new QPushButton(tr("Save Buffer As..."), this);
+    QPushButton* loadButton = new QPushButton(tr("Open..."), this);
+    QPushButton* saveButton = new QPushButton(tr("Save As..."), this);
+    QPushButton* reloadButton = new QPushButton(tr("Reload"), this);
 
     // Named in the tooltip as well as bound, because a shortcut nobody is told about is not a feature.
-    m_compileButton->setToolTip(tr("Write this buffer and put it on screen (Ctrl+Return)"));
-    newButton->setToolTip(tr("Create a new buffer: one more .frag file in the shader directory"));
+    m_compileButton->setToolTip(tr("Write this pass and put the document on screen (Ctrl+Return)"));
+    newButton->setToolTip(tr("New document: pick an empty folder, and its six passes and record are "
+                             "created in it"));
+    loadButton->setToolTip(tr("Open a saved document: pick its %1").arg(graphicsDocumentRecordFileName()));
+    saveButton->setToolTip(tr("Save the whole document - six passes, its pictures, and a %1 - into a folder")
+                               .arg(graphicsDocumentRecordFileName()));
+    reloadButton->setToolTip(tr("Re-read this document from disk, throwing away unsaved edits. For code "
+                                "edited in another program."));
 
     m_status = new QLabel(this);
     m_status->setWordWrap(true);
@@ -258,6 +262,7 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     actions->addWidget(newButton);
     actions->addWidget(loadButton);
     actions->addWidget(saveButton);
+    actions->addWidget(reloadButton);
     actions->addWidget(m_status, 1);
     rows->addLayout(actions);
 
@@ -395,9 +400,10 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
         GraphicsLog::info(QStringLiteral("shader buffer: compile by button (%1)").arg(editingShaderName()));
         compile();
     });
-    connect(newButton, &QPushButton::clicked, this, [this, newButton]() { showAddPassMenu(newButton); });
+    connect(newButton, &QPushButton::clicked, this, &ShaderBufferWindow::newDocument);
     connect(loadButton, &QPushButton::clicked, this, &ShaderBufferWindow::loadFromFile);
     connect(saveButton, &QPushButton::clicked, this, &ShaderBufferWindow::saveToFile);
+    connect(reloadButton, &QPushButton::clicked, this, &ShaderBufferWindow::reloadFromDisk);
 
     // Switching tabs is a VIEW action and nothing else: it shows that buffer's text and its last
     // report, and does not touch what is on screen. Same as the audio side, where switching buffers
@@ -1886,6 +1892,151 @@ void ShaderBufferWindow::compileFinished(bool ok, const QString& compilerLog,
     showCompileReport(ok, compilerLog, errorFile, errorLine, name, includedShaders);
 }
 
+// A new document: an EMPTY FOLDER the user picks, and then everything a document is - which is the point
+// of asking for a folder rather than a name. The alternative (a name, created inside the shaders directory)
+// would make a new document something that only exists on this machine and only in one place; a folder is a
+// thing that can be moved, copied, versioned and handed over, which is what the save format already
+// produces.
+//
+// NOTHING IS CREATED UNTIL THE FOLDER IS CHOSEN, and a folder that already holds a record is refused rather
+// than merged: "new" that quietly turns into "overwrite" is the one reading nobody wants.
+void ShaderBufferWindow::newDocument()
+{
+    const QString startDir = m_settings
+                                 ? m_settings->value(QStringLiteral("lastDocumentDir"),
+                                                     QDir::homePath() + QStringLiteral("/Desktop")).toString()
+                                 : QDir::homePath();
+
+    const QString target = QFileDialog::getExistingDirectory(
+        this, tr("Choose an empty folder for the new document"), startDir,
+        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+    if (target.isEmpty())
+        return;   // cancelled, which is not an error
+
+    // The name defaults to the folder's own name, because that is what the person just chose and typing it
+    // twice is noise. Not forced: a folder called "2026-10-02" is a date, not a shader name.
+    QString name = QFileInfo(target).fileName();
+    bool accepted = false;
+    name = QInputDialog::getText(this, tr("New document"),
+                                 tr("Document name (the tab it opens as):"),
+                                 QLineEdit::Normal, name, &accepted).trimmed();
+    if (!accepted || name.isEmpty())
+        return;
+    if (name.contains(QRegularExpression(QStringLiteral("[\\\\/:*?\"<>|]"))))
+    {
+        m_status->setText(tr("A document name cannot contain \\ / : * ? \" < > |"));
+        return;
+    }
+    if (QFileInfo::exists(QDir(target).filePath(graphicsDocumentRecordFileName())))
+    {
+        m_status->setText(tr("%1 already holds a document (%2). Open it, or choose an empty folder.")
+                              .arg(target, graphicsDocumentRecordFileName()));
+        GraphicsLog::warn(QStringLiteral("shader buffer: new document refused, %1 already holds one")
+                              .arg(target));
+        return;
+    }
+
+    if (m_settings)
+        m_settings->setValue(QStringLiteral("lastDocumentDir"), target);
+
+    createDocumentIn(target, name);
+}
+
+// Write a blank document into `targetDirectory`: six pass files and the record, so the folder is a document
+// before anything else happens. Shared with New and with nothing else - a load writes what it read, and a
+// save writes what is being edited.
+bool ShaderBufferWindow::createDocumentIn(const QString& targetDirectory, const QString& name)
+{
+    GraphicsDocumentFile blank;
+    blank.name = name;
+    // A starting Image that draws something, and nothing else: the other five passes are empty on purpose,
+    // because an empty pass is a pass you have not written yet, and a template for one would be somebody
+    // else's idea of what it should do.
+    blank.setTextFor(GraphicsPass::Image, newBufferTemplate(name));
+    for (int i = 0; i < kDrawOrderCount; ++i)
+        blank.channels[int(kDrawOrder[i])].clear();
+
+    const GraphicsDocumentIoResult created = saveGraphicsDocument(blank, targetDirectory);
+    if (!created.ok)
+    {
+        m_status->setText(tr("Could not create the document: %1").arg(created.message));
+        GraphicsLog::error(QStringLiteral("shader buffer: could not create '%1' in %2: %3")
+                               .arg(name, targetDirectory, created.message));
+        return false;
+    }
+
+    // AND IT IS OPENED, in the shaders directory, so the new document is something you can compile rather
+    // than a folder you then have to find again. The workspace copy stays where it was chosen: the shaders
+    // directory is where the renderer reads from, and the folder is where the document lives.
+    if (!importDocumentFrom(created.message))
+        return false;
+
+    // The tab is named after the WORKSPACE folder, because that is the name it was loaded under - the record
+    // inside it keeps the name the user typed.
+    GraphicsLog::info(QStringLiteral("shader buffer: created document '%1' in %2 and opened it")
+                          .arg(name, targetDirectory));
+    m_status->setText(tr("Created %1 in %2 - opened as '%3'. Compile (Ctrl+Return) puts it on screen.")
+                          .arg(name, targetDirectory, editingShaderName()));
+    return true;
+}
+
+// Re-read the document being edited from the shaders directory.
+//
+// For the workflow this exists for: editing a pass in another program (or with the file manager, or in git).
+// There is deliberately NO file watcher - the user's decision, and the right one here: a shader that
+// recompiles itself the moment a file changes is a shader that changes while you are typing in another
+// window, and the whole point of the Compile button is that a change reaches the picture when the person
+// says so.
+//
+// UNSAVED EDITS ARE LOST, which is why the button says Reload and the tooltip says so.
+void ShaderBufferWindow::reloadFromDisk()
+{
+    const QString name = editingShaderName();
+    const GraphicsDocument document = scannedDocument(name);
+    if (!document.isValid())
+    {
+        m_status->setText(tr("Nothing on disk for '%1' to reload").arg(name));
+        return;
+    }
+
+    reloadEditorsFromDisk(name);
+    refreshPassSelector();
+    refreshChannelRow();
+    updateTabLabels();
+    updateWindowTitle();
+    if (m_renderThread)
+        m_renderThread->requestPassDocument(name, true);
+
+    GraphicsLog::info(QStringLiteral("shader buffer: reloaded '%1' from disk").arg(name));
+    m_status->setText(tr("Reloaded %1 from disk. Compile (Ctrl+Return) puts it on screen.").arg(name));
+}
+
+// Put the six files on disk into this session's editors. Shared by Reload and by a load, because both mean
+// the same thing: the files are now the truth and anything in memory is stale.
+void ShaderBufferWindow::reloadEditorsFromDisk(const QString& name)
+{
+    const GraphicsDocument document = scannedDocument(name);
+    if (!document.isValid())
+        return;
+
+    for (int i = 0; i < kDrawOrderCount; ++i)
+    {
+        const GraphicsPass pass = kDrawOrder[i];
+        const QString key = name + QLatin1Char('/') + graphicsPassName(pass);
+        SonicPiScintilla* editor = m_editorsByPass.value(key, nullptr);
+        if (!editor)
+            continue;
+
+        // The WRITER's path, not passPath(): a pass whose file does not exist yet must clear its editor, and
+        // passPath() answers "no file" for it - which is how a stale editor would keep the previous text.
+        const QString path = bufferFilePath(name, pass);
+        QFile file(path);
+        editor->setText(file.open(QIODevice::ReadOnly | QIODevice::Text)
+                            ? QString::fromUtf8(file.readAll())
+                            : QString());
+    }
+}
+
 // Load a document from one of these saved directories: the record is what is chosen, and the six texts, the
 // images and the channels come with it.
 //
@@ -1947,16 +2098,11 @@ bool ShaderBufferWindow::importDocumentFrom(const QString& recordPath)
     for (const QString& warning : saved.warnings)
         GraphicsLog::warn(QStringLiteral("shader buffer: load of %1: %2").arg(file.name, warning));
 
-    // THIS SESSION'S COPIES ARE NOW WRONG. Tabs are only ever added to, never rebuilt, and their editors hold
-    // the text they were built with - so without this the tab would show the PREVIOUS document's code while
-    // the file on disk held the new one, which is the one failure this whole feature exists to avoid.
-    for (int i = 0; i < kDrawOrderCount; ++i)
-    {
-        const GraphicsPass pass = kDrawOrder[i];
-        const QString key = file.name + QLatin1Char('/') + graphicsPassName(pass);
-        if (SonicPiScintilla* editor = m_editorsByPass.value(key, nullptr))
-            editor->setText(file.textFor(pass));
-    }
+    // This session's editors are stale the moment the files change: tabs are only ever added to, never
+    // rebuilt, and their editors hold the text they were built with - so without this the tab would show the
+    // PREVIOUS document's code while the file on disk held the new one, which is the one failure this whole
+    // feature exists to avoid.
+    reloadEditorsFromDisk(file.name);
 
     // The channels, into the document's own file - so what the row shows and what the renderer reads come
     // from the same place, and re-saving this document writes the same assignments back.
