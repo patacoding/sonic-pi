@@ -508,6 +508,9 @@ private:
     // is what the per-frame A -> B -> C -> D -> Image ordering will drive. Compiled and reported here,
     // not yet drawn into, so the screen is unchanged.
     std::unique_ptr<GraphicsPassPrograms> m_passPrograms;
+
+    // How many passes were drawn last frame, so the line is emitted when that CHANGES and not per frame.
+    int m_passesDrawnLastFrame = -1;
     // Index of the target currently published for consumers, or -1 before the first
     // frame. Written only by this thread.
     int m_readyIndex = -1;

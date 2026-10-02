@@ -1284,6 +1284,47 @@ void GraphicsRenderThread::run()
         // frame waits for the next - which is the point of applying switches at a frame boundary.
         GraphicsRenderer* activeRenderer = m_activeRenderer.load(std::memory_order_relaxed);
 
+        // The document's passes, in the order GraphicsPasses.h names: each into its own target pair, so a
+        // pass samples the previous frame of anything it reads while this frame's earlier passes are
+        // already written. Nothing here touches the on-screen path below - m_targets, the active renderer
+        // and the handoff are left exactly as they were - so this draws off-screen and the picture is
+        // unchanged until channels are bound, which is the next step.
+        //
+        // Channels are deliberately unbound: a pass that samples one gets black, the rule the web renderer
+        // settled on for an absent buffer. Reported when the count CHANGES, never per frame.
+        if (m_passPrograms && m_passPrograms->isValid())
+        {
+            int drawn = 0;
+            for (int i = 0; i < kDrawOrderCount; ++i)
+            {
+                GraphicsRenderer* passRenderer = m_passPrograms->pass(kDrawOrder[i]);
+                if (!passRenderer || !m_bufferTargets[i])
+                    continue;   // an empty pass costs nothing
+
+                GraphicsTarget* passTarget = m_bufferTargets[i]->write();
+                if (!passTarget)
+                    continue;
+
+                passTarget->bind();
+                if (QOpenGLExtraFunctions* extra = m_context ? m_context->extraFunctions() : nullptr)
+                    extra->glViewport(0, 0, passTarget->size().width(), passTarget->size().height());
+
+                // The frame values are shared with the pass, so a pass sees the same clock as the buffer on
+                // screen; only the resolution differs, and the existing code sets that again before it draws.
+                frame.resolution = passTarget->size();
+                if (passRenderer->renderInto(*passTarget, frame))
+                    ++drawn;
+
+                m_bufferTargets[i]->swap();   // this frame's result becomes what a later pass reads
+            }
+            if (drawn != m_passesDrawnLastFrame)
+            {
+                m_passesDrawnLastFrame = drawn;
+                GraphicsLog::info(QStringLiteral("passes drawn: %1 of %2 (off-screen; channels unbound)")
+                                      .arg(drawn)
+                                      .arg(kDrawOrderCount));
+            }
+        }
         if (activeRenderer && m_targets[back])
         {
             GraphicsTarget& target = *m_targets[back];
