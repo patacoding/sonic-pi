@@ -34,6 +34,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QString>
+#include <QSize>
 #include <QStringList>
 
 #include "GraphicsPasses.h"
@@ -244,6 +245,120 @@ inline bool writeGraphicsDocumentChannels(const GraphicsDocument& document, Grap
     }
     return true;
 }
+// WHERE A CHANNEL GETS ITS TEXTURE. The simplified set this feature supports (plan 23): one of the
+// document's own buffers, an image file, or a cubemap file - and nothing else. Shadertoy's full list (video,
+// keyboard, microphone, audio) is deliberately out of scope.
+//
+// It travels as {kind, ref} rather than an index because a channel is no longer only "which buffer": the web
+// version left the same seam for the same reason, so adding video later would be one more kind and not a
+// second model.
+struct GraphicsChannelSource
+{
+    enum Kind { None, Buffer, Texture, Cubemap };
+
+    Kind kind = None;
+    int bufferIndex = -1;   // Buffer: the draw index of the pass it reads (graphicsPassDrawIndex)
+    QString path;           // Texture and Cubemap: the file, as the user chose it
+
+    bool isBuffer() const { return kind == Buffer && bufferIndex >= 0; }
+    bool isTexture() const { return kind == Texture && !path.isEmpty(); }
+    bool isCubemap() const { return kind == Cubemap && !path.isEmpty(); }
+
+    bool operator==(const GraphicsChannelSource& other) const
+    {
+        return kind == other.kind && bufferIndex == other.bufferIndex && path == other.path;
+    }
+    bool operator!=(const GraphicsChannelSource& other) const { return !(*this == other); }
+};
+
+// The text after "iChannelN =", read into a source. Prefixes rather than a second table, so "which kind" and
+// "which file" are on one line and the file stays readable and hand-editable:
+//
+//     none            -> None
+//     bufferA .. D    -> Buffer (bare names, so files written before this keep working unchanged)
+//     texture:<path>  -> Texture
+//     cubemap:<path>  -> Cubemap
+//
+// Anything unrecognised is None, which is what an absent buffer already means: black, not a fault.
+inline GraphicsChannelSource graphicsChannelSourceFromText(const QString& text)
+{
+    GraphicsChannelSource source;
+    const QString wanted = text.trimmed();
+    const QString lowered = wanted.toLower();
+
+    if (lowered.isEmpty() || lowered == QLatin1String("none"))
+        return source;
+
+    if (lowered.startsWith(QLatin1String("texture:")))
+    {
+        source.kind = GraphicsChannelSource::Texture;
+        source.path = wanted.mid(8).trimmed();
+        return source;
+    }
+    if (lowered.startsWith(QLatin1String("cubemap:")))
+    {
+        source.kind = GraphicsChannelSource::Cubemap;
+        source.path = wanted.mid(8).trimmed();
+        return source;
+    }
+
+    const int index = graphicsChannelSourceFromName(wanted);
+    if (index >= 0)
+    {
+        source.kind = GraphicsChannelSource::Buffer;
+        source.bufferIndex = index;
+    }
+    return source;
+}
+
+inline QString graphicsChannelSourceToText(const GraphicsChannelSource& source)
+{
+    switch (source.kind)
+    {
+    case GraphicsChannelSource::Buffer:
+        if (source.bufferIndex >= 0 && source.bufferIndex < kDrawOrderCount)
+            return graphicsPassName(kDrawOrder[source.bufferIndex]);
+        return QStringLiteral("none");
+    case GraphicsChannelSource::Texture:
+        return source.path.isEmpty() ? QStringLiteral("none") : QStringLiteral("texture:") + source.path;
+    case GraphicsChannelSource::Cubemap:
+        return source.path.isEmpty() ? QStringLiteral("none") : QStringLiteral("cubemap:") + source.path;
+    case GraphicsChannelSource::None:
+        break;
+    }
+    return QStringLiteral("none");
+}
+
+// The six faces of a cubemap, in the order QOpenGLTexture wants them (+X, -X, +Y, -Y, +Z, -Z), taken from ONE
+// image laid out as a cross. That layout is the user's choice (2026-10-02) and is the usual 4x3 cross:
+//
+//         +Y
+//     -X  +Z  +X  -Z
+//         -Y
+//
+// so face size is width/4 by height/3, and the four cells of the middle row are read in that order. The
+// function only reports WHERE each face is; reading pixels is the renderer's business, which keeps this file
+// free of Qt GUI types (it is included by the render thread as well as the editor).
+struct GraphicsCubemapFace { int x = 0; int y = 0; };
+inline bool graphicsCubemapCrossFaces(const QSize& imageSize, GraphicsCubemapFace faces[6])
+{
+    if (imageSize.width() <= 0 || imageSize.height() <= 0)
+        return false;
+    const int faceW = imageSize.width() / 4;
+    const int faceH = imageSize.height() / 3;
+    if (faceW <= 0 || faceH <= 0)
+        return false;
+
+    // +X, -X, +Y, -Y, +Z, -Z  (QOpenGLTexture::CubeMapPositiveX ... CubeMapNegativeZ)
+    faces[0] = GraphicsCubemapFace{ 2 * faceW, 1 * faceH };   // +X
+    faces[1] = GraphicsCubemapFace{ 0 * faceW, 1 * faceH };   // -X
+    faces[2] = GraphicsCubemapFace{ 1 * faceW, 0 * faceH };   // +Y
+    faces[3] = GraphicsCubemapFace{ 1 * faceW, 2 * faceH };   // -Y
+    faces[4] = GraphicsCubemapFace{ 1 * faceW, 1 * faceH };   // +Z
+    faces[5] = GraphicsCubemapFace{ 3 * faceW, 1 * faceH };   // -Z
+    return true;
+}
+
 // The passes this document actually HAS, in the frame order GraphicsPasses.h names: Image always (it is
 // what makes a directory a document), and each Buffer only when its file exists. This is what a pass
 // selector should offer, and what keeps an editor tab from offering a pass the renderer has no program
