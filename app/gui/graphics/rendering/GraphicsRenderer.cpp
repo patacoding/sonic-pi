@@ -604,16 +604,6 @@ GraphicsCompileResult GraphicsRenderer::buildProgram(const QString& vertexFile,
     // four is mine and which is the framework's" is exactly the kind of thing that should not have to be
     // deduced from a compile error.
     {
-    // The document's Common, if it has one: ahead of the built-in declarations below, because those are
-    // skipped for names the shader declares itself (so the order does not matter to them), and after
-    // #include expansion above, which is what wrote the #line source-string numbers that attach the
-    // driver's diagnostics to files - text inserted ahead of that would move every reported line.
-    // Empty for a single-pass shader, in which case this is a no-op.
-    if (!m_prependedText.isEmpty()) {
-        fragSource = m_prependedText + QLatin1Char('\n') + fragSource;
-        GraphicsLog::info(QStringLiteral("shader: prepended %1 bytes of the document's Common")
-                              .arg(m_prependedText.size()));
-    }
 
         const ShaderText::BuiltinUniforms builtins = ShaderText::withBuiltinUniforms(fragSource);
         fragSource = builtins.text;

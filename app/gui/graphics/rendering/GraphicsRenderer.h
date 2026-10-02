@@ -167,8 +167,6 @@ public:
     // The document's Common text, prepended to every pass this renderer compiles. Empty by default,
     // which is exactly the single-shader case. It is a setter rather than a constructor argument
     // because a document is switched at runtime and the renderer outlives the switch.
-    void setPrependedText(const QString& text) { m_prependedText = text; }
-    QString prependedText() const { return m_prependedText; }
 
     // Builds the quad geometry and loads the shader files. Requires a current
     // context. Returns false and logs why on failure.
@@ -418,7 +416,6 @@ private:
     // own program WITHOUT disturbing the cached locations belonging to m_program.
     static Uniforms queryUniforms(QOpenGLShaderProgram* program);
     Uniforms m_uniforms;
-    QString m_prependedText;
 
     // Whether "this program declares no uniforms at all" has already been reported,
     // so the note appears once per program rather than once per frame.
