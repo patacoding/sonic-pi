@@ -586,22 +586,33 @@ void ShaderBufferWindow::refreshPassSelector()
     const QList<GraphicsPass> passes = found.isValid()
                                            ? graphicsDocumentPasses(found)
                                            : QList<GraphicsPass>{ GraphicsPass::Image };
+    // The tab ORDER is Shadertoy's, not the render order: Image first and selected by default, then
+    // Common, then the buffers. The render order (A -> B -> C -> D -> Image) is a property of the
+    // pipeline and does not belong in a strip a person clicks - presenting it there would say the wrong
+    // thing about what happens first. Image first is also what the web editor settled on after a user
+    // report: opening onto Common showed an empty editor while the code that was drawing sat in Image.
+    QList<GraphicsPass> display;
+    if (passes.contains(GraphicsPass::Image))
+        display << GraphicsPass::Image;
+    if (!found.passPath(GraphicsPass::Common).isEmpty())
+        display << GraphicsPass::Common;
+    for (int i = 0; i < kDrawOrderCount; ++i)
+    {
+        if (kDrawOrder[i] != GraphicsPass::Image && passes.contains(kDrawOrder[i]))
+            display << kDrawOrder[i];
+    }
+
     m_passBar->blockSignals(true);
     while (m_passBar->count() > 0)
         m_passBar->removeTab(0);
     int current = -1;
-    for (GraphicsPass pass : passes)
+    for (GraphicsPass pass : display)
     {
         const int index = m_passBar->addTab(graphicsPassLabel(pass));
         m_passBar->setTabData(index, int(pass));
         if (pass == editingPass())
             current = index;
     }
-    if (current >= 0)
-        m_passBar->setCurrentIndex(current);
-    // Nothing to choose for a single-pass document, so it does not sit there pretending otherwise.
-    m_passBar->setVisible(passes.size() > 1);
-    m_passBar->blockSignals(false);
 }
 
 void ShaderBufferWindow::refreshChannelRow()
