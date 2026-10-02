@@ -27,6 +27,9 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QComboBox>
+
+#include "GraphicsDocuments.h"
 #include <QHBoxLayout>
 #include <QHash>
 #include <QInputDialog>
@@ -517,6 +520,85 @@ QString ShaderBufferWindow::editingShaderName() const
     return m_tabs->tabText(m_tabs->currentIndex()).remove(kOnScreenMark).trimmed();
 }
 
+GraphicsPass ShaderBufferWindow::editingPass() const
+{
+    return m_passByDocument.value(editingShaderName(), GraphicsPass::Image);
+}
+
+void ShaderBufferWindow::refreshPassSelector()
+{
+    if (!m_passSelector)
+        return;
+
+    const QString document = editingShaderName();
+
+    // From the directory, not from a stored copy: the same scan the renderer uses, so the selector cannot
+    // offer a pass the pipeline does not have.
+    GraphicsDocument found;
+    const QList<GraphicsDocument> documents =
+        scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath());
+    for (const GraphicsDocument& candidate : documents)
+    {
+        if (candidate.name.compare(document, Qt::CaseInsensitive) == 0)
+        {
+            found = candidate;
+            break;
+        }
+    }
+    const QList<GraphicsPass> passes = found.isValid()
+                                           ? graphicsDocumentPasses(found)
+                                           : QList<GraphicsPass>{ GraphicsPass::Image };
+    m_passSelector->blockSignals(true);
+    m_passSelector->clear();
+    for (GraphicsPass pass : passes)
+        m_passSelector->addItem(graphicsPassLabel(pass), int(pass));
+    const int index = m_passSelector->findData(int(editingPass()));
+    if (index >= 0)
+        m_passSelector->setCurrentIndex(index);
+    // Nothing to choose for a single-pass document, so it does not sit there pretending otherwise.
+    m_passSelector->setVisible(passes.size() > 1);
+    m_passSelector->blockSignals(false);
+}
+
+void ShaderBufferWindow::setEditingPass(GraphicsPass pass)
+{
+    const QString document = editingShaderName();
+    if (document.isEmpty() || m_passByDocument.value(document, GraphicsPass::Image) == pass)
+        return;
+
+    // Switching passes writes the text being left behind to ITS OWN file first. Not a silent switch: the
+    // editor holds one pass at a time, and re-loading the other text over unsaved edits would be data loss
+    // dressed up as tidiness - the same reasoning the tab list already follows.
+    SonicPiScintilla* editor = currentEditor();
+    if (editor)
+    {
+        QFile out(bufferFilePath(document, editingPass()));
+        if (out.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+        {
+            QTextStream stream(&out);
+            stream << editor->text();
+            out.close();
+        }
+    }
+
+    m_passByDocument.insert(document, pass);
+
+    if (editor)
+    {
+        QFile in(bufferFilePath(document, pass));
+        if (in.open(QIODevice::ReadOnly | QIODevice::Text))
+        {
+            QTextStream stream(&in);
+            editor->setText(stream.readAll());
+            in.close();
+        }
+    }
+
+    GraphicsLog::info(QStringLiteral("shader buffer: %1 now edits %2 (%3)")
+                          .arg(document, graphicsPassLabel(pass), bufferFilePath(document, pass)));
+    m_status->setText(tr("Editing %1 of %2").arg(graphicsPassLabel(pass), document));
+}
+
 SonicPiScintilla* ShaderBufferWindow::currentEditor() const
 {
     return m_editors.value(editingShaderName(), nullptr);
@@ -529,7 +611,8 @@ void ShaderBufferWindow::rebuildTabs(const QString& selectName)
     // Tabs are only ever ADDED here, never removed: a file that disappears from the directory while
     // the window is open may still have unsaved text in its tab, and silently dropping that would be
     // data loss dressed up as tidiness.
-    const QStringList names = GraphicsSettings::shaderNames();
+    // A tab is a DOCUMENT: a directory holding image.frag, or a top-level .frag as before.
+    const QStringList names = GraphicsSettings::documentNames();
     for (const QString& name : names)
     {
         if (m_editors.contains(name))
@@ -550,7 +633,7 @@ void ShaderBufferWindow::rebuildTabs(const QString& selectName)
         // Read the buffer's file into its editor. Missing is a normal state - a buffer created by name
         // whose file was never written - and it is reported in that buffer's own status, not as a
         // window-wide failure.
-        QFile file(bufferFilePath(name));
+        QFile file(bufferFilePath(name, m_passByDocument.value(name, GraphicsPass::Image)));
         if (file.open(QIODevice::ReadOnly | QIODevice::Text))
         {
             QTextStream in(&file);
@@ -569,6 +652,7 @@ void ShaderBufferWindow::rebuildTabs(const QString& selectName)
                                                                              bufferFilePath(name)));
     }
 
+    refreshPassSelector();
     updateTabLabels();
 
     const QString wanted = selectName.isEmpty() ? editingShaderName() : selectName;
@@ -626,6 +710,7 @@ void ShaderBufferWindow::showCurrentBuffer()
     if (name.isEmpty())
         return;
 
+    refreshPassSelector();
     updateTabLabels();
     updateWindowTitle();
 
@@ -738,6 +823,7 @@ void ShaderBufferWindow::closeBuffer(const QString& shaderName)
         }
     }
 
+    refreshPassSelector();
     updateTabLabels();
     if (m_tabs->count() > 0)
         selectTab(editingShaderName());
@@ -828,6 +914,7 @@ void ShaderBufferWindow::renameBuffer(const QString& oldName)
         m_renderThread->requestShaderForget(oldName);
     }
 
+    refreshPassSelector();
     updateTabLabels();
     selectTab(name);
     m_status->setText(tr("Renamed to %1 (%2)").arg(name, newPath));
@@ -949,7 +1036,8 @@ void ShaderBufferWindow::compileFinished(bool ok, const QString& compilerLog,
 
     // The picture follows the buffer that compiled, so the mark on the tabs has to move with it.
     if (ok && m_renderThread)
-        updateTabLabels();
+        refreshPassSelector();
+    updateTabLabels();
 
     // Remembered so that "which buffer is on screen" survives the next session: written only when the
     // compile succeeded, because a buffer that did not build never reached the screen.

@@ -13,6 +13,7 @@
 
 #pragma once
 
+#include <QComboBox>
 #include <QWidget>
 
 #include <memory>
@@ -227,6 +228,12 @@ private:
     // 17.2); its tab edits one pass at a time, and Image until the selector says otherwise - which is also
     // the only pass a top-level .frag has, so this changes nothing for what is on disk today.
     QHash<QString, GraphicsPass> m_passByDocument;
+
+    // The pass selector of the current document: which of Common/Image/Buffer A-D this tab is editing.
+    QComboBox* m_passSelector = nullptr;
+    GraphicsPass editingPass() const;
+    void setEditingPass(GraphicsPass pass);
+    void refreshPassSelector();
 
     // Owned by the editors (set on them), and held here so applyTheme() can re-colour them.
     GlslLexer* m_lexer = nullptr;
