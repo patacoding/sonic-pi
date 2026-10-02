@@ -80,6 +80,22 @@ struct GraphicsDocument
     QString m_singlePassFile;
 };
 
+// The passes this document actually HAS, in the frame order GraphicsPasses.h names: Image always (it is
+// what makes a directory a document), and each Buffer only when its file exists. This is what a pass
+// selector should offer, and what keeps an editor tab from offering a pass the renderer has no program
+// for - the same rule as "an absent buffer is an empty pass" (plan 17.2), expressed once.
+inline QList<GraphicsPass> graphicsDocumentPasses(const GraphicsDocument& document)
+{
+    QList<GraphicsPass> passes;
+    if (!document.isValid())
+        return passes;
+    for (int i = 0; i < kDrawOrderCount; ++i) {
+        if (!document.passPath(kDrawOrder[i]).isEmpty())
+            passes.append(kDrawOrder[i]);
+    }
+    return passes;
+}
+
 // Every document under `shadersDir`: its subdirectories that hold image.frag, plus its top-level .frag
 // files (each of which stays a single-pass document, exactly as before this feature).
 inline QList<GraphicsDocument> scanGraphicsDocuments(const QString& shadersDir)
