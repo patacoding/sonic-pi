@@ -512,6 +512,11 @@ private:
     // How many passes were drawn last frame, so the line is emitted when that CHANGES and not per frame.
     int m_passesDrawnLastFrame = -1;
 
+    // What each channel reads, as a draw index or -1 for None, taken from the document's channels.txt (or
+    // None when it has none). Defaults to -1 everywhere so an unset document samples black, not stale
+    // memory - a channel that reads something nobody chose is worse than a black one.
+    int m_channelSources[4] = { -1, -1, -1, -1 };
+
     // Which pass the screen was last fed from, so the line is emitted when it CHANGES and not per frame.
     int m_screenSource = -1;
     // Index of the target currently published for consumers, or -1 before the first

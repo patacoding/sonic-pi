@@ -344,6 +344,18 @@ bool GraphicsRenderThread::applyRenderTargetSizeRequest()
         for (const GraphicsDocument& document : documents) {
             if (document.singlePass)
                 continue;   // a single-pass .frag stays on the existing candidate/active path
+            // The document's channels, once, where the document is known: the per-frame loop must not read a
+            // file, and the assignment cannot change mid-frame.
+            // Missing file means the DEFAULT assignment (channel i reads Buffer i), not None: a document
+            // that says nothing about channels must keep behaving as it did before channels were
+            // configurable. Present-but-silent about one channel means None for that one, because then the
+            // user did express an opinion.
+            const bool hasChannelsFile = !graphicsDocumentChannelsPath(document).isEmpty()
+                                         && QFileInfo::exists(graphicsDocumentChannelsPath(document));
+            const QList<int> channels = graphicsDocumentChannels(document);
+            for (int i = 0; i < 4; ++i)
+                m_channelSources[i] = hasChannelsFile ? ((i < channels.size()) ? channels[i] : -1) : i;
+
             m_passPrograms = std::make_unique<GraphicsPassPrograms>();
             if (!m_passPrograms->create(document, QString())) {
                 GraphicsLog::error(QStringLiteral("pass programs: document '%1' compiled nothing")
@@ -1318,9 +1330,16 @@ void GraphicsRenderThread::run()
                 // of the ping-pong for free, with no index arithmetic to get wrong.
                 for (int ch = 0; ch < 4; ++ch)
                 {
-                    GraphicsPass source = kDrawOrder[ch];
-                    GraphicsRenderer* sourcePass = m_passPrograms->pass(source);
-                    GraphicsTarget* readSide = (sourcePass && m_bufferTargets[ch]) ? m_bufferTargets[ch]->read() : nullptr;
+                    // The source is the DOCUMENT's choice (channels.txt), not "channel i reads Buffer i".
+                    // -1 is None, which stays a zero texture id and therefore black; a source with no
+                    // program is None for the same reason - an absent buffer is an empty pass.
+                    const int sourceIndex = m_channelSources[ch];
+                    GraphicsRenderer* sourcePass = (sourceIndex >= 0 && sourceIndex < kDrawOrderCount)
+                                                       ? m_passPrograms->pass(kDrawOrder[sourceIndex])
+                                                       : nullptr;
+                    GraphicsTarget* readSide = (sourcePass && m_bufferTargets[sourceIndex])
+                                                   ? m_bufferTargets[sourceIndex]->read()
+                                                   : nullptr;
                     frame.channelTexture[ch] = (readSide && readSide->isValid()) ? readSide->texture() : 0;
                     if (frame.channelTexture[ch] != 0 && m_context && m_context->extraFunctions())
                         m_context->extraFunctions()->glBindTexture(GL_TEXTURE_2D, frame.channelTexture[ch]);

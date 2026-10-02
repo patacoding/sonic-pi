@@ -80,6 +80,96 @@ struct GraphicsDocument
     QString m_singlePassFile;
 };
 
+// The four Shadertoy channels of a document, as the DRAW INDEX of the buffer each one reads, or -1 for
+// None (a shader sampling it gets black).
+//
+// Stored as a small text file beside the document's passes, one line per channel:
+//
+//     iChannel0 = bufferA
+//     iChannel1 = none
+//
+// Human-readable and hand-editable on purpose: this is exactly the kind of setting a person wants to see
+// and change without a UI, and a diff of it should mean something. A missing file, a missing line or an
+// unreadable name all mean "None for that channel" - the same rule as an absent buffer being an empty
+// pass, so a hand-edited mistake degrades to black rather than to an exception.
+inline QString graphicsDocumentChannelsFileName() { return QStringLiteral("channels.txt"); }
+
+inline QString graphicsDocumentChannelsPath(const GraphicsDocument& document)
+{
+    if (document.directory.isEmpty())
+        return QString();
+    return QDir(document.directory).filePath(graphicsDocumentChannelsFileName());
+}
+
+// The channel whose line names `name`, or -1 when the line says none/anything unrecognised. `name` is
+// compared against graphicsPassName() (bufferA..bufferD, image), so the file speaks the same vocabulary
+// as everything else.
+inline int graphicsChannelSourceFromName(const QString& name)
+{
+    const QString wanted = name.trimmed().toLower();
+    if (wanted.isEmpty() || wanted == QLatin1String("none"))
+        return -1;
+    for (int i = 0; i < kDrawOrderCount; ++i) {
+        if (graphicsPassName(kDrawOrder[i]).toLower() == wanted)
+            return i;
+    }
+    return -1;
+}
+
+inline QList<int> graphicsDocumentChannels(const GraphicsDocument& document)
+{
+    QList<int> channels;
+    channels << -1 << -1 << -1 << -1;   // None everywhere until the file says otherwise
+
+    const QString path = graphicsDocumentChannelsPath(document);
+    if (path.isEmpty())
+        return channels;
+
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+        return channels;
+
+    QTextStream in(&file);
+    while (!in.atEnd()) {
+        const QString line = in.readLine().trimmed();
+        const int equals = line.indexOf(QLatin1Char('='));
+        if (equals <= 0)
+            continue;
+        const QString key = line.left(equals).trimmed().toLower();
+        if (!key.startsWith(QLatin1String("ichannel")))
+            continue;
+        bool ok = false;
+        const int index = key.mid(8).toInt(&ok);      // "ichannel" is 8 characters
+        if (!ok || index < 0 || index > 3)
+            continue;
+        channels[index] = graphicsChannelSourceFromName(line.mid(equals + 1));
+    }
+    return channels;
+}
+
+// Write the four lines. Returns false when there is nowhere to write (no directory) or the file cannot be
+// opened, and the caller reports that rather than pretending the setting was saved.
+inline bool writeGraphicsDocumentChannels(const GraphicsDocument& document, const QList<int>& channels)
+{
+    const QString path = graphicsDocumentChannelsPath(document);
+    if (path.isEmpty() || channels.size() != 4)
+        return false;
+
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+        return false;
+
+    QTextStream out(&file);
+    for (int i = 0; i < 4; ++i) {
+        const int source = channels[i];
+        const QString name = (source >= 0 && source < kDrawOrderCount)
+                                 ? graphicsPassName(kDrawOrder[source])
+                                 : QStringLiteral("none");
+        out << QStringLiteral("iChannel%1 = %2\n").arg(i).arg(name);
+    }
+    return true;
+}
+
 // The passes this document actually HAS, in the frame order GraphicsPasses.h names: Image always (it is
 // what makes a directory a document), and each Buffer only when its file exists. This is what a pass
 // selector should offer, and what keeps an editor tab from offering a pass the renderer has no program
