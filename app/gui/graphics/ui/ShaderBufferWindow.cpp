@@ -695,31 +695,19 @@ void ShaderBufferWindow::setEditingPass(GraphicsPass pass)
     if (document.isEmpty() || m_passByDocument.value(document, GraphicsPass::Image) == pass)
         return;
 
-    // Switching passes writes the text being left behind to ITS OWN file first. Not a silent switch: the
-    // editor holds one pass at a time, and re-loading the other text over unsaved edits would be data loss
-    // dressed up as tidiness - the same reasoning the tab list already follows.
-    SonicPiScintilla* editor = currentEditor();
-    if (editor)
-    {
-        QFile out(bufferFilePath(document, editingPass()));
-        if (out.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
-        {
-            QTextStream stream(&out);
-            stream << editor->text();
-            out.close();
-        }
-    }
-
     m_passByDocument.insert(document, pass);
 
-    if (editor)
+    // A change of VIEW, exactly as on Shadertoy: every pass has its own editor, so this shows a different
+    // one and does nothing else. No file is written - the previous version wrote the file being left behind
+    // on every click, which is a save the user did not ask for - and nothing is re-read, so undo, selection
+    // and scroll stay with the pass they belong to.
+    if (QStackedWidget* stack = m_editorStacks.value(document, nullptr))
     {
-        QFile in(bufferFilePath(document, pass));
-        if (in.open(QIODevice::ReadOnly | QIODevice::Text))
+        const QString key = document + QLatin1Char('/') + graphicsPassName(pass);
+        if (SonicPiScintilla* editor = m_editorsByPass.value(key, nullptr))
         {
-            QTextStream stream(&in);
-            editor->setText(stream.readAll());
-            in.close();
+            stack->setCurrentWidget(editor);
+            m_editors.insert(document, editor);
         }
     }
 
