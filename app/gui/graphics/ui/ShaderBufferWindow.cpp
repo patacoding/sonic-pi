@@ -550,7 +550,7 @@ GraphicsPass ShaderBufferWindow::editingPass() const
 
 void ShaderBufferWindow::refreshPassSelector()
 {
-    if (!m_passBar)
+    if (!m_passSelector)
         return;
 
     const QString document = editingShaderName();
