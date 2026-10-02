@@ -14,6 +14,7 @@
 #pragma once
 
 #include <QComboBox>
+#include <QTabBar>
 #include <QWidget>
 
 #include <memory>
@@ -230,7 +231,7 @@ private:
     QHash<QString, GraphicsPass> m_passByDocument;
 
     // The pass selector of the current document: which of Common/Image/Buffer A-D this tab is editing.
-    QComboBox* m_passSelector = nullptr;
+    QTabBar* m_passBar = nullptr;
 
     // The four channels, INLINE under the editor rather than behind a dialog: it is the layout Shadertoy
     // and the web version both use, and a setting you can see while looking at the code it feeds is worth

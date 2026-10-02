@@ -222,6 +222,21 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     auto* buttons = new QWidget(this);
     auto* buttonsLayout = new QHBoxLayout(buttons);
     buttonsLayout->setContentsMargins(0, 0, 0, 0);
+    // The PASS TABS: Common | Buffer A | ... | Image, the shape Shadertoy and the web editor both use
+    // (graphics-web-canvas.md 4.7). Tabs rather than a dropdown, because a document's structure should be
+    // visible at a glance - a dropdown hides which passes exist behind one click, and "which passes are
+    // there" is the first thing this feature is about. Hidden entirely for a single-pass .frag.
+    m_passBar = new QTabBar(this);
+    m_passBar->setExpanding(false);
+    m_passBar->setDrawBase(false);
+    m_passBar->setToolTip(tr("Which text of this document to edit (Ctrl+Return compiles it)"));
+    connect(m_passBar, &QTabBar::currentChanged, this, [this](int index) {
+        if (!m_passBar || index < 0)
+            return;
+        setEditingPass(static_cast<GraphicsPass>(m_passBar->tabData(index).toInt()));
+    });
+    buttonsLayout->addWidget(m_passBar);
+
     buttonsLayout->addWidget(m_compileButton);
     buttonsLayout->addWidget(newButton);
 
@@ -550,7 +565,7 @@ GraphicsPass ShaderBufferWindow::editingPass() const
 
 void ShaderBufferWindow::refreshPassSelector()
 {
-    if (!m_passSelector)
+    if (!m_passBar)
         return;
 
     const QString document = editingShaderName();
@@ -571,16 +586,22 @@ void ShaderBufferWindow::refreshPassSelector()
     const QList<GraphicsPass> passes = found.isValid()
                                            ? graphicsDocumentPasses(found)
                                            : QList<GraphicsPass>{ GraphicsPass::Image };
-    m_passSelector->blockSignals(true);
-    m_passSelector->clear();
+    m_passBar->blockSignals(true);
+    while (m_passBar->count() > 0)
+        m_passBar->removeTab(0);
+    int current = -1;
     for (GraphicsPass pass : passes)
-        m_passSelector->addItem(graphicsPassLabel(pass), int(pass));
-    const int index = m_passSelector->findData(int(editingPass()));
-    if (index >= 0)
-        m_passSelector->setCurrentIndex(index);
+    {
+        const int index = m_passBar->addTab(graphicsPassLabel(pass));
+        m_passBar->setTabData(index, int(pass));
+        if (pass == editingPass())
+            current = index;
+    }
+    if (current >= 0)
+        m_passBar->setCurrentIndex(current);
     // Nothing to choose for a single-pass document, so it does not sit there pretending otherwise.
-    m_passSelector->setVisible(passes.size() > 1);
-    m_passSelector->blockSignals(false);
+    m_passBar->setVisible(passes.size() > 1);
+    m_passBar->blockSignals(false);
 }
 
 void ShaderBufferWindow::refreshChannelRow()
