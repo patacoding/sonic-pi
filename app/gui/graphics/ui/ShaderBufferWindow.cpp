@@ -172,6 +172,9 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
             jumpToLine(m_lastErrorLine);
     });
     QPushButton* newButton = new QPushButton(tr("New"), this);
+    // The six passes always exist, so creating one is not a thing the user does (2026-10-02). The
+    // control is hidden rather than deleted in this commit so the change stays one line wide.
+    newButton->setVisible(false);
     QPushButton* loadButton = new QPushButton(tr("Load into Buffer..."), this);
     QPushButton* saveButton = new QPushButton(tr("Save Buffer As..."), this);
 
@@ -253,12 +256,14 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     connect(addPassButton, &QPushButton::clicked, this, [this, addPassButton]() {
         showAddPassMenu(addPassButton);
     });
+    addPassButton->setVisible(false);
     buttonsLayout->addWidget(addPassButton);
 
     // Removing a pass, as Shadertoy's tab bar does: right-click the tab. Image is refused rather than
     // hidden - a directory without image.frag is not a document, and a menu that silently lacks the entry
     // leaves the rule invisible.
-    m_passBar->setContextMenuPolicy(Qt::CustomContextMenu);
+    // No delete either: the six passes are the document, so there is nothing to remove.
+    m_passBar->setContextMenuPolicy(Qt::DefaultContextMenu);
     connect(m_passBar, &QTabBar::customContextMenuRequested, this, [this](const QPoint& at) {
         const int index = m_passBar->tabAt(at);
         if (index < 0)
@@ -643,24 +648,18 @@ void ShaderBufferWindow::refreshPassSelector()
             break;
         }
     }
-    const QList<GraphicsPass> passes = found.isValid()
-                                           ? graphicsDocumentPasses(found)
-                                           : QList<GraphicsPass>{ GraphicsPass::Image };
+    // SIX TABS, ALWAYS, in the order the user asked for: Image, Buffer A, Buffer B, Buffer C, Buffer D,
+    // Common. Fixed rather than derived from the directory - a pass is a tab you can open and type into, and
+    // compiling it creates its file. Nothing to create, nothing to delete, and no state in which a pass is
+    // "not there yet": that whole class of confusion is what this removes.
+    const QList<GraphicsPass> passes = { GraphicsPass::Image,  GraphicsPass::BufferA, GraphicsPass::BufferB,
+                                         GraphicsPass::BufferC, GraphicsPass::BufferD, GraphicsPass::Common };
     // The tab ORDER is Shadertoy's, not the render order: Image first and selected by default, then
     // Common, then the buffers. The render order (A -> B -> C -> D -> Image) is a property of the
     // pipeline and does not belong in a strip a person clicks - presenting it there would say the wrong
     // thing about what happens first. Image first is also what the web editor settled on after a user
     // report: opening onto Common showed an empty editor while the code that was drawing sat in Image.
-    QList<GraphicsPass> display;
-    if (passes.contains(GraphicsPass::Image))
-        display << GraphicsPass::Image;
-    if (!found.passPath(GraphicsPass::Common).isEmpty())
-        display << GraphicsPass::Common;
-    for (int i = 0; i < kDrawOrderCount; ++i)
-    {
-        if (kDrawOrder[i] != GraphicsPass::Image && passes.contains(kDrawOrder[i]))
-            display << kDrawOrder[i];
-    }
+    const QList<GraphicsPass> display = passes;
 
     m_passBar->blockSignals(true);
     while (m_passBar->count() > 0)
@@ -1017,7 +1016,18 @@ void ShaderBufferWindow::setEditingPass(GraphicsPass pass)
     if (QStackedWidget* stack = m_editorStacks.value(document, nullptr))
     {
         const QString key = document + QLatin1Char('/') + graphicsPassName(pass);
-        if (SonicPiScintilla* editor = m_editorsByPass.value(key, nullptr))
+        SonicPiScintilla* editor = m_editorsByPass.value(key, nullptr);
+        if (!editor)
+        {
+            // The six tabs are always there, so a pass with no file yet has no editor until it is opened.
+            GraphicsDocument found;
+            for (const GraphicsDocument& candidate : scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath()))
+                if (candidate.name.compare(document, Qt::CaseInsensitive) == 0)
+                    found = candidate;
+            if (found.isValid())
+                editor = ensurePassEditor(found, pass);
+        }
+        if (editor)
         {
             stack->setCurrentWidget(editor);
             m_editors.insert(document, editor);
