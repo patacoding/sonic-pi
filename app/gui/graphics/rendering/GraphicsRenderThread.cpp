@@ -354,7 +354,11 @@ bool GraphicsRenderThread::applyRenderTargetSizeRequest()
             // pass), so the loop asks for the pass it is about to draw instead of reading one set up front.
             m_passDocument = document;
 
-            m_passPrograms = std::make_unique<GraphicsPassPrograms>();
+            // The channel textures belonged to the document being left, and their destruction needs the context
+    // this thread holds.
+    releaseChannelTextures();
+
+    m_passPrograms = std::make_unique<GraphicsPassPrograms>();
             if (!m_passPrograms->create(document, QString())) {
                 GraphicsLog::error(QStringLiteral("pass programs: document '%1' compiled nothing")
                                        .arg(document.name));
@@ -627,6 +631,10 @@ void GraphicsRenderThread::applyPassDocumentRequest()
         m_passPrograms->destroy();
         m_passPrograms.reset();
     }
+    // The channel textures belonged to the document being left, and their destruction needs the context
+    // this thread holds.
+    releaseChannelTextures();
+
     m_passPrograms = std::make_unique<GraphicsPassPrograms>();
     if (!m_passPrograms->create(wanted, QString()))
     {
@@ -1492,18 +1500,35 @@ void GraphicsRenderThread::run()
                     // program is None for the same reason - an absent buffer is an empty pass.
                     // This pass's own channels, or the default (channel i reads Buffer i) when the document
                     // says nothing about this pass - which is also what a legacy document-level file means.
-                    const QList<int> passChannels =
-                        graphicsDocumentChannels(m_passDocument, kDrawOrder[i]);
-                    const int sourceIndex = passChannels.isEmpty() ? ch : passChannels.value(ch, -1);
-                    GraphicsRenderer* sourcePass = (sourceIndex >= 0 && sourceIndex < kDrawOrderCount)
-                                                       ? m_passPrograms->pass(kDrawOrder[sourceIndex])
-                                                       : nullptr;
-                    GraphicsTarget* readSide = (sourcePass && m_bufferTargets[sourceIndex])
-                                                   ? m_bufferTargets[sourceIndex]->read()
-                                                   : nullptr;
-                    frame.channelTexture[ch] = (readSide && readSide->isValid()) ? readSide->texture() : 0;
+                    // This pass's own channels, read from the FILE so texture:/cubemap: sources survive, and
+                    // with the default (channel i reads Buffer i) applied only when the document has no
+                    // channels.txt at all: a file that is silent about one channel means None for it,
+                    // because then the user did express an opinion.
+                    const bool describesChannels =
+                        !graphicsDocumentChannelsPath(m_passDocument).isEmpty()
+                        && QFileInfo::exists(graphicsDocumentChannelsPath(m_passDocument));
+                    const QList<GraphicsChannelSource> passSources =
+                        graphicsDocumentChannelSourcesFromFile(m_passDocument, kDrawOrder[i]);
+                    GraphicsChannelSource passSource;
+                    if (ch < passSources.size())
+                        passSource = passSources[ch];
+                    if (!describesChannels)
+                    {
+                        passSource.kind = GraphicsChannelSource::Buffer;
+                        passSource.bufferIndex = ch;
+                    }
+
+                    // textureForChannel() owns the difference: a buffer's read side, an image, or a cube. The
+                    // bind target follows the kind, because a cube bound as GL_TEXTURE_2D is a GL error and a
+                    // black channel - the kind of mistake that looks like "the image did not load".
+                    frame.channelTexture[ch] = textureForChannel(passSource);
                     if (frame.channelTexture[ch] != 0 && m_context && m_context->extraFunctions())
-                        m_context->extraFunctions()->glBindTexture(GL_TEXTURE_2D, frame.channelTexture[ch]);
+                    {
+                        m_context->extraFunctions()->glBindTexture(
+                            passSource.kind == GraphicsChannelSource::Cubemap ? GL_TEXTURE_CUBE_MAP
+                                                                              : GL_TEXTURE_2D,
+                            frame.channelTexture[ch]);
+                    }
                 }
 
                 frame.resolution = passTarget->size();
