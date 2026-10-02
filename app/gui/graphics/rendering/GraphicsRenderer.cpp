@@ -587,6 +587,14 @@ GraphicsCompileResult GraphicsRenderer::buildProgram(const QString& vertexFile,
                               .arg(ShaderInclude::countLines(commonText))
                               .arg(frag)
                               .arg(common.assignedSourceString));
+        // TEMPORARY instrumentation: the attribution came out as the PASS's file with a line number one
+        // past the offending line of Common, so the question is where the #line directives actually sit
+        // in what the driver is handed. Six lines, printed once per compile, removed once answered.
+        {
+            const QStringList head = fragSource.left(400).split(QLatin1Char('\n'));
+            for (int i = 0; i < head.size() && i < 6; ++i)
+                GraphicsLog::info(QStringLiteral("  assembled[%1]: %2").arg(i + 1).arg(head[i].left(88)));
+        }
     }
 
     // The frame values the shader is allowed to use without declaring them: iTime, iTimeDelta, iFrame and
