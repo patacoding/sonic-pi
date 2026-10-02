@@ -502,6 +502,12 @@ private:
     // One entry per pass.
     static constexpr int kPassCount = 5;
     std::unique_ptr<GraphicsBufferTargets> m_bufferTargets[kPassCount];
+
+    // One set of per-pass programs, compiled from a DOCUMENT on disk (a directory holding image.frag).
+    // Separate from m_renderers, which stays the candidate/active model for single-shader buffers: this
+    // is what the per-frame A -> B -> C -> D -> Image ordering will drive. Compiled and reported here,
+    // not yet drawn into, so the screen is unchanged.
+    std::unique_ptr<GraphicsPassPrograms> m_passPrograms;
     // Index of the target currently published for consumers, or -1 before the first
     // frame. Written only by this thread.
     int m_readyIndex = -1;

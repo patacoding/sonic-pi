@@ -333,6 +333,28 @@ bool GraphicsRenderThread::applyRenderTargetSizeRequest()
     // reported once so the log shows what it made. Deliberately NOT drawn into yet - the per-frame
     // A -> B -> C -> D -> Image ordering that uses it is the next step, so what the screen shows is
     // unchanged. See GraphicsBufferTargets.h and docs/graphics-desktop-multipass-plan.md 13/14.
+    // The passes of a document, each compiled into its own renderer - the thing the frame ordering will
+    // drive (GraphicsPassPrograms.h). Taken from the first document on disk that has one; a shader
+    // directory with only top-level .frag files has no documents, in which case this does nothing and
+    // the log says (none) - which is the current state of every home on this machine, so behaviour is
+    // unchanged until a document directory exists.
+    {
+        const QList<GraphicsDocument> documents =
+            scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath());
+        for (const GraphicsDocument& document : documents) {
+            if (document.singlePass)
+                continue;   // a single-pass .frag stays on the existing candidate/active path
+            m_passPrograms = std::make_unique<GraphicsPassPrograms>();
+            if (!m_passPrograms->create(document, QString())) {
+                GraphicsLog::error(QStringLiteral("pass programs: document '%1' compiled nothing")
+                                       .arg(document.name));
+                m_passPrograms.reset();
+            }
+            break;   // one document for now: which one is on screen is the next step
+        }
+        if (!m_passPrograms)
+            GraphicsLog::info(QStringLiteral("pass programs: no multi-pass document to compile"));
+    }
     // One front/back pair per pass - Image and Buffer A-D - so a pass can be sampled while another is
     // being written, which is what the ordering step needs. Five pairs is ten textures at the output
     // size: the fixed cost of Shadertoy's shape, reported below rather than estimated.
@@ -1779,6 +1801,11 @@ void GraphicsRenderThread::run()
         // The multi-pass pair is a GL object too, so it goes while the context is still current - the
         // same reason the two above are reset here rather than left to member destruction, which runs
         // long after the context is gone.
+        if (m_passPrograms) {
+            m_passPrograms->destroy();
+            m_passPrograms.reset();
+        }
+
         for (int i = 0; i < kPassCount; ++i) {
             if (m_bufferTargets[i]) {
                 m_bufferTargets[i]->destroy();
