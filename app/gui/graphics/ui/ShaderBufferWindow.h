@@ -17,6 +17,7 @@
 
 #include <memory>
 
+#include "GraphicsPasses.h"
 #include "GraphicsRenderThread.h"
 
 class QLabel;
@@ -205,7 +206,7 @@ private:
     static QString newBufferTemplate(const QString& name);
 
     // The file a buffer's text lives in, and where it is written. Empty when the name is unknown.
-    static QString bufferFilePath(const QString& shaderName);
+    static QString bufferFilePath(const QString& shaderName, GraphicsPass pass = GraphicsPass::Image);
 
     SonicPiTheme* m_theme = nullptr;
     GraphicsRenderThread* m_renderThread = nullptr;
@@ -221,6 +222,11 @@ private:
     // The name of the buffer the LAST compile request was made for, so a verdict arriving later can be
     // filed against the right buffer even if the user has switched tabs in the meantime.
     QString m_compilingShaderName;
+
+    // Which pass of each DOCUMENT is being edited. A document is a directory holding image.frag (plan
+    // 17.2); its tab edits one pass at a time, and Image until the selector says otherwise - which is also
+    // the only pass a top-level .frag has, so this changes nothing for what is on disk today.
+    QHash<QString, GraphicsPass> m_passByDocument;
 
     // Owned by the editors (set on them), and held here so applyTheme() can re-colour them.
     GlslLexer* m_lexer = nullptr;

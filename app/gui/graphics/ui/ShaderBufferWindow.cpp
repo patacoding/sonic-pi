@@ -489,11 +489,24 @@ bool ShaderBufferWindow::eventFilter(QObject* watched, QEvent* event)
     return QWidget::eventFilter(watched, event);
 }
 
-QString ShaderBufferWindow::bufferFilePath(const QString& shaderName)
+QString ShaderBufferWindow::bufferFilePath(const QString& shaderName, GraphicsPass pass)
 {
     // Through GraphicsSettings, so this is the same file the renderer reads. Resolving it here by a
     // second route is the mistake that would make editing appear to do nothing: one rule (name ->
     // file name -> path) lives in GraphicsSettings, and this window only supplies the name.
+    // A DOCUMENT (a directory holding image.frag) resolves to the pass being edited, Image by default;
+    // anything else - a top-level .frag - resolves exactly as before, which is why this can land before
+    // the selector exists without changing any behaviour.
+    const QString documentDir =
+        QDir(GraphicsSettings::shaderDirectoryPath()).filePath(shaderName);
+    if (QFileInfo::exists(QDir(documentDir).filePath(graphicsDocumentImageFileName())))
+    {
+        const QString passFile = QDir(documentDir).filePath(graphicsDocumentPassFileName(
+            pass));
+        if (QFileInfo::exists(passFile))
+            return passFile;
+    }
+
     return GraphicsSettings::writableShaderPath(GraphicsSettings::fragmentFileName(shaderName));
 }
 
