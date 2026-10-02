@@ -23,6 +23,23 @@
 
 namespace SonicPi
 {
+// ---------------------------------------------------------------------------------------------------
+// RETIRED as a feature (2026-10-02). Read this before adding a use:
+//
+// Shadertoy's Common is how a document shares code between its passes now - one text, prepended to each
+// pass, with its errors attributed to the Common file (ShaderText::withCommon). That is what #include was
+// wanted for, and Common is the form the ecosystem already uses, so new shaders should use it.
+//
+// The mechanism STAYS, for two reasons that are not sentiment:
+//
+//   * withCommon() and the #include expansion share one piece of machinery - source-string numbers and the
+//     file table diagnostics are attributed through. Removing this half would leave the other half untested
+//     in exactly the code that decides where a user's error points.
+//   * shaders on disk may already use it, and nothing in this project is allowed to silently stop working.
+//
+// So: no new uses, no new features, and keep the checks that guard it passing.
+// ---------------------------------------------------------------------------------------------------
+
 namespace ShaderInclude
 {
 
