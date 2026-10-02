@@ -13,6 +13,8 @@
 
 #pragma once
 
+#include <QOpenGLTexture>
+
 #include "GraphicsRenderer.h"
 #include "GraphicsSharedFrame.h"
 #include "GraphicsTarget.h"
@@ -528,7 +530,15 @@ private:
 
     void applyPassDocumentRequest();
     QString m_requestedPassDocument;              // guarded by m_bufferMutex, like m_requestedShaderName
-    QString m_activePassDocument;                 // the document whose passes are compiled, for the log
+    QString m_activePassDocument;
+
+    // Loaded channel textures, by file path, and the cubemaps built from a cross image. Loaded once and kept
+    // until the document changes, because re-uploading an image every frame - or on every dropdown change -
+    // is the kind of cost nobody sees until the picture stutters.
+    QHash<QString, std::shared_ptr<QOpenGLTexture>> m_channelTextures;
+    QHash<QString, std::shared_ptr<QOpenGLTexture>> m_channelCubemaps;
+    GLuint textureForChannel(const GraphicsChannelSource& source);
+    void releaseChannelTextures();                 // the document whose passes are compiled, for the log
     std::atomic<bool> m_passDocumentRequested{ false };
 
     // Which pass the screen was last fed from, so the line is emitted when it CHANGES and not per frame.

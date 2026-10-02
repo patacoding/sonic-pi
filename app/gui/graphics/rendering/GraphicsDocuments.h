@@ -329,6 +329,95 @@ inline QString graphicsChannelSourceToText(const GraphicsChannelSource& source)
     return QStringLiteral("none");
 }
 
+// The four channels of one pass as SOURCES rather than buffer indices: what the renderer needs now that a
+// channel can name an image or a cubemap as well as a buffer. The int-based reader stays for the paths that
+// only ever dealt in buffers.
+inline QList<GraphicsChannelSource> graphicsDocumentChannelSources(const GraphicsDocument& document,
+                                                                  GraphicsPass pass)
+{
+    QList<GraphicsChannelSource> sources;
+    const QHash<QString, QList<int>> table = graphicsDocumentChannelTable(document);
+    const QString key = graphicsChannelSectionKey(graphicsPassName(pass));
+    QList<int> indices;
+    if (table.contains(key))
+        indices = table.value(key);
+    else if (table.contains(QStringLiteral("*")))
+        indices = table.value(QStringLiteral("*"));
+
+    // The table stores indices because that is what the file's bare buffer names parse to; the richer kinds
+    // are read from the text by the caller below, which is the only place that knows the paths.
+    for (int i = 0; i < 4; ++i)
+    {
+        GraphicsChannelSource source;
+        if (i < indices.size() && indices[i] >= 0)
+        {
+            source.kind = GraphicsChannelSource::Buffer;
+            source.bufferIndex = indices[i];
+        }
+        sources << source;
+    }
+    return sources;
+}
+
+// The same four channels, read from the file's TEXT so texture:/cubemap: prefixes survive. This is the one the
+// renderer and the editor should use; the index-based readers above remain for compatibility.
+inline QList<GraphicsChannelSource> graphicsDocumentChannelSourcesFromFile(const GraphicsDocument& document,
+                                                                          GraphicsPass pass)
+{
+    QList<GraphicsChannelSource> sources;
+    sources << GraphicsChannelSource{} << GraphicsChannelSource{}
+            << GraphicsChannelSource{} << GraphicsChannelSource{};
+
+    const QString path = graphicsDocumentChannelsPath(document);
+    if (path.isEmpty())
+        return sources;
+
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+        return sources;
+
+    const QString wanted = graphicsChannelSectionKey(graphicsPassName(pass));
+    QTextStream in(&file);
+    QString section;
+    QList<GraphicsChannelSource> legacy = sources;
+    while (!in.atEnd())
+    {
+        const QString line = in.readLine().trimmed();
+        if (line.isEmpty() || line.startsWith(QLatin1Char('#')))
+            continue;
+        if (line.startsWith(QLatin1Char('[')) && line.endsWith(QLatin1Char(']')))
+        {
+            section = graphicsChannelSectionKey(line.mid(1, line.size() - 2));
+            continue;
+        }
+        const int equals = line.indexOf(QLatin1Char('='));
+        if (equals <= 0)
+            continue;
+        const QString key = line.left(equals).trimmed().toLower();
+        if (!key.startsWith(QLatin1String("ichannel")))
+            continue;
+        bool ok = false;
+        const int index = key.mid(8).toInt(&ok);
+        if (!ok || index < 0 || index > 3)
+            continue;
+
+        const GraphicsChannelSource source = graphicsChannelSourceFromText(line.mid(equals + 1));
+        if (section.isEmpty())
+            legacy[index] = source;
+        else if (section == wanted)
+            sources[index] = source;
+    }
+
+    // No sections at all: the legacy document-level form, which applies to every pass.
+    if (sources == QList<GraphicsChannelSource>() << GraphicsChannelSource{} << GraphicsChannelSource{}
+            << GraphicsChannelSource{} << GraphicsChannelSource{}
+        && legacy != sources)
+    {
+        return legacy;
+    }
+    return sources;
+}
+
 // The six faces of a cubemap, in the order QOpenGLTexture wants them (+X, -X, +Y, -Y, +Z, -Z), taken from ONE
 // image laid out as a cross. That layout is the user's choice (2026-10-02) and is the usual 4x3 cross:
 //

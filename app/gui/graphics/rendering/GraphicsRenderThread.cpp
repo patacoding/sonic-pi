@@ -500,6 +500,92 @@ bool GraphicsRenderThread::requestPassDocument(const QString& documentName)
     return true;
 }
 
+GLuint GraphicsRenderThread::textureForChannel(const GraphicsChannelSource& source)
+{
+    if (source.kind == GraphicsChannelSource::None)
+        return 0;
+
+    if (source.kind == GraphicsChannelSource::Buffer)
+    {
+        const int index = source.bufferIndex;
+        if (index < 0 || index >= kPassCount || !m_bufferTargets[index])
+            return 0;
+        GraphicsTarget* readSide = m_bufferTargets[index]->read();
+        return (readSide && readSide->isValid()) ? readSide->texture() : 0;
+    }
+
+    if (source.path.isEmpty())
+        return 0;
+
+    // Two caches, because the two kinds build differently: an image becomes one texture, a cross image becomes
+    // six faces of a cube. Keyed by path, so changing a dropdown back and forth costs nothing after the first
+    // load, and a path that fails to load is simply absent - the channel reads black, which is the same thing
+    // an absent buffer means.
+    QHash<QString, std::shared_ptr<QOpenGLTexture>>& cache =
+        (source.kind == GraphicsChannelSource::Cubemap) ? m_channelCubemaps : m_channelTextures;
+    auto found = cache.find(source.path);
+    if (found != cache.end())
+        return found->get() ? found->get()->textureId() : 0;
+
+    const QImage image(source.path);
+    if (image.isNull())
+    {
+        GraphicsLog::error(QStringLiteral("channel: could not read the image %1").arg(source.path));
+        cache.insert(source.path, nullptr);
+        return 0;
+    }
+
+    if (source.kind == GraphicsChannelSource::Cubemap)
+    {
+        GraphicsCubemapFace faces[6];
+        if (!graphicsCubemapCrossFaces(image.size(), faces))
+        {
+            GraphicsLog::error(QStringLiteral("channel: %1 is not a 4x3 cross image (it is %2x%3); the "
+                                              "channel reads black")
+                                   .arg(source.path).arg(image.width()).arg(image.height()));
+            cache.insert(source.path, nullptr);
+            return 0;
+        }
+        const int faceW = image.width() / 4;
+        const int faceH = image.height() / 3;
+        auto cube = std::make_shared<QOpenGLTexture>(QOpenGLTexture::TargetCubeMap);
+        cube->setFormat(QOpenGLTexture::RGBA8_UNorm);
+        cube->setSize(faceW, faceH);
+        cube->setMipLevels(1);
+        cube->allocateStorage();
+        for (int face = 0; face < 6; ++face)
+        {
+            const QImage tile = image.copy(faces[face].x, faces[face].y, faceW, faceH)
+                                    .convertToFormat(QImage::Format_RGBA8888);
+            cube->setData(0, 0, QOpenGLTexture::CubeMapFace(int(QOpenGLTexture::CubeMapPositiveX) + face),
+                          QOpenGLTexture::RGBA, QOpenGLTexture::UInt8, tile.constBits());
+        }
+        const GLuint id = cube->textureId();
+        cache.insert(source.path, std::move(cube));
+        GraphicsLog::info(QStringLiteral("channel: cubemap %1 loaded as a 4x3 cross, faces %2x%3")
+                              .arg(source.path).arg(faceW).arg(faceH));
+        return id;
+    }
+
+    auto texture = std::make_shared<QOpenGLTexture>(image.mirrored(),
+                                                    QOpenGLTexture::GenerateMipMaps);
+    texture->setWrapMode(QOpenGLTexture::ClampToEdge);
+    texture->setMinificationFilter(QOpenGLTexture::LinearMipMapLinear);
+    texture->setMagnificationFilter(QOpenGLTexture::Linear);
+    const GLuint id = texture->textureId();
+    cache.insert(source.path, std::move(texture));
+    GraphicsLog::info(QStringLiteral("channel: image %1 loaded (%2x%3)")
+                          .arg(source.path).arg(image.width()).arg(image.height()));
+    return id;
+}
+
+void GraphicsRenderThread::releaseChannelTextures()
+{
+    // Their destruction needs the context current, so this is only ever called from the render thread.
+    m_channelTextures.clear();
+    m_channelCubemaps.clear();
+}
+
 void GraphicsRenderThread::applyPassDocumentRequest()
 {
     if (!m_passDocumentRequested.exchange(false, std::memory_order_relaxed))
