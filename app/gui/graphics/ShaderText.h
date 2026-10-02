@@ -389,8 +389,23 @@ inline CommonSource withCommon(const QString& source, const QString& commonText,
 
     // `#line 1 k` for the block, then `#line 1 0` to hand the pass's own numbering back. Both are
     // emitted on their own lines, and the pass's first line follows the second one.
-    result.text = QStringLiteral("#line 1 %1\n").arg(assigned) + block
-                  + QStringLiteral("#line 1 0\n") + source;
+    // WHERE THE BLOCK GOES, part two: after the pass's own #version line, when it has one.
+    //
+    // A document's pass files are Shadertoy shaders and begin with "#version 330 core". GLSL requires
+    // #version to be the first thing the compiler sees, so prepending ahead of that line made the driver
+    // reject the declaration and compile the whole document as GLSL 130 - measured, as
+    // "Warning, (version, profile) forced to be (130, none), while in source code it is (330, core)",
+    // which arrives as a warning rather than an error and is therefore easy to miss.
+    int insertAt = 0;
+    {
+        const int firstNewline = source.indexOf(QLatin1Char('\n'));
+        const QString firstLine = (firstNewline < 0 ? source : source.left(firstNewline)).trimmed();
+        if (firstLine.startsWith(QLatin1String("#version")))
+            insertAt = firstNewline + 1;
+    }
+    result.text = source.left(insertAt)
+                  + QStringLiteral("#line 1 %1\n").arg(assigned) + block
+                  + QStringLiteral("#line 1 0\n") + source.mid(insertAt);
     result.assignedSourceString = assigned;
     if (!commonPath.isEmpty())
         result.fileBySourceString.insert(assigned, commonPath);
