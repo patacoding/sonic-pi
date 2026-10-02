@@ -350,11 +350,9 @@ bool GraphicsRenderThread::applyRenderTargetSizeRequest()
             // that says nothing about channels must keep behaving as it did before channels were
             // configurable. Present-but-silent about one channel means None for that one, because then the
             // user did express an opinion.
-            const bool hasChannelsFile = !graphicsDocumentChannelsPath(document).isEmpty()
-                                         && QFileInfo::exists(graphicsDocumentChannelsPath(document));
-            const QList<int> channels = graphicsDocumentChannels(document);
-            for (int i = 0; i < 4; ++i)
-                m_channelSources[i] = hasChannelsFile ? ((i < channels.size()) ? channels[i] : -1) : i;
+            // Kept for the frame loop: the channels are PER PASS now (Shadertoy binds them under each render
+            // pass), so the loop asks for the pass it is about to draw instead of reading one set up front.
+            m_passDocument = document;
 
             m_passPrograms = std::make_unique<GraphicsPassPrograms>();
             if (!m_passPrograms->create(document, QString())) {
@@ -1333,7 +1331,11 @@ void GraphicsRenderThread::run()
                     // The source is the DOCUMENT's choice (channels.txt), not "channel i reads Buffer i".
                     // -1 is None, which stays a zero texture id and therefore black; a source with no
                     // program is None for the same reason - an absent buffer is an empty pass.
-                    const int sourceIndex = m_channelSources[ch];
+                    // This pass's own channels, or the default (channel i reads Buffer i) when the document
+                    // says nothing about this pass - which is also what a legacy document-level file means.
+                    const QList<int> passChannels =
+                        graphicsDocumentChannels(m_passDocument, kDrawOrder[i]);
+                    const int sourceIndex = passChannels.isEmpty() ? ch : passChannels.value(ch, -1);
                     GraphicsRenderer* sourcePass = (sourceIndex >= 0 && sourceIndex < kDrawOrderCount)
                                                        ? m_passPrograms->pass(kDrawOrder[sourceIndex])
                                                        : nullptr;

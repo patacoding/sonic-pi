@@ -517,6 +517,10 @@ private:
     // memory - a channel that reads something nobody chose is worse than a black one.
     int m_channelSources[4] = { -1, -1, -1, -1 };
 
+    // The document whose passes are compiled, kept so the frame loop can ask for each pass's OWN channels
+    // (Shadertoy binds them per pass) rather than one set for all of them.
+    GraphicsDocument m_passDocument;
+
     // Which pass the screen was last fed from, so the line is emitted when it CHANGES and not per frame.
     int m_screenSource = -1;
     // Index of the target currently published for consumers, or -1 before the first

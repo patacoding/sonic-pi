@@ -640,7 +640,7 @@ void ShaderBufferWindow::refreshChannelRow()
         return;
 
     const QList<GraphicsPass> available = graphicsDocumentPasses(document);
-    const QList<int> current = graphicsDocumentChannels(document);
+    const QList<int> current = graphicsDocumentChannels(document, editingPass());
     for (int i = 0; i < 4; ++i)
     {
         QComboBox* combo = m_channelCombos[i];
@@ -678,7 +678,7 @@ void ShaderBufferWindow::writeChannelsFromRow()
 
     // The combos only offer passes this document has, so a bad value cannot be produced here - that is the
     // point of building them from the document rather than from a constant list.
-    if (!writeGraphicsDocumentChannels(document, chosen))
+    if (!writeGraphicsDocumentChannels(document, editingPass(), chosen))
     {
         m_status->setText(tr("Could not write %1").arg(graphicsDocumentChannelsPath(document)));
         return;
