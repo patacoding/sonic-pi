@@ -197,6 +197,11 @@ public:
     // A buffer that will not build does NOT reach the screen: the picture stays exactly as it was, and
     // the compiler's own output comes back through shaderCompileFinished so the editor can show it where
     // the user is looking. Returns false when there is no running loop to apply it to.
+    // Ask the render loop to render a different DOCUMENT's passes. Requested rather than applied, for the
+    // same reason every other switch is: a program belongs to a context, and the loop owns it. The switch
+    // happens at a frame boundary. A single-pass .frag is ignored here - it stays with the active-buffer path.
+    bool requestPassDocument(const QString& documentName);
+
     bool requestShaderCompile(const QString& shaderName = QString());
 
     // Drop a buffer's renderer, because the buffer is no longer open in the editor.
@@ -520,6 +525,11 @@ private:
     // The document whose passes are compiled, kept so the frame loop can ask for each pass's OWN channels
     // (Shadertoy binds them per pass) rather than one set for all of them.
     GraphicsDocument m_passDocument;
+
+    void applyPassDocumentRequest();
+    QString m_requestedPassDocument;              // guarded by m_bufferMutex, like m_requestedShaderName
+    QString m_activePassDocument;                 // the document whose passes are compiled, for the log
+    std::atomic<bool> m_passDocumentRequested{ false };
 
     // Which pass the screen was last fed from, so the line is emitted when it CHANGES and not per frame.
     int m_screenSource = -1;

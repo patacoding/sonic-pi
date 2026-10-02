@@ -288,7 +288,15 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     // Switching tabs is a VIEW action and nothing else: it shows that buffer's text and its last
     // report, and does not touch what is on screen. Same as the audio side, where switching buffers
     // neither starts nor stops anything - the picture changes when the user compiles.
-    connect(m_tabs, &QTabWidget::currentChanged, this, [this](int) { showCurrentBuffer(); });
+    connect(m_tabs, &QTabWidget::currentChanged, this, [this](int) {
+        showCurrentBuffer();
+
+        // The OUTER layer decides which document RENDERS: a document is a directory of passes, and the loop
+        // has to be told which one to compile - at a frame boundary, on its own context, like every other
+        // switch. A single-pass .frag is the candidate/active model's business and is ignored there.
+        if (m_renderThread && !editingShaderName().isEmpty())
+            m_renderThread->requestPassDocument(editingShaderName());
+    });
 
     // The x on a tab CLOSES THE TAB - it does not delete anything. The name is read from the tab rather
     // than from the index, because the index can shift while a confirmation dialog is open (a compile

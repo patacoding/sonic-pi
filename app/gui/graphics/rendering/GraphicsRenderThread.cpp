@@ -480,6 +480,78 @@ bool GraphicsRenderThread::requestShaderForget(const QString& shaderName)
     return true;
 }
 
+bool GraphicsRenderThread::requestPassDocument(const QString& documentName)
+{
+    if (!m_loopRunning.load(std::memory_order_relaxed))
+    {
+        GraphicsLog::warn(QStringLiteral("document switch requested but the render loop is not running"));
+        return false;
+    }
+
+    // Stored rather than resolved here: the answer can change before the loop gets to it, and the loop's
+    // answer is the one that belongs with the frame it applies to.
+    {
+        QMutexLocker lock(&m_bufferMutex);
+        m_requestedPassDocument = documentName;
+    }
+    m_passDocumentRequested.store(true, std::memory_order_relaxed);
+
+    GraphicsLog::info(QStringLiteral("pass document: requested '%1'").arg(documentName));
+    return true;
+}
+
+void GraphicsRenderThread::applyPassDocumentRequest()
+{
+    if (!m_passDocumentRequested.exchange(false, std::memory_order_relaxed))
+        return;
+
+    QString requested;
+    {
+        QMutexLocker lock(&m_bufferMutex);
+        requested = m_requestedPassDocument;
+    }
+    if (requested.isEmpty() || requested.compare(m_activePassDocument) == 0)
+        return;
+
+    // One scan, on the render thread, with the context current - the same rule as everything else here.
+    const QList<GraphicsDocument> documents =
+        scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath());
+    GraphicsDocument wanted;
+    for (const GraphicsDocument& candidate : documents)
+    {
+        if (candidate.name.compare(requested, Qt::CaseInsensitive) == 0)
+        {
+            wanted = candidate;
+            break;
+        }
+    }
+
+    if (!wanted.isValid() || wanted.singlePass)
+    {
+        // A single-pass .frag is the candidate/active model's business, not this one; saying so once beats
+        // a silent no-op that looks like a broken tab.
+        GraphicsLog::info(QStringLiteral("pass document: '%1' is not a multi-pass document; "
+                                         "leaving the passes as they are")
+                              .arg(requested));
+        return;
+    }
+
+    if (m_passPrograms)
+    {
+        m_passPrograms->destroy();
+        m_passPrograms.reset();
+    }
+    m_passPrograms = std::make_unique<GraphicsPassPrograms>();
+    if (!m_passPrograms->create(wanted, QString()))
+    {
+        GraphicsLog::error(QStringLiteral("pass document: '%1' compiled nothing").arg(wanted.name));
+        m_passPrograms.reset();
+    }
+    m_activePassDocument = wanted.name;
+    GraphicsLog::info(QStringLiteral("pass document: now rendering '%1'").arg(wanted.name));
+    m_passesDrawnLastFrame = -1;   // so the next frame reports what it drew, once
+}
+
 void GraphicsRenderThread::applyShaderForget()
 {
     QString name;
@@ -1178,6 +1250,7 @@ void GraphicsRenderThread::run()
 
         if (m_reloadRequested.exchange(false, std::memory_order_relaxed))
             applyShaderCompile();
+        applyPassDocumentRequest();
 
         // Buffers whose files are gone, applied after any compile in the same frame: a compile can make
         // a previously-active buffer droppable, and dropping before it would be the one case this
