@@ -231,6 +231,14 @@ private:
 
     // The pass selector of the current document: which of Common/Image/Buffer A-D this tab is editing.
     QComboBox* m_passSelector = nullptr;
+
+    // The four channels, INLINE under the editor rather than behind a dialog: it is the layout Shadertoy
+    // and the web version both use, and a setting you can see while looking at the code it feeds is worth
+    // more than one you have to open. One row per DOCUMENT (all passes share it), as in web 4.8.
+    QComboBox* m_channelCombos[4] = { nullptr, nullptr, nullptr, nullptr };
+    QWidget* m_channelRow = nullptr;
+    void refreshChannelRow();
+    void writeChannelsFromRow();
     GraphicsPass editingPass() const;
     void setEditingPass(GraphicsPass pass);
     void refreshPassSelector();

@@ -225,12 +225,7 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     buttonsLayout->addWidget(m_compileButton);
     buttonsLayout->addWidget(newButton);
 
-    // Channels: which buffer each of the four reads. A dialog rather than four inline combos, because this
-    // is a setting of the DOCUMENT rather than a control of the tab, and it reads as a set.
-    auto* channelsButton = new QPushButton(tr("Channels..."), this);
-    channelsButton->setToolTip(tr("Which buffer each of this document's four channels reads"));
-    connect(channelsButton, &QPushButton::clicked, this, [this]() { editChannels(); });
-    buttonsLayout->addWidget(channelsButton);
+
     buttonsLayout->addWidget(loadButton);
     buttonsLayout->addWidget(saveButton);
     buttonsLayout->addWidget(m_status, 1);
@@ -244,6 +239,24 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     auto* layout = new QVBoxLayout(this);
     layout->addWidget(buttons);
     layout->addWidget(split, 1);
+
+    // The channel row: four combos, inline, under the editor. See the header for why it is not a dialog.
+    m_channelRow = new QWidget(this);
+    auto* channelLayout = new QHBoxLayout(m_channelRow);
+    channelLayout->setContentsMargins(0, 0, 0, 0);
+    channelLayout->addWidget(new QLabel(tr("Channels:"), m_channelRow));
+    for (int i = 0; i < 4; ++i)
+    {
+        m_channelCombos[i] = new QComboBox(m_channelRow);
+        m_channelCombos[i]->setToolTip(tr("What iChannel%1 samples (applies to every pass of this document)").arg(i));
+        connect(m_channelCombos[i], QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
+            writeChannelsFromRow();
+        });
+        channelLayout->addWidget(new QLabel(QStringLiteral("iChannel%0").arg(i), m_channelRow));
+        channelLayout->addWidget(m_channelCombos[i]);
+    }
+    channelLayout->addStretch(1);
+    layout->addWidget(m_channelRow);
 
     // Which trigger fired, in the log. Two ways in - the button and Ctrl+Return - and "the key did
     // nothing" is otherwise indistinguishable from "the key never reached this window": the editor
@@ -537,7 +550,7 @@ GraphicsPass ShaderBufferWindow::editingPass() const
 
 void ShaderBufferWindow::refreshPassSelector()
 {
-    if (!m_passSelector)
+    if (!m_passBar)
         return;
 
     const QString document = editingShaderName();
@@ -568,6 +581,80 @@ void ShaderBufferWindow::refreshPassSelector()
     // Nothing to choose for a single-pass document, so it does not sit there pretending otherwise.
     m_passSelector->setVisible(passes.size() > 1);
     m_passSelector->blockSignals(false);
+}
+
+void ShaderBufferWindow::refreshChannelRow()
+{
+    if (!m_channelRow)
+        return;
+
+    GraphicsDocument document;
+    const QList<GraphicsDocument> documents =
+        scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath());
+    for (const GraphicsDocument& candidate : documents)
+    {
+        if (candidate.name.compare(editingShaderName(), Qt::CaseInsensitive) == 0)
+        {
+            document = candidate;
+            break;
+        }
+    }
+
+    // Channels belong to a document; a single-pass .frag has none to assign, so the row is simply absent
+    // rather than shown with nothing in it.
+    const bool applicable = document.isValid() && !document.singlePass;
+    m_channelRow->setVisible(applicable);
+    if (!applicable)
+        return;
+
+    const QList<GraphicsPass> available = graphicsDocumentPasses(document);
+    const QList<int> current = graphicsDocumentChannels(document);
+    for (int i = 0; i < 4; ++i)
+    {
+        QComboBox* combo = m_channelCombos[i];
+        combo->blockSignals(true);
+        combo->clear();
+        combo->addItem(tr("None"), -1);
+        for (GraphicsPass pass : available)
+            combo->addItem(graphicsPassLabel(pass), graphicsPassDrawIndex(pass));
+        const int index = combo->findData(i < current.size() ? current[i] : -1);
+        if (index >= 0)
+            combo->setCurrentIndex(index);
+        combo->blockSignals(false);
+    }
+}
+
+void ShaderBufferWindow::writeChannelsFromRow()
+{
+    GraphicsDocument document;
+    const QList<GraphicsDocument> documents =
+        scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath());
+    for (const GraphicsDocument& candidate : documents)
+    {
+        if (candidate.name.compare(editingShaderName(), Qt::CaseInsensitive) == 0)
+        {
+            document = candidate;
+            break;
+        }
+    }
+    if (!document.isValid() || document.singlePass)
+        return;
+
+    QList<int> chosen;
+    for (int i = 0; i < 4; ++i)
+        chosen << m_channelCombos[i]->currentData().toInt();
+
+    // The combos only offer passes this document has, so a bad value cannot be produced here - that is the
+    // point of building them from the document rather than from a constant list.
+    if (!writeGraphicsDocumentChannels(document, chosen))
+    {
+        m_status->setText(tr("Could not write %1").arg(graphicsDocumentChannelsPath(document)));
+        return;
+    }
+
+    GraphicsLog::info(QStringLiteral("shader buffer: channels for %1 -> %2")
+                          .arg(document.name, graphicsDocumentChannelsPath(document)));
+    m_status->setText(tr("Channels written (takes effect on the next reload)"));
 }
 
 void ShaderBufferWindow::editChannels()
@@ -741,6 +828,7 @@ void ShaderBufferWindow::rebuildTabs(const QString& selectName)
     }
 
     refreshPassSelector();
+    refreshChannelRow();
     updateTabLabels();
 
     const QString wanted = selectName.isEmpty() ? editingShaderName() : selectName;
@@ -799,6 +887,7 @@ void ShaderBufferWindow::showCurrentBuffer()
         return;
 
     refreshPassSelector();
+    refreshChannelRow();
     updateTabLabels();
     updateWindowTitle();
 
@@ -912,6 +1001,7 @@ void ShaderBufferWindow::closeBuffer(const QString& shaderName)
     }
 
     refreshPassSelector();
+    refreshChannelRow();
     updateTabLabels();
     if (m_tabs->count() > 0)
         selectTab(editingShaderName());
@@ -1003,6 +1093,7 @@ void ShaderBufferWindow::renameBuffer(const QString& oldName)
     }
 
     refreshPassSelector();
+    refreshChannelRow();
     updateTabLabels();
     selectTab(name);
     m_status->setText(tr("Renamed to %1 (%2)").arg(name, newPath));
@@ -1125,6 +1216,7 @@ void ShaderBufferWindow::compileFinished(bool ok, const QString& compilerLog,
     // The picture follows the buffer that compiled, so the mark on the tabs has to move with it.
     if (ok && m_renderThread)
         refreshPassSelector();
+    refreshChannelRow();
     updateTabLabels();
 
     // Remembered so that "which buffer is on screen" survives the next session: written only when the
