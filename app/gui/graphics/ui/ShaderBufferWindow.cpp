@@ -963,6 +963,18 @@ void ShaderBufferWindow::refreshChannelRow()
         combo->blockSignals(true);
         combo->clear();
         combo->addItem(tr("None"), -1);
+        const QList<GraphicsChannelSource> passSourcesNow =
+            graphicsDocumentChannelSourcesFromFile(document, static_cast<GraphicsPass>(
+                m_passBar && m_passBar->count() > 0
+                    ? m_passBar->tabData(m_passBar->currentIndex()).toInt()
+                    : int(GraphicsPass::Image)));
+        const GraphicsChannelSource currentSource = passSourcesNow.value(i);
+        if (currentSource.isTexture())
+            combo->addItem(tr("Texture: %1").arg(QFileInfo(currentSource.path).fileName()), 1000);
+        else if (currentSource.isCubemap())
+            combo->addItem(tr("Cubemap: %1").arg(QFileInfo(currentSource.path).fileName()), 1001);
+        combo->addItem(tr("Texture..."), 1000);
+        combo->addItem(tr("Cubemap..."), 1001);
         for (GraphicsPass pass : available)
             combo->addItem(graphicsPassLabel(pass), graphicsPassDrawIndex(pass));
         const int index = combo->findData(i < current.size() ? current[i] : -1);
@@ -988,13 +1000,39 @@ void ShaderBufferWindow::writeChannelsFromRow()
     if (!document.isValid() || document.singlePass)
         return;
 
-    QList<int> chosen;
+    // The four combos, with the two file kinds resolved through a dialog. Held as SOURCES rather than indices,
+    // because a channel is no longer only a buffer.
+    QList<GraphicsChannelSource> chosen;
     for (int i = 0; i < 4; ++i)
-        chosen << m_channelCombos[i]->currentData().toInt();
+    {
+        const int data = m_channelCombos[i]->currentData().toInt();
+        GraphicsChannelSource source;
+        if (data == 1000 || data == 1001)
+        {
+            const bool cube = (data == 1001);
+            const GraphicsChannelSource previous =
+                graphicsDocumentChannelSourcesFromFile(document, editingPass()).value(i);
+            const QString start = previous.path.isEmpty() ? QDir::homePath() : previous.path;
+            const QString file = QFileDialog::getOpenFileName(
+                this, cube ? tr("Choose a cubemap (a 4x3 cross image)") : tr("Choose an image"), start,
+                cube ? tr("Images (*.png *.jpg *.jpeg *.hdr *.exr);;All files (*)")
+                     : tr("Images (*.png *.jpg *.jpeg *.bmp);;All files (*)"));
+            if (file.isEmpty())
+                return;   // cancelled: leave the file alone rather than writing a half-chosen set
+            source.kind = cube ? GraphicsChannelSource::Cubemap : GraphicsChannelSource::Texture;
+            source.path = file;
+        }
+        else if (data >= 0)
+        {
+            source.kind = GraphicsChannelSource::Buffer;
+            source.bufferIndex = data;
+        }
+        chosen << source;
+    }
 
     // The combos only offer passes this document has, so a bad value cannot be produced here - that is the
     // point of building them from the document rather than from a constant list.
-    if (!writeGraphicsDocumentChannels(document, editingPass(), chosen))
+    if (!writeGraphicsDocumentChannelSources(document, editingPass(), chosen))
     {
         m_status->setText(tr("Could not write %1").arg(graphicsDocumentChannelsPath(document)));
         return;
@@ -1037,6 +1075,13 @@ void ShaderBufferWindow::setEditingPass(GraphicsPass pass)
             m_editors.insert(document, editor);
         }
     }
+
+    // The channel row belongs to the PASS, so switching passes must re-read it. Without these two calls the
+    // row keeps the previous pass's four values, which looks exactly like "both passes share one set of
+    // channels" - and then an edit writes pass A's values into pass B's section. (This call was silently lost
+    // once already: the file is CRLF and the pattern I matched with was LF.)
+    refreshPassSelector();
+    refreshChannelRow();
 
     GraphicsLog::info(QStringLiteral("shader buffer: %1 now edits %2 (%3)")
                           .arg(document, graphicsPassLabel(pass), bufferFilePath(document, pass)));

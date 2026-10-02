@@ -329,6 +329,77 @@ inline QString graphicsChannelSourceToText(const GraphicsChannelSource& source)
     return QStringLiteral("none");
 }
 
+// Write one pass's four channels from SOURCES, which is what the editor has in hand once a channel can name an
+// image or a cubemap. Emitted with the same prefixes the reader understands, so the file stays the one place
+// that says what a channel means.
+inline bool writeGraphicsDocumentChannelSources(const GraphicsDocument& document, GraphicsPass pass,
+                                               const QList<GraphicsChannelSource>& sources)
+{
+    if (sources.size() != 4)
+        return false;
+    const QString path = graphicsDocumentChannelsPath(document);
+    if (path.isEmpty())
+        return false;
+
+    // Read the other passes' sections first, so writing one pass cannot drop another's settings.
+    QHash<QString, QList<GraphicsChannelSource>> otherSections;
+    {
+        QFile in(path);
+        if (in.open(QIODevice::ReadOnly | QIODevice::Text))
+        {
+            QTextStream stream(&in);
+            QString section;
+            QList<GraphicsChannelSource> four;
+            four << GraphicsChannelSource{} << GraphicsChannelSource{}
+                 << GraphicsChannelSource{} << GraphicsChannelSource{};
+            auto flush = [&otherSections, &four](const QString& name) {
+                if (!name.isEmpty())
+                    otherSections.insert(name, four);
+            };
+            while (!stream.atEnd())
+            {
+                const QString line = stream.readLine().trimmed();
+                if (line.startsWith(QLatin1Char('[')) && line.endsWith(QLatin1Char(']')))
+                {
+                    flush(section);
+                    section = graphicsChannelSectionKey(line.mid(1, line.size() - 2));
+                    four = QList<GraphicsChannelSource>{ GraphicsChannelSource{}, GraphicsChannelSource{},
+                                                         GraphicsChannelSource{}, GraphicsChannelSource{} };
+                    continue;
+                }
+                const int equals = line.indexOf(QLatin1Char('='));
+                if (equals <= 0)
+                    continue;
+                const QString key = line.left(equals).trimmed().toLower();
+                if (!key.startsWith(QLatin1String("ichannel")))
+                    continue;
+                bool ok = false;
+                const int index = key.mid(8).toInt(&ok);
+                if (!ok || index < 0 || index > 3)
+                    continue;
+                four[index] = graphicsChannelSourceFromText(line.mid(equals + 1));
+            }
+            flush(section);
+        }
+    }
+    otherSections.insert(graphicsChannelSectionKey(graphicsPassName(pass)), sources);
+
+    QFile out(path);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+        return false;
+    QTextStream text(&out);
+    QStringList names = otherSections.keys();
+    names.sort();
+    for (const QString& name : names)
+    {
+        text << QStringLiteral("[%1]\n").arg(name);
+        const QList<GraphicsChannelSource> four = otherSections.value(name);
+        for (int i = 0; i < 4; ++i)
+            text << QStringLiteral("iChannel%1 = %2\n").arg(i).arg(graphicsChannelSourceToText(four.value(i)));
+    }
+    return true;
+}
+
 // The four channels of one pass as SOURCES rather than buffer indices: what the renderer needs now that a
 // channel can name an image or a cubemap as well as a buffer. The int-based reader stays for the paths that
 // only ever dealt in buffers.
