@@ -630,12 +630,13 @@ void GraphicsRenderThread::applyPassDocumentRequest()
         }
     }
 
-    if (!wanted.isValid() || wanted.singlePass)
+    // A single-pass .frag IS a document too, and its passes matter as soon as one of its channels points at
+    // a buffer it wrote: refusing it here is what left the channel row with nowhere to write. The pass chain
+    // draws its Image (which is the .frag itself) and whatever buffers exist beside it, and the blit-to-
+    // screen path already prefers a document's Image when there is one.
+    if (!wanted.isValid())
     {
-        // A single-pass .frag is the candidate/active model's business, not this one; saying so once beats
-        // a silent no-op that looks like a broken tab.
-        GraphicsLog::info(QStringLiteral("pass document: '%1' is not a multi-pass document; "
-                                         "leaving the passes as they are")
+        GraphicsLog::info(QStringLiteral("pass document: '%1' is not on disk; leaving the passes as they are")
                               .arg(requested));
         return;
     }
@@ -737,22 +738,25 @@ void GraphicsRenderThread::applyShaderCompile()
     if (wanted.isEmpty())
         wanted = current;
 
-    // A DOCUMENT IS NOT A BUFFER. A document is a directory holding image.frag, and its passes are compiled
-    // as a set by GraphicsPassPrograms - there is no "<document>.frag" for the single-shader path below to
-    // read. Without this branch, pressing Compile in a document tab built a renderer for "myShader.frag",
-    // found no such file, and reported a failure while the picture went on showing the OLD passes: the
-    // file had been written and nothing ever read it again. Handing the request to the pass path is what
-    // makes an edit visible. The verdict comes from there too (see applyPassDocumentRequest), so this
-    // returns without emitting one - two verdicts for one Compile would file a failure over a success.
+    // A DOCUMENT IS NOT A BUFFER. What the editor is looking at is always a document - a directory holding
+    // image.frag, or a top-level .frag whose Image pass is that file - and a document's passes are compiled
+    // as a set by GraphicsPassPrograms. The single-shader path below reads "<name>.frag" from the shader
+    // directory, which for a document directory is a file that does not exist; pressing Compile in a
+    // document tab therefore reported a failure while the picture went on showing the OLD passes, because
+    // the file had been written and nothing ever read it again. Handing the request to the pass path is what
+    // makes an edit visible. The verdict comes from there too (applyPassDocumentRequest), so this returns
+    // without emitting one - two verdicts for one Compile would file a failure over a success.
     {
         const QList<GraphicsDocument> documents =
             scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath());
         for (const GraphicsDocument& document : documents)
         {
-            if (document.singlePass || document.name.compare(wanted, Qt::CaseInsensitive) != 0)
+            if (document.name.compare(wanted, Qt::CaseInsensitive) != 0)
                 continue;
-            GraphicsLog::info(QStringLiteral("compile: '%1' is a document; rebuilding its passes "
-                                             "(passes, not a '<name>.frag')").arg(wanted));
+            GraphicsLog::info(QStringLiteral("compile: '%1' is a %2 document; rebuilding its passes "
+                                             "(passes, not a '<name>.frag')")
+                                  .arg(wanted, document.singlePass ? QStringLiteral("single-pass")
+                                                                   : QStringLiteral("directory")));
             requestPassDocument(document.name, true);
             return;
         }

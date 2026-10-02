@@ -254,6 +254,20 @@ private:
     // The four channels, INLINE under the editor rather than behind a dialog: it is the layout Shadertoy
     // and the web version both use, and a setting you can see while looking at the code it feeds is worth
     // more than one you have to open. One row per DOCUMENT (all passes share it), as in web 4.8.
+    // What a channel combo's item data means. Negative values are a drawn pass's index (0..4, the
+    // graphicsPassDrawIndex of a buffer); these three are the entries that are not a buffer.
+    //
+    // One image entry, not "Texture" plus "image": a channel that reads a file reads an image, and the
+    // renderer decides how. `kChannelSourceFileOffset` marks the item that REPRESENTS an already-chosen
+    // file (so the row can say which image this is) as opposed to the entry that opens the file dialog.
+    enum ChannelMenuItem
+    {
+        kChannelSourceNone = -1,
+        kChannelSourceImage = 1000,
+        kChannelSourceCubemap = 1001,
+        kChannelSourceFileOffset = 100
+    };
+
     QComboBox* m_channelCombos[4] = { nullptr, nullptr, nullptr, nullptr };
     QWidget* m_channelRow = nullptr;
     void refreshChannelRow();

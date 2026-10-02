@@ -307,8 +307,7 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
         m_channelCombos[i]->setToolTip(tr("What iChannel%1 samples (applies to every pass of this document)").arg(i));
         connect(m_channelCombos[i], QOverload<int>::of(&QComboBox::activated), this, [this](int) {
             writeChannelsFromRow();
-        });
-        channelLayout->addWidget(new QLabel(QStringLiteral("iChannel%0").arg(i), m_channelRow));
+        });        channelLayout->addWidget(new QLabel(QStringLiteral("iChannel%0").arg(i), m_channelRow));
         channelLayout->addWidget(m_channelCombos[i]);
     }
     channelLayout->addStretch(1);
@@ -612,28 +611,18 @@ static GraphicsDocument scannedDocument(const QString& name)
 
 QString ShaderBufferWindow::bufferFilePath(const QString& shaderName, GraphicsPass pass)
 {
-    // Through GraphicsSettings, so this is the same file the renderer reads. Resolving it here by a
-    // second route is the mistake that would make editing appear to do nothing: one rule (name ->
-    // file name -> path) lives in GraphicsSettings, and this window only supplies the name.
-    // A DOCUMENT (a directory holding image.frag) resolves to the pass being edited, Image by default;
-    // anything else - a top-level .frag - resolves exactly as before, which is why this can land before
-    // the selector exists without changing any behaviour.
-    const QString documentDir =
-        QDir(GraphicsSettings::shaderDirectoryPath()).filePath(shaderName);
-    if (QFileInfo::exists(QDir(documentDir).filePath(graphicsDocumentImageFileName())))
-    {
-        // THE PASS PATH IS RETURNED WHETHER OR NOT THE FILE IS THERE YET. The existence test that used
-        // to be here is what made Compile write the WRONG FILE: for a pass with no file on disk it fell
-        // through to the single-pass branch below, which answers "<name>.frag" - and in a document that
-        // is either the directory's neighbour or nothing at all. Measured shape of the fault: editing
-        // Buffer B and pressing Compile wrote default.frag, so the pass stayed empty while a stray
-        // top-level file appeared, and the picture never changed.
-        //
-        // Writing is exactly the case where the file does not exist yet, so "does it exist?" is the wrong
-        // question for a path the editor WRITES to. GraphicsSettings::writableShaderPath() answers the
-        // same way for the single-pass case, and for the same reason.
-        return QDir(documentDir).filePath(graphicsDocumentPassFileName(pass));
-    }
+    // The one rule, in GraphicsSettings/GraphicsDocuments where the renderer reads it too - so this window
+    // cannot write a file the pipeline does not read. It answers for a file that does not exist yet, which
+    // is the case Compile is in: the pass is written first, then compiled.
+    //
+    // History, because this function has been wrong in both directions: it used to fall through to
+    // "<name>.frag" for a document pass whose file was missing (so Compile wrote the wrong file), and the
+    // single-pass branch used to be `writableShaderPath(<name>.frag)`, which is the same file this rule
+    // now names for Image - and the same one the pass chain reads.
+    const GraphicsDocument document = scannedDocument(shaderName);
+    const QString path = graphicsDocumentPassFilePath(document, pass);
+    if (!path.isEmpty())
+        return path;
 
     return GraphicsSettings::writableShaderPath(GraphicsSettings::fragmentFileName(shaderName));
 }
@@ -658,39 +647,31 @@ void ShaderBufferWindow::refreshPassSelector()
     const QString document = editingShaderName();
     const GraphicsDocument found = scannedDocument(document);
 
-    // A SINGLE-PASS .frag HAS NO PASSES, so the selector is hidden for it. Measured, not assumed: with the
-    // bar drawn for every tab, clicking "Buffer A" while a plain default.frag was on screen was accepted -
-    // the log read "default now edits Buffer A (…/default.frag)" - and the editor then claimed to be
-    // editing a buffer of a document that has no buffers. Nothing was lost (the path resolves to the one
-    // file a single-pass document has, so Compile still wrote the right place), but the window said
-    // something untrue, and the plan says plainly: a single-pass document shows no pass tabs.
-    const bool applicable = found.isValid() && !found.singlePass;
-    m_passBar->setVisible(applicable);
-
-    // Logged on every refresh, for the same reason the channel row logs: "the bar did not change" and "the
-    // bar was never refreshed" look identical from outside, and telling those apart has already cost rounds.
-    GraphicsLog::info(QStringLiteral("pass tabs: '%1' document=%2 applicable=%3 visible=%4")
+    // SIX TABS, ALWAYS - for a single-pass .frag too, and this was got wrong once: the bar was hidden for a
+    // plain .frag on the strength of a line in the plan that the user had already replaced. The rule is the
+    // one written at plan 20: "a top-level .frag is still a document; inside its tab only Image has text,
+    // and the remaining passes show as (empty)" - five tabs you can type into, where typing creates the
+    // file. Hiding the bar made the structure invisible exactly where a person is learning it, and it made
+    // the channel row (which belongs to the PASS) unreachable for those files.
+    //
+    // So there is no "applicable" here: a document has six passes, whether or not their files exist yet,
+    // and an editor for a pass with no file is simply empty. The log line stays, because "the bar is there"
+    // and "the bar was never built" look identical from outside.
+    GraphicsLog::info(QStringLiteral("pass tabs: '%1' document=%2 tabs=%3 visible=%4")
                           .arg(document.isEmpty() ? QStringLiteral("(none)") : document,
                                found.isValid() ? (found.singlePass ? QStringLiteral("single-pass")
                                                                    : QStringLiteral("multi-pass"))
-                                               : QStringLiteral("unknown"),
-                               applicable ? QStringLiteral("yes") : QStringLiteral("no"),
-                               m_passBar->isVisible() ? QStringLiteral("yes") : QStringLiteral("no")));
-    if (!applicable)
-        return;
+                                               : QStringLiteral("unknown"))
+                          .arg(m_passBar->count())
+                          .arg(m_passBar->isVisible() ? QStringLiteral("yes") : QStringLiteral("no")));
 
-    // SIX TABS, ALWAYS, in the order the user asked for: Image, Buffer A, Buffer B, Buffer C, Buffer D,
-    // Common. Fixed rather than derived from the directory - a pass is a tab you can open and type into, and
-    // compiling it creates its file. Nothing to create, nothing to delete, and no state in which a pass is
-    // "not there yet": that whole class of confusion is what this removes.
-    const QList<GraphicsPass> passes = { GraphicsPass::Image,  GraphicsPass::BufferA, GraphicsPass::BufferB,
-                                         GraphicsPass::BufferC, GraphicsPass::BufferD, GraphicsPass::Common };
     // The tab ORDER is Shadertoy's, not the render order: Image first and selected by default, then
     // Common, then the buffers. The render order (A -> B -> C -> D -> Image) is a property of the
     // pipeline and does not belong in a strip a person clicks - presenting it there would say the wrong
     // thing about what happens first. Image first is also what the web editor settled on after a user
     // report: opening onto Common showed an empty editor while the code that was drawing sat in Image.
-    const QList<GraphicsPass> display = passes;
+    const QList<GraphicsPass> display = { GraphicsPass::Image,  GraphicsPass::BufferA, GraphicsPass::BufferB,
+                                          GraphicsPass::BufferC, GraphicsPass::BufferD, GraphicsPass::Common };
 
     // SIGNALS OFF FOR THE REBUILD, AND BACK ON WHEN IT IS DONE. That is not tidiness: this function runs
     // at construction and after every pass change, and it removes and re-adds every tab, so without the
@@ -971,106 +952,170 @@ void ShaderBufferWindow::refreshChannelRow()
 
     const GraphicsDocument document = scannedDocument(editingShaderName());
 
-    // Channels belong to a document; a single-pass .frag has none to assign, so the row is simply absent
-    // rather than shown with nothing in it. MEASURED, not assumed: with `default` (a plain .frag) selected,
-    // the log read "channel row: Image of 'default' reads [-1,-1,-1,-1] applicable=yes" - the row was on
-    // screen for a file that has no passes to assign anything to. The plan is explicit: a single-pass
-    // document shows no channel row.
-    // Every pass has its own four channels - Image and Buffer A-D alike - so the row follows the pass and
-    // only Common, which is not a pass, has none. Whether a file exists does not matter: a channel can
-    // point at a buffer or a texture before the pass has been written, exactly as on Shadertoy.
-    const bool applicable = document.isValid() && !document.singlePass
-                            && editingPass() != GraphicsPass::Common;
+    // The row belongs to the PASS and follows it, for EVERY document - a single-pass .frag included, whose
+    // Image pass is its one file and whose buffers are the four top-level files a compile would create.
+    // Common is the only thing without channels: it is text prepended to the others, not a pass that draws.
+    const bool applicable = document.isValid() && editingPass() != GraphicsPass::Common;
 
     // Logged on every refresh - which happens on a pass change and not per frame: which pass this row shows
     // and what it read for it. Without it, "the row did not change" and "the row changed to identical values"
     // are indistinguishable from outside, and telling those apart has already cost two rounds.
+    const QList<GraphicsChannelSource> shown =
+        graphicsDocumentChannelSourcesFromFile(document, editingPass());
     {
-        const QList<int> shown = graphicsDocumentChannels(document, editingPass());
-        GraphicsLog::info(QStringLiteral("channel row: %1 of '%2' reads [%3] applicable=%4")
+        GraphicsLog::info(QStringLiteral("channel row: %1 of '%2' reads [%3|%4|%5|%6] applicable=%7")
                               .arg(graphicsPassLabel(editingPass()), document.name,
-                                   QStringLiteral("%1,%2,%3,%4")
-                                       .arg(shown.value(0, -1)).arg(shown.value(1, -1))
-                                       .arg(shown.value(2, -1)).arg(shown.value(3, -1)),
+                                   graphicsChannelSourceToText(shown.value(0)),
+                                   graphicsChannelSourceToText(shown.value(1)),
+                                   graphicsChannelSourceToText(shown.value(2)),
+                                   graphicsChannelSourceToText(shown.value(3)),
                                    applicable ? QStringLiteral("yes") : QStringLiteral("no")));
     }
     m_channelRow->setVisible(applicable);
     if (!applicable)
         return;
 
-    const QList<GraphicsPass> available = graphicsDocumentPasses(document);
-    const QList<int> current = graphicsDocumentChannels(document, editingPass());
     for (int i = 0; i < 4; ++i)
     {
         QComboBox* combo = m_channelCombos[i];
-        combo->blockSignals(true);
+        const GraphicsChannelSource currentSource = shown.value(i);
+
+        // Rebuilt from the file EVERY time the row is refreshed, and the current value is put back by
+        // SOURCE rather than by index: this is what makes a pass switch keep what that pass had. (The bug
+        // it replaces read the value from the file but then left the combos showing whatever the previous
+        // pass's index happened to point at, so a buffer choice silently became None.)
+        const QSignalBlocker blocker(combo);
         combo->clear();
-        combo->addItem(tr("None"), -1);
-        const QList<GraphicsChannelSource> passSourcesNow =
-            graphicsDocumentChannelSourcesFromFile(document, editingPass());
-        const GraphicsChannelSource currentSource = passSourcesNow.value(i);
-        if (currentSource.isTexture())
-            combo->addItem(tr("Texture: %1").arg(QFileInfo(currentSource.path).fileName()), 1000);
-        else if (currentSource.isCubemap())
-            combo->addItem(tr("Cubemap: %1").arg(QFileInfo(currentSource.path).fileName()), 1001);
-        combo->addItem(tr("Texture..."), 1000);
-        combo->addItem(tr("Cubemap..."), 1001);
-        for (GraphicsPass pass : available)
-            combo->addItem(graphicsPassLabel(pass), graphicsPassDrawIndex(pass));
-        const int index = combo->findData(i < current.size() ? current[i] : -1);
-        if (index >= 0)
-            combo->setCurrentIndex(index);
-        combo->blockSignals(false);
+        combo->addItem(tr("None"), kChannelSourceNone);
+
+        // The four buffers SHADERTOY HAS, always listed - Shadertoy's own channel menu lists Buffer A-D
+        // whether or not the buffer has been written yet, and "an absent buffer is black" is already the
+        // renderer's rule. Listing only the buffers that happen to have files is what made the menu change
+        // shape as a document grew, and hid the choice a person was about to make.
+        for (int b = 0; b < kBufferCount; ++b)
+        {
+            const GraphicsPass bufferPass = kDrawOrder[b];
+            combo->addItem(graphicsPassLabel(bufferPass), graphicsPassDrawIndex(bufferPass));
+        }
+
+        // ONE image entry, not two. "Texture" and "image" are the same thing on this side: what a person
+        // chooses is a FILE, and the renderer loads it. The separate `Texture...` entry duplicated
+        // `Cubemap...`'s sibling for no reason and made the same choice appear twice under two names.
+        combo->addItem(tr("Image..."), kChannelSourceImage);
+        combo->addItem(tr("Cubemap..."), kChannelSourceCubemap);
+
+        // And the current value is selected: the chosen image/cubemap by name, a buffer by its index.
+        if (currentSource.isBuffer())
+        {
+            const int index = combo->findData(graphicsPassDrawIndex(
+                kDrawOrder[qBound(0, currentSource.bufferIndex, kDrawOrderCount - 1)]));
+            if (index >= 0)
+                combo->setCurrentIndex(index);
+        }
+        else if (currentSource.isTexture() || currentSource.isCubemap())
+        {
+            // The chosen file is INSERTED so the row says which image this is, and selected so a rebuild of
+            // the row cannot silently forget it - the same value the file holds, shown rather than implied.
+            const int data = currentSource.isCubemap() ? kChannelSourceCubemap : kChannelSourceImage;
+            combo->insertItem(1, tr("%1: %2").arg(currentSource.isCubemap() ? tr("Cubemap") : tr("Image"),
+                                                 QFileInfo(currentSource.path).fileName()),
+                              data + kChannelSourceFileOffset);
+            combo->setCurrentIndex(1);
+        }
     }
 }
 
 void ShaderBufferWindow::writeChannelsFromRow()
 {
     const GraphicsDocument document = scannedDocument(editingShaderName());
-    if (!document.isValid() || document.singlePass)
+    if (!document.isValid())
         return;
 
-    // The four combos, with the two file kinds resolved through a dialog. Held as SOURCES rather than indices,
-    // because a channel is no longer only a buffer.
-    QList<GraphicsChannelSource> chosen;
+    // WHICH SOURCES THE ROW SHOWS NOW - read once, and only the combo the user touched is taken from the
+    // widgets. Taking all four from the widgets is what made a pass's OTHER channels depend on whatever the
+    // previous pass happened to be showing: the row is rebuilt per pass, and a rebuild that had not finished
+    // selecting yet would write its placeholder over a real assignment.
+    QList<GraphicsChannelSource> chosen =
+        graphicsDocumentChannelSourcesFromFile(document, editingPass());
+    while (chosen.size() < 4)
+        chosen << GraphicsChannelSource{};
+
+    // The sender is one of the four combos; `sender()` is how the connection knows which, so one slot can
+    // serve all four rather than four near-identical lambdas.
+    const QComboBox* combo = qobject_cast<QComboBox*>(sender());
+    int changed = -1;
     for (int i = 0; i < 4; ++i)
     {
-        const int data = m_channelCombos[i]->currentData().toInt();
-        GraphicsChannelSource source;
-        if (data == 1000 || data == 1001)
+        if (m_channelCombos[i] == combo)
         {
-            const bool cube = (data == 1001);
-            const GraphicsChannelSource previous =
-                graphicsDocumentChannelSourcesFromFile(document, editingPass()).value(i);
-            const QString start = previous.path.isEmpty() ? QDir::homePath() : previous.path;
-            const QString file = QFileDialog::getOpenFileName(
-                this, cube ? tr("Choose a cubemap (a 4x3 cross image)") : tr("Choose an image"), start,
-                cube ? tr("Images (*.png *.jpg *.jpeg *.hdr *.exr);;All files (*)")
-                     : tr("Images (*.png *.jpg *.jpeg *.bmp);;All files (*)"));
-            if (file.isEmpty())
-                return;   // cancelled: leave the file alone rather than writing a half-chosen set
-            source.kind = cube ? GraphicsChannelSource::Cubemap : GraphicsChannelSource::Texture;
-            source.path = file;
+            changed = i;
+            break;
         }
-        else if (data >= 0)
+    }
+    if (changed < 0)
+        return;
+
+    const int data = combo->currentData().toInt();
+
+    // An already-chosen file, re-selected from the row: nothing to ask, nothing to change. Its data carries
+    // the file kind plus the offset that marks it as "the entry that names this file".
+    if (data >= kChannelSourceFileOffset)
+    {
+        chosen[changed].kind = (data - kChannelSourceFileOffset == kChannelSourceCubemap)
+                                   ? GraphicsChannelSource::Cubemap
+                                   : GraphicsChannelSource::Texture;
+        chosen[changed].path = graphicsDocumentChannelSourcesFromFile(document, editingPass())
+                                   .value(changed).path;
+    }
+    else if (data == kChannelSourceImage || data == kChannelSourceCubemap)
+    {
+        const bool cube = (data == kChannelSourceCubemap);
+        const GraphicsChannelSource previous =
+            graphicsDocumentChannelSourcesFromFile(document, editingPass()).value(changed);
+        const QString start = previous.path.isEmpty() ? QDir::homePath() : previous.path;
+        const QString file = QFileDialog::getOpenFileName(
+            this, cube ? tr("Choose a cubemap image (a 4x3 cross)") : tr("Choose an image"), start,
+            cube ? tr("Images (*.png *.jpg *.jpeg *.hdr *.exr);;All files (*)")
+                 : tr("Images (*.png *.jpg *.jpeg *.bmp);;All files (*)"));
+        if (file.isEmpty())
         {
-            source.kind = GraphicsChannelSource::Buffer;
-            source.bufferIndex = data;
+            // Cancelled: put the row back to what the file says rather than leaving the dialog's entry
+            // selected, so the row never shows a choice that was not made.
+            refreshChannelRow();
+            return;
         }
-        chosen << source;
+        chosen[changed].kind = cube ? GraphicsChannelSource::Cubemap : GraphicsChannelSource::Texture;
+        chosen[changed].path = file;
+    }
+    else if (data >= 0)
+    {
+        chosen[changed].kind = GraphicsChannelSource::Buffer;
+        chosen[changed].bufferIndex = data;
+    }
+    else
+    {
+        chosen[changed] = GraphicsChannelSource{};   // None
     }
 
-    // The combos only offer passes this document has, so a bad value cannot be produced here - that is the
-    // point of building them from the document rather than from a constant list.
     if (!writeGraphicsDocumentChannelSources(document, editingPass(), chosen))
     {
         m_status->setText(tr("Could not write %1").arg(graphicsDocumentChannelsPath(document)));
         return;
     }
 
-    GraphicsLog::info(QStringLiteral("shader buffer: channels for %1 -> %2")
-                          .arg(document.name, graphicsDocumentChannelsPath(document)));
-    m_status->setText(tr("Channels written (takes effect on the next reload)"));
+    GraphicsLog::info(QStringLiteral("shader buffer: channel %1 of %2 -> [%3|%4|%5|%6] in %7")
+                          .arg(changed)
+                          .arg(editingShaderName())
+                          .arg(graphicsChannelSourceToText(chosen.value(0)),
+                               graphicsChannelSourceToText(chosen.value(1)),
+                               graphicsChannelSourceToText(chosen.value(2)),
+                               graphicsChannelSourceToText(chosen.value(3)),
+                               graphicsDocumentChannelsPath(document)));
+
+    // The row is rebuilt from what was just written, so the displayed state is the file's state. Without
+    // this the row and the file can disagree - which is exactly how a "saved" choice appeared to be lost.
+    refreshChannelRow();
+    m_status->setText(tr("iChannel%1 saved").arg(changed));
 }
 
 void ShaderBufferWindow::setEditingPass(GraphicsPass pass)
@@ -1172,24 +1217,15 @@ void ShaderBufferWindow::rebuildTabs(const QString& selectName)
             }
         }
 
-        // Shadertoy's tab order: Image first and selected, then Common, then the buffers. The RENDER order
+        // Shadertoy's tab order: Image first and selected, then the buffers, then Common. The RENDER order
         // (A -> B -> C -> D -> Image) belongs to the pipeline and stays out of a strip a person clicks -
         // putting it there would say the wrong thing about what happens first.
-        QList<GraphicsPass> order;
-        order << GraphicsPass::Image;
-        if (document.isValid() && !document.singlePass)
-        {
-            if (!document.passPath(GraphicsPass::Common).isEmpty())
-                order << GraphicsPass::Common;
-            for (int i = 0; i < kDrawOrderCount; ++i)
-            {
-                if (kDrawOrder[i] != GraphicsPass::Image
-                    && !document.passPath(kDrawOrder[i]).isEmpty())
-                {
-                    order << kDrawOrder[i];
-                }
-            }
-        }
+        // EVERY document gets all six passes. A pass whose file does not exist is not skipped - its editor
+        // is simply empty, and typing in it plus Compile is what creates the file. Building only the passes
+        // that happen to be on disk is what made the bar and the editor disagree about which passes a
+        // document has.
+        const QList<GraphicsPass> order = { GraphicsPass::Image,  GraphicsPass::BufferA, GraphicsPass::BufferB,
+                                            GraphicsPass::BufferC, GraphicsPass::BufferD, GraphicsPass::Common };
 
         auto* stack = new QStackedWidget(m_tabs);
         SonicPiScintilla* shown = nullptr;
@@ -1198,9 +1234,8 @@ void ShaderBufferWindow::rebuildTabs(const QString& selectName)
             const QString key = name + QLatin1Char('/') + graphicsPassName(pass);
             SonicPiScintilla* editor = makeEditor(key);
 
-            // Read the pass's file into ITS editor. Missing is a normal state - a pass created by name whose
-            // file was never written - and it is reported in that document's own status, not as a
-            // window-wide failure.
+            // Read the pass's file into ITS editor. Missing is a normal state - a pass whose file was never
+            // written - and it is reported in that document's own status, not as a window-wide failure.
             QFile file(bufferFilePath(name, pass));
             if (file.open(QIODevice::ReadOnly | QIODevice::Text))
             {
@@ -1235,9 +1270,11 @@ void ShaderBufferWindow::rebuildTabs(const QString& selectName)
     refreshChannelRow();
     updateTabLabels();
 
-        // ONE document at a time: start on a directory document when there is one, because the six pass tabs and
-    // the channel rows describe a document - a top-level .frag has none of that structure to show.
-    QString wanted = selectName.isEmpty() ? editingShaderName() : selectName;
+        // ONE document at a time: start on a directory document when there is one. Not because a single-pass
+        // .frag lacks the structure - every document has six passes now - but because a directory document
+        // is the one whose buffers are separate files, so it is the one where a fresh session has something
+        // to show. When there is no directory document, the requested name (or `default`) is used as before.
+        QString wanted = selectName.isEmpty() ? editingShaderName() : selectName;
     if (wanted.isEmpty())
     {
         for (const GraphicsDocument& candidate : scanned)

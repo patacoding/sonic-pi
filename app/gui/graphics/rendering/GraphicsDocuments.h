@@ -102,10 +102,23 @@ struct GraphicsDocument
 // meaning what they meant. A missing file means the default assignment (channel i reads Buffer i).
 inline QString graphicsDocumentChannelsFileName() { return QStringLiteral("channels.txt"); }
 
+// Where a document's channel assignments live.
+//
+// A DIRECTORY document keeps them inside itself: <shaders>/<doc>/channels.txt - one file per document, next
+// to the passes it describes.
+//
+// A SINGLE-PASS .frag has no directory of its own, so its assignments go BESIDE it as a sidecar named after
+// the file: <shaders>/<name>.channels.txt. Without this a top-level .frag had no place to write a channel at
+// all, so choosing one did nothing and the row came back to None on the next pass switch - "the channel
+// settings are lost when I switch", which is the symptom this file's path rule is answerable for. The
+// sidecar is deliberately NOT shared between two .frag files that happen to have the same base name in
+// different directories: the name carries the whole path's base, as the tab name does.
 inline QString graphicsDocumentChannelsPath(const GraphicsDocument& document)
 {
     if (document.directory.isEmpty())
         return QString();
+    if (document.singlePass)
+        return QDir(document.directory).filePath(document.name + QStringLiteral(".channels.txt"));
     return QDir(document.directory).filePath(graphicsDocumentChannelsFileName());
 }
 
@@ -383,6 +396,11 @@ inline bool writeGraphicsDocumentChannelSources(const GraphicsDocument& document
         }
     }
     otherSections.insert(graphicsChannelSectionKey(graphicsPassName(pass)), sources);
+    // The legacy wildcard section is NOT carried over as a literal "[*]": it meant "applies to every pass"
+    // only while there were no sections at all, and once this file has per-pass sections it would read as a
+    // pass named "*" - a section the reader would then apply to nothing. The callers that migrate it (the
+    // int-based writer above) do the same thing for the same reason.
+    otherSections.remove(QStringLiteral("*"));
 
     QFile out(path);
     if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
@@ -533,6 +551,35 @@ inline QList<GraphicsPass> graphicsDocumentPasses(const GraphicsDocument& docume
             passes.append(kDrawOrder[i]);
     }
     return passes;
+}
+
+// The FILE a pass's text lives in, whether or not it exists yet.
+//
+// `GraphicsDocument::passPath()` answers a different question - "which pass has text I can read" - and
+// returns empty for a pass whose file is not there, which is right for a reader and wrong for a writer.
+// This is the writer's answer, and it is the same rule the editor uses to decide where Compile writes:
+//
+//   a directory document -> <dir>/<pass>.frag          (image.frag, bufferA.frag, common.glsl)
+//   a single-pass .frag  -> that file for Image, and <base>.<pass>.frag for a buffer or Common
+//
+// The single-pass case is what lets a plain .frag take part in the pass chain: Image IS the file, and
+// typing into Buffer A and compiling creates <base>.bufferA.frag, which is then its own pass. The names are
+// derived from the document, so a buffer cannot end up beside the wrong shader.
+inline QString graphicsDocumentPassFilePath(const GraphicsDocument& document, GraphicsPass pass)
+{
+    if (!document.isValid() || document.directory.isEmpty())
+        return QString();
+
+    if (!document.singlePass)
+        return QDir(document.directory).filePath(graphicsDocumentPassFileName(pass));
+
+    // One file, so Image is it and everything else is a sibling with the pass in the name - including
+    // Common, which is <base>.common.glsl because "common.glsl" alone would be shared by every .frag in
+    // the directory, and Common belongs to ONE document (plan 15: documents do not share).
+    if (pass == GraphicsPass::Image)
+        return document.m_singlePassFile;
+    return QDir(document.directory)
+        .filePath(document.name + QLatin1Char('.') + graphicsDocumentPassFileName(pass));
 }
 
 // Every document under `shadersDir`: its subdirectories that hold image.frag, plus its top-level .frag

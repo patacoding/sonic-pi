@@ -36,27 +36,33 @@ bool GraphicsPassPrograms::create(const GraphicsDocument& document, const QStrin
     }
 
     // Common is text, not a pass: read once, hand the same text to every pass. Absent is empty and is not
-    // an error - a document need not have one.
+    // an error - a document need not have one. The path is the WRITER's rule, so a single-pass .frag's
+    // Common is its own sidecar file rather than a shared "common.glsl" beside it.
     m_commonText.clear();
-    const QString commonFile = document.passPath(GraphicsPass::Common);
-    m_commonFile = commonFile;
-    if (!commonFile.isEmpty()) {
-        QFile common(commonFile);
-        if (common.open(QIODevice::ReadOnly))
-            m_commonText = QString::fromUtf8(common.readAll());
-        else
-            GraphicsLog::error(QStringLiteral("pass programs: document '%1' has a Common that cannot be read "
-                                              "(%2); compiling the passes without it")
-                                   .arg(document.name, common.errorString()));
+    m_commonFile.clear();
+    {
+        const QString commonFile = graphicsDocumentPassFilePath(document, GraphicsPass::Common);
+        if (!commonFile.isEmpty() && QFileInfo::exists(commonFile)) {
+            m_commonFile = commonFile;
+            QFile common(commonFile);
+            if (common.open(QIODevice::ReadOnly))
+                m_commonText = QString::fromUtf8(common.readAll());
+            else
+                GraphicsLog::error(QStringLiteral("pass programs: document '%1' has a Common that cannot be "
+                                                  "read (%2); compiling the passes without it")
+                                       .arg(document.name, common.errorString()));
+        }
     }
 
-    // One renderer per pass it actually has. A pass with no file is an empty pass: no renderer, nothing
-    // drawn, and sampling it is black - the rule the web renderer settled on - so a document with only an
-    // Image is perfectly valid.
+    // One renderer per pass that HAS TEXT. A pass with no file is an empty pass: no renderer, nothing drawn,
+    // and sampling it is black - the rule the web renderer settled on - so a document with only an Image is
+    // perfectly valid. This is why the existence test is here and not in the path rule above: a plain .frag
+    // is a document whose Image is its own file and whose four buffers do not exist until somebody writes
+    // them, and "does it exist" is exactly the question a compile has to ask.
     for (int i = 0; i < kDrawOrderCount; ++i) {
         const GraphicsPass pass = kDrawOrder[i];
-        const QString file = document.passPath(pass);
-        if (file.isEmpty())
+        const QString file = graphicsDocumentPassFilePath(document, pass);
+        if (file.isEmpty() || !QFileInfo::exists(file))
             continue;
 
         auto renderer = std::make_unique<GraphicsRenderer>();
