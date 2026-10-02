@@ -357,6 +357,9 @@ bool GraphicsRenderThread::applyRenderTargetSizeRequest()
             // to, so a later request naming it is a rebuild rather than a switch, and the first click on its
             // tab does not recompile five shaders that were just compiled.
             m_activePassDocument = document.name;
+            // Its channels, read where the document becomes the one being rendered - the same place the
+            // switch reads them, so a session's first frame and a later switch cannot disagree.
+            refreshChannelSources();
 
             // The channel textures belonged to the document being left, and their destruction needs the
             // context this thread holds.
@@ -597,6 +600,31 @@ void GraphicsRenderThread::releaseChannelTextures()
     m_channelCubemaps.clear();
 }
 
+void GraphicsRenderThread::refreshChannelSources()
+{
+    const QString path = graphicsDocumentChannelsPath(m_passDocument);
+    m_channelFileDescribesDocument = !path.isEmpty() && QFileInfo::exists(path);
+
+    QStringList readback;
+    for (int i = 0; i < kDrawOrderCount; ++i)
+    {
+        m_channelSources[i] = graphicsDocumentChannelSourcesFromFile(m_passDocument, kDrawOrder[i]);
+        QStringList four;
+        for (int ch = 0; ch < 4; ++ch)
+            four << graphicsChannelSourceToText(m_channelSources[i].value(ch));
+        readback << QStringLiteral("%1=[%2]").arg(graphicsPassLabel(kDrawOrder[i]),
+                                                  four.join(QLatin1Char('|')));
+    }
+
+    // Reported when the document is prepared, not per frame - and in the file's own words, so this line and
+    // the file can be compared directly when a channel is not doing what it looks like it says.
+    GraphicsLog::info(QStringLiteral("channels: %1, %2")
+                          .arg(m_channelFileDescribesDocument
+                                   ? QStringLiteral("from %1").arg(path)
+                                   : QStringLiteral("no channels file, so channel i reads Buffer i"),
+                               readback.join(QStringLiteral(" "))));
+}
+
 void GraphicsRenderThread::applyPassDocumentRequest()
 {
     if (!m_passDocumentRequested.exchange(false, std::memory_order_relaxed))
@@ -659,6 +687,9 @@ void GraphicsRenderThread::applyPassDocumentRequest()
     }
     m_activePassDocument = wanted.name;
     GraphicsLog::info(QStringLiteral("pass document: now rendering '%1'").arg(wanted.name));
+    // What each pass's channels read, read once here and kept for the frames that follow: the file is a
+    // person's edit, not a per-frame input.
+    refreshChannelSources();
     m_passesDrawnLastFrame = -1;   // so the next frame reports what it drew, once
 
     // A rebuild is somebody's Compile press, so it owes them an answer. Individual pass failures are
@@ -1536,32 +1567,26 @@ void GraphicsRenderThread::run()
 
                 // The frame values are shared with the pass, so a pass sees the same clock as the buffer on
                 // screen; only the resolution differs, and the existing code sets that again before it draws.
-                // Channels: default assignment is "channel i reads Buffer i" (the document's own buffers;
-                // nothing crosses documents). Every channel reads the READ side of its buffer, which after
-                // each pass's swap is this frame's result for a pass already drawn and last frame's for one
-                // not drawn yet - so the "earlier = this frame, self or later = last frame" rule falls out
-                // of the ping-pong for free, with no index arithmetic to get wrong.
+                // Every channel reads the READ side of its buffer, which after each pass's swap is this
+                // frame's result for a pass already drawn and last frame's for one not drawn yet - so the
+                // "earlier = this frame, self or later = last frame" rule falls out of the ping-pong for
+                // free, with no index arithmetic to get wrong.
+                //
+                // THE SOURCES COME FROM A CACHE, NOT FROM DISK. This loop used to call
+                // graphicsDocumentChannelSourcesFromFile() four times per pass - twenty file opens and
+                // parses per frame, at 60Hz and up, for a file that changes only when a person clicks. They
+                // are read once where the document is prepared (applyPassDocumentRequest, and at startup)
+                // and kept in m_channelSources; "what a channel reads" cannot change mid-frame, which is the
+                // rule the comment above already stated for the assignment as a whole.
+                const QList<GraphicsChannelSource>& passSources = m_channelSources[i];
                 for (int ch = 0; ch < 4; ++ch)
                 {
-                    // The source is the DOCUMENT's choice (channels.txt), not "channel i reads Buffer i".
-                    // -1 is None, which stays a zero texture id and therefore black; a source with no
-                    // program is None for the same reason - an absent buffer is an empty pass.
-                    // This pass's own channels, or the default (channel i reads Buffer i) when the document
-                    // says nothing about this pass - which is also what a legacy document-level file means.
-                    // This pass's own channels, read from the FILE so texture:/cubemap: sources survive, and
-                    // with the default (channel i reads Buffer i) applied only when the document has no
-                    // channels.txt at all: a file that is silent about one channel means None for it,
-                    // because then the user did express an opinion.
-                    const bool describesChannels =
-                        !graphicsDocumentChannelsPath(m_passDocument).isEmpty()
-                        && QFileInfo::exists(graphicsDocumentChannelsPath(m_passDocument));
-                    const QList<GraphicsChannelSource> passSources =
-                        graphicsDocumentChannelSourcesFromFile(m_passDocument, kDrawOrder[i]);
                     GraphicsChannelSource passSource;
                     if (ch < passSources.size())
                         passSource = passSources[ch];
-                    if (!describesChannels)
+                    if (!m_channelFileDescribesDocument)
                     {
+                        // No channels.txt at all: the historical default, channel i reads Buffer i.
                         passSource.kind = GraphicsChannelSource::Buffer;
                         passSource.bufferIndex = ch;
                     }

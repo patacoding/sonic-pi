@@ -979,48 +979,50 @@ void ShaderBufferWindow::refreshChannelRow()
     {
         QComboBox* combo = m_channelCombos[i];
         const GraphicsChannelSource currentSource = shown.value(i);
+        const QString currentText = graphicsChannelSourceToText(currentSource);
+        const bool currentIsFile = currentSource.isTexture() || currentSource.isCubemap();
 
-        // Rebuilt from the file EVERY time the row is refreshed, and the current value is put back by
-        // SOURCE rather than by index: this is what makes a pass switch keep what that pass had. (The bug
-        // it replaces read the value from the file but then left the combos showing whatever the previous
-        // pass's index happened to point at, so a buffer choice silently became None.)
+        // EVERY ITEM CARRIES ITS OWN SOURCE, as the text the FILE stores - and a file entry carries its path
+        // in the item too, so nothing has to be looked up a second time.
+        //
+        // What this replaces: item data was an int that meant three different things by range (a pass index,
+        // a "kind" code, and a kind code plus an offset), and the file path was then read back out of the
+        // file for the item that represented it. That is two sources of truth for one click, and it is how
+        // choosing an image came to write nothing: the item the user picked reported a kind while its path
+        // was fetched from a file that did not have one yet, so the write carried the OLD value and the row
+        // came back unchanged. `activated` hands the handler an index, the handler reads that index's data,
+        // and that data is now the whole answer.
         const QSignalBlocker blocker(combo);
         combo->clear();
-        combo->addItem(tr("None"), kChannelSourceNone);
+        combo->addItem(tr("None"), QStringLiteral("none"));
 
         // The four buffers SHADERTOY HAS, always listed - Shadertoy's own channel menu lists Buffer A-D
         // whether or not the buffer has been written yet, and "an absent buffer is black" is already the
         // renderer's rule. Listing only the buffers that happen to have files is what made the menu change
         // shape as a document grew, and hid the choice a person was about to make.
         for (int b = 0; b < kBufferCount; ++b)
+            combo->addItem(graphicsPassLabel(kDrawOrder[b]), graphicsPassName(kDrawOrder[b]));
+
+        // The chosen file, first among the file entries and selected, saying what it is and where it is.
+        if (currentIsFile)
         {
-            const GraphicsPass bufferPass = kDrawOrder[b];
-            combo->addItem(graphicsPassLabel(bufferPass), graphicsPassDrawIndex(bufferPass));
+            combo->addItem(QStringLiteral("%1: %2")
+                               .arg(currentSource.isCubemap() ? tr("Cubemap") : tr("Image"),
+                                    QFileInfo(currentSource.path).fileName()),
+                           currentText);
+            combo->setCurrentIndex(combo->count() - 1);
         }
 
-        // ONE image entry, not two. "Texture" and "image" are the same thing on this side: what a person
-        // chooses is a FILE, and the renderer loads it. The separate `Texture...` entry duplicated
-        // `Cubemap...`'s sibling for no reason and made the same choice appear twice under two names.
-        combo->addItem(tr("Image..."), kChannelSourceImage);
-        combo->addItem(tr("Cubemap..."), kChannelSourceCubemap);
+        // ONE image entry and one cubemap entry, not "Texture" plus "image": a channel that reads a file
+        // reads an image, and what the renderer does with it is its own business. These two are REQUESTS -
+        // "ask me for a file" - which is why they are marked as such rather than looking like a source.
+        combo->addItem(tr("Image..."), kChannelSourceChooseImage);
+        combo->addItem(tr("Cubemap..."), kChannelSourceChooseCubemap);
 
-        // And the current value is selected: the chosen image/cubemap by name, a buffer by its index.
-        if (currentSource.isBuffer())
+        if (!currentIsFile)
         {
-            const int index = combo->findData(graphicsPassDrawIndex(
-                kDrawOrder[qBound(0, currentSource.bufferIndex, kDrawOrderCount - 1)]));
-            if (index >= 0)
-                combo->setCurrentIndex(index);
-        }
-        else if (currentSource.isTexture() || currentSource.isCubemap())
-        {
-            // The chosen file is INSERTED so the row says which image this is, and selected so a rebuild of
-            // the row cannot silently forget it - the same value the file holds, shown rather than implied.
-            const int data = currentSource.isCubemap() ? kChannelSourceCubemap : kChannelSourceImage;
-            combo->insertItem(1, tr("%1: %2").arg(currentSource.isCubemap() ? tr("Cubemap") : tr("Image"),
-                                                 QFileInfo(currentSource.path).fileName()),
-                              data + kChannelSourceFileOffset);
-            combo->setCurrentIndex(1);
+            const int index = combo->findData(currentText);
+            combo->setCurrentIndex(index >= 0 ? index : 0);   // None when the file said something odd
         }
     }
 }
@@ -1030,15 +1032,6 @@ void ShaderBufferWindow::writeChannelsFromRow()
     const GraphicsDocument document = scannedDocument(editingShaderName());
     if (!document.isValid())
         return;
-
-    // WHICH SOURCES THE ROW SHOWS NOW - read once, and only the combo the user touched is taken from the
-    // widgets. Taking all four from the widgets is what made a pass's OTHER channels depend on whatever the
-    // previous pass happened to be showing: the row is rebuilt per pass, and a rebuild that had not finished
-    // selecting yet would write its placeholder over a real assignment.
-    QList<GraphicsChannelSource> chosen =
-        graphicsDocumentChannelSourcesFromFile(document, editingPass());
-    while (chosen.size() < 4)
-        chosen << GraphicsChannelSource{};
 
     // The sender is one of the four combos; `sender()` is how the connection knows which, so one slot can
     // serve all four rather than four near-identical lambdas.
@@ -1055,23 +1048,23 @@ void ShaderBufferWindow::writeChannelsFromRow()
     if (changed < 0)
         return;
 
-    const int data = combo->currentData().toInt();
+    // WHAT THE USER PICKED, read from the item itself - "bufferA", "none", "texture:<path>", or one of the
+    // two requests. This is the one place a click is turned into a value, and it is the same text the file
+    // holds, so a choice cannot mean one thing here and another there.
+    const QString picked = combo->currentData().toString();
 
-    // An already-chosen file, re-selected from the row: nothing to ask, nothing to change. Its data carries
-    // the file kind plus the offset that marks it as "the entry that names this file".
-    if (data >= kChannelSourceFileOffset)
+    // The other three channels come from the FILE, not from their widgets: the row is rebuilt per pass, and
+    // a widget that has not finished reflecting the file yet must not be able to write over it.
+    QList<GraphicsChannelSource> chosen =
+        graphicsDocumentChannelSourcesFromFile(document, editingPass());
+    while (chosen.size() < 4)
+        chosen << GraphicsChannelSource{};
+
+    if (picked == QLatin1String(kChannelSourceChooseImage)
+        || picked == QLatin1String(kChannelSourceChooseCubemap))
     {
-        chosen[changed].kind = (data - kChannelSourceFileOffset == kChannelSourceCubemap)
-                                   ? GraphicsChannelSource::Cubemap
-                                   : GraphicsChannelSource::Texture;
-        chosen[changed].path = graphicsDocumentChannelSourcesFromFile(document, editingPass())
-                                   .value(changed).path;
-    }
-    else if (data == kChannelSourceImage || data == kChannelSourceCubemap)
-    {
-        const bool cube = (data == kChannelSourceCubemap);
-        const GraphicsChannelSource previous =
-            graphicsDocumentChannelSourcesFromFile(document, editingPass()).value(changed);
+        const bool cube = (picked == QLatin1String(kChannelSourceChooseCubemap));
+        const GraphicsChannelSource previous = chosen.value(changed);
         const QString start = previous.path.isEmpty() ? QDir::homePath() : previous.path;
         const QString file = QFileDialog::getOpenFileName(
             this, cube ? tr("Choose a cubemap image (a 4x3 cross)") : tr("Choose an image"), start,
@@ -1079,7 +1072,7 @@ void ShaderBufferWindow::writeChannelsFromRow()
                  : tr("Images (*.png *.jpg *.jpeg *.bmp);;All files (*)"));
         if (file.isEmpty())
         {
-            // Cancelled: put the row back to what the file says rather than leaving the dialog's entry
+            // Cancelled: put the row back to what the file says rather than leaving the request entry
             // selected, so the row never shows a choice that was not made.
             refreshChannelRow();
             return;
@@ -1087,19 +1080,18 @@ void ShaderBufferWindow::writeChannelsFromRow()
         chosen[changed].kind = cube ? GraphicsChannelSource::Cubemap : GraphicsChannelSource::Texture;
         chosen[changed].path = file;
     }
-    else if (data >= 0)
-    {
-        chosen[changed].kind = GraphicsChannelSource::Buffer;
-        chosen[changed].bufferIndex = data;
-    }
     else
     {
-        chosen[changed] = GraphicsChannelSource{};   // None
+        // Everything else IS a source already, in the file's own words: "none", "bufferA".."bufferD", or a
+        // "texture:"/"cubemap:" line that was re-selected from the row.
+        chosen[changed] = graphicsChannelSourceFromText(picked);
     }
 
     if (!writeGraphicsDocumentChannelSources(document, editingPass(), chosen))
     {
         m_status->setText(tr("Could not write %1").arg(graphicsDocumentChannelsPath(document)));
+        GraphicsLog::error(QStringLiteral("shader buffer: could not write %1")
+                               .arg(graphicsDocumentChannelsPath(document)));
         return;
     }
 
@@ -1115,7 +1107,22 @@ void ShaderBufferWindow::writeChannelsFromRow()
     // The row is rebuilt from what was just written, so the displayed state is the file's state. Without
     // this the row and the file can disagree - which is exactly how a "saved" choice appeared to be lost.
     refreshChannelRow();
-    m_status->setText(tr("iChannel%1 saved").arg(changed));
+
+    // AND IT TAKES EFFECT NOW. The channels are what a pass SAMPLES, so a change to them is a change to what
+    // is being drawn - and until this call the new assignment sat in the file while the picture kept using
+    // the old one, which is indistinguishable from "choosing an image does nothing". `rebuild` is the same
+    // request Compile makes: same document, files changed, build the passes again. It cannot drop the
+    // picture: a pass that fails to build keeps the program it had.
+    if (m_renderThread)
+    {
+        if (!m_renderThread->requestPassDocument(document.name, true))
+            GraphicsLog::warn(QStringLiteral("shader buffer: channel change could not be applied "
+                                             "(the render loop is not running)"));
+    }
+
+    m_status->setText(tr("iChannel%1 = %2 (live)")
+                          .arg(changed)
+                          .arg(graphicsChannelSourceToText(chosen.value(changed))));
 }
 
 void ShaderBufferWindow::setEditingPass(GraphicsPass pass)

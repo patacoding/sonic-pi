@@ -524,14 +524,22 @@ private:
     // How many passes were drawn last frame, so the line is emitted when that CHANGES and not per frame.
     int m_passesDrawnLastFrame = -1;
 
-    // What each channel reads, as a draw index or -1 for None, taken from the document's channels.txt (or
-    // None when it has none). Defaults to -1 everywhere so an unset document samples black, not stale
-    // memory - a channel that reads something nobody chose is worse than a black one.
-    int m_channelSources[4] = { -1, -1, -1, -1 };
-
     // The document whose passes are compiled, kept so the frame loop can ask for each pass's OWN channels
     // (Shadertoy binds them per pass) rather than one set for all of them.
     GraphicsDocument m_passDocument;
+
+    // What each pass's four channels read, per draw index - read from the document's channels file ONCE,
+    // where the document is prepared, and used by every frame until the document or the file changes.
+    //
+    // The frame loop used to read and parse the file twenty times per frame (four channels times five
+    // passes). Beyond the cost, it made a per-frame decision out of a file a person edits, so a write that
+    // landed mid-frame could give two passes of one frame different assignments.
+    QList<GraphicsChannelSource> m_channelSources[kDrawOrderCount];
+    // Whether the document has a channels file at all. False means the historical default (channel i reads
+    // Buffer i); true means the file said what it said, including "none" for a channel it is silent about.
+    bool m_channelFileDescribesDocument = false;
+    // Read the document's channel file into m_channelSources. Requires nothing but the document.
+    void refreshChannelSources();
 
     void applyPassDocumentRequest();
     QString m_requestedPassDocument;              // guarded by m_bufferMutex, like m_requestedShaderName
