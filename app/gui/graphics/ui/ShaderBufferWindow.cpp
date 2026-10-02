@@ -776,10 +776,64 @@ void ShaderBufferWindow::showAddPassMenu(QWidget* anchor)
         if (candidate.name.compare(editingShaderName(), Qt::CaseInsensitive) == 0)
             document = candidate;
 
-    if (!document.isValid() || document.singlePass)
+    if (!document.isValid())
     {
-        m_status->setText(tr("Passes belong to a document - a directory holding image.frag"));
+        m_status->setText(tr("No document to add a pass to"));
         return;
+    }
+
+    if (document.singlePass)
+    {
+        // A top-level .frag has no directory to put a pass in, and refusing here is what made New look
+        // unimplemented in the document a fresh session shows. Shadertoy's model is that every shader has the
+        // pass structure, so adding a pass PROMOTES the file: <name>.frag becomes <name>/image.frag and the
+        // directory takes its place. Nothing is lost - the text moves, it is not rewritten.
+        const QString directory = QDir(GraphicsSettings::shaderDirectoryPath()).filePath(document.name);
+        if (!QDir().mkpath(directory))
+        {
+            m_status->setText(tr("Could not create %1").arg(directory));
+            return;
+        }
+        const QString from = document.passPath(GraphicsPass::Image);   // the single-pass file itself
+        const QString to = QDir(directory).filePath(graphicsDocumentImageFileName());
+        if (from.isEmpty() || !QFile::rename(from, to))
+        {
+            m_status->setText(tr("Could not move %1 into %2").arg(from, to));
+            return;
+        }
+        GraphicsLog::info(QStringLiteral("shader buffer: promoted '%1' to a document (%2 -> %3)")
+                              .arg(document.name, from, to));
+
+        // Re-scanned rather than patched: what the tabs and this menu show must come from the disk, and the
+        // document is a different shape now.
+        for (const GraphicsDocument& candidate : scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath()))
+            if (candidate.name.compare(document.name, Qt::CaseInsensitive) == 0)
+                document = candidate;
+
+        // The single-shader path lost its file in the move, so the document path takes over for this name.
+        // The OLD tab has to go first: rebuildTabs() skips a name it already knows, so leaving it would keep
+        // the single-pass editor and the new pass would silently have none - which is the same "New does
+        // nothing" symptom this whole path exists to remove.
+        if (m_editors.contains(document.name))
+        {
+            SonicPiScintilla* old = m_editors.take(document.name);
+            for (int i = 0; i < m_tabs->count(); ++i)
+            {
+                if (m_tabs->widget(i) == old)
+                {
+                    m_tabs->removeTab(i);
+                    break;
+                }
+            }
+            old->deleteLater();
+        }
+        if (m_passByDocument.contains(document.name))
+            m_passByDocument.remove(document.name);
+        if (m_renderThread)
+            m_renderThread->requestPassDocument(document.name);
+        rebuildTabs(document.name);
+        refreshPassSelector();
+        refreshChannelRow();
     }
 
     // Only the passes that do not exist yet, and only the ones Shadertoy names: a pass is one of Common or
