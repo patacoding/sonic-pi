@@ -1246,6 +1246,19 @@ bool GraphicsRenderer::renderInto(GraphicsTarget& target, const GraphicsFrame& f
         // is the only order that works: they are part of the program's state, not
         // the framebuffer's.
         applyUniforms(frame);
+
+        // The four channels: the VALUE of each sampler is a texture unit number, so it is set here - while
+        // this program is bound - and never from the caller. Which texture sits on that unit was decided by
+        // the pipeline and bound before this call; a zero texture id means the channel is absent and the
+        // shader samples black.
+        for (int i = 0; i < 4; ++i)
+        {
+            if (m_uniforms.channel[i] < 0)
+                continue;   // not declared by this shader: nothing to set
+            f->glUniform1i(m_uniforms.channel[i], i);
+            if (frame.channelTexture[i] != 0)
+                f->glActiveTexture(GLenum(GL_TEXTURE0 + i));
+        }
         drawQuadWithProgram(m_program.get());
         m_program->release();
     }

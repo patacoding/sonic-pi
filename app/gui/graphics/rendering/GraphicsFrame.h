@@ -54,6 +54,16 @@ struct GraphicsFrame
     // Frames drawn since the clock started, starting at 0 for the first frame.
     unsigned long long frameIndex = 0;
 
+    // What each Shadertoy channel should read, decided by the pipeline that owns the passes:
+    // channelTexture[i] is the GL texture id for channel i, and 0 means "nothing" - a shader sampling it
+    // gets black, which is the rule the web renderer settled on for an absent buffer. The pipeline fills
+    // these per PASS, because which texture a channel names depends on which pass is being drawn.
+    //
+    // They travel in the frame rather than being set from outside because a sampler value can only be set
+    // while the program is bound - and the renderer binds the program, not the caller (the trap the web
+    // side hit: glUniform* writes to whichever program is CURRENTLY bound).
+    unsigned int channelTexture[4] = { 0, 0, 0, 0 };
+
     // Size of the surface being drawn into, in device pixels. The size the shader
     // should use for aspect correction; the logical window size would be wrong on
     // a HiDPI display.

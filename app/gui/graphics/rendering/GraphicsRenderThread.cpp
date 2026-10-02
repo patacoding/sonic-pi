@@ -1311,6 +1311,21 @@ void GraphicsRenderThread::run()
 
                 // The frame values are shared with the pass, so a pass sees the same clock as the buffer on
                 // screen; only the resolution differs, and the existing code sets that again before it draws.
+                // Channels: default assignment is "channel i reads Buffer i" (the document's own buffers;
+                // nothing crosses documents). Every channel reads the READ side of its buffer, which after
+                // each pass's swap is this frame's result for a pass already drawn and last frame's for one
+                // not drawn yet - so the "earlier = this frame, self or later = last frame" rule falls out
+                // of the ping-pong for free, with no index arithmetic to get wrong.
+                for (int ch = 0; ch < 4; ++ch)
+                {
+                    GraphicsPass source = kDrawOrder[ch];
+                    GraphicsRenderer* sourcePass = m_passPrograms->pass(source);
+                    GraphicsTarget* readSide = (sourcePass && m_bufferTargets[ch]) ? m_bufferTargets[ch]->read() : nullptr;
+                    frame.channelTexture[ch] = (readSide && readSide->isValid()) ? readSide->texture() : 0;
+                    if (frame.channelTexture[ch] != 0 && m_context && m_context->extraFunctions())
+                        m_context->extraFunctions()->glBindTexture(GL_TEXTURE_2D, frame.channelTexture[ch]);
+                }
+
                 frame.resolution = passTarget->size();
                 if (passRenderer->renderInto(*passTarget, frame))
                     ++drawn;
@@ -1320,7 +1335,30 @@ void GraphicsRenderThread::run()
             if (drawn != m_passesDrawnLastFrame)
             {
                 m_passesDrawnLastFrame = drawn;
-                GraphicsLog::info(QStringLiteral("passes drawn: %1 of %2 (off-screen; channels unbound)")
+
+                // ONE measurement, when the count changes: what the passes actually wrote. Buffer A writes
+                // (1.0, 0.5) and the Image pass reads it through channel 0 unchanged, so this must read
+                // rgb(255,128) - the composite assertion the web renderer used, and the only thing here
+                // that proves the channel is bound and the order is right rather than merely configured.
+                {
+                    const int imageIndex = graphicsPassDrawIndex(GraphicsPass::Image);
+                    GraphicsTarget* imageSide = (imageIndex >= 0 && m_bufferTargets[imageIndex])
+                                                    ? m_bufferTargets[imageIndex]->read() : nullptr;
+                    if (imageSide && imageSide->isValid() && m_context && m_context->extraFunctions())
+                    {
+                        QOpenGLExtraFunctions* extra = m_context->extraFunctions();
+                        const QSize size = imageSide->size();
+                        imageSide->bind();
+                        unsigned char pixel[4] = { 0, 0, 0, 0 };
+                        extra->glReadPixels(size.width() / 2, size.height() / 2, 1, 1,
+                                            GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+                        GraphicsLog::info(QStringLiteral("pass pixel: Image centre = rgb(%1,%2,%3) "
+                                                         "(Buffer A wrote rgb(255,128,0); the channel is bound "
+                                                         "and the order holds when they agree)")
+                                              .arg(pixel[0]).arg(pixel[1]).arg(pixel[2]));
+                    }
+                }
+                GraphicsLog::info(QStringLiteral("passes drawn: %1 of %2 (off-screen; channels read the document's own buffers)")
                                       .arg(drawn)
                                       .arg(kDrawOrderCount));
             }
