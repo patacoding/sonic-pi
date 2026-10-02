@@ -13,9 +13,11 @@
 
 #include "GraphicsPassPrograms.h"
 
+#include <QDir>
 #include <QFile>
 
 #include "GraphicsLog.h"
+#include "GraphicsSettings.h"
 
 namespace SonicPi
 {
@@ -71,7 +73,12 @@ bool GraphicsPassPrograms::create(const GraphicsDocument& document, const QStrin
         // The entry point multi-pass needed, which turned out to exist already (GraphicsRenderer.cpp:251):
         // explicit file, document's Common, and a failure that keeps the previous program - which is what
         // gives each pass its own protection rather than one bad pass taking the frame down.
-        const GraphicsCompileResult result = renderer->buildAndInstallFrom(file, m_commonText);
+        // A NAME, not the absolute path: buildProgram() reaches the file through
+        // GraphicsSettings::shaderPath(name), which looks in the user shader directory and then in the
+        // shipped copy. Measured - handing it an absolute path produced "Shader file not found" for a
+        // file that was plainly on disk (1236 bytes).
+        const QString name = QDir(GraphicsSettings::shaderDirectoryPath()).relativeFilePath(file);
+        const GraphicsCompileResult result = renderer->buildAndInstallFrom(name, m_commonText);
         if (!result.ok() && !result.installed) {
             GraphicsLog::error(QStringLiteral("pass programs: %1 did not build from %2; it stays an empty "
                                               "pass. %3")
