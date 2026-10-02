@@ -40,6 +40,10 @@
 #include <QHash>
 #include <QInputDialog>
 #include <QLabel>
+// The channel previews: decoded at thumbnail size rather than loaded and shrunk (see the loader).
+#include <QImage>
+#include <QImageReader>
+#include <QPixmap>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPlainTextEdit>
@@ -304,11 +308,29 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     for (int i = 0; i < 4; ++i)
     {
         m_channelCombos[i] = new QComboBox(m_channelRow);
-        m_channelCombos[i]->setToolTip(tr("What iChannel%1 samples (applies to every pass of this document)").arg(i));
+        m_channelCombos[i]->setToolTip(tr("What iChannel%1 samples (this pass's own channels)").arg(i));
+        // A FIXED WIDTH, so choosing a file cannot move the row: Qt's default policy grows a combo to fit
+        // its widest entry, and with four channels on one line that pushed the last ones off the edge. The
+        // entries are kept short ("Image", "Buffer A") and the picture beside it carries the rest.
+        m_channelCombos[i]->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        m_channelCombos[i]->setMinimumContentsLength(10);
+        m_channelCombos[i]->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
         connect(m_channelCombos[i], QOverload<int>::of(&QComboBox::activated), this, [this](int) {
             writeChannelsFromRow();
         });        channelLayout->addWidget(new QLabel(QStringLiteral("iChannel%0").arg(i), m_channelRow));
         channelLayout->addWidget(m_channelCombos[i]);
+
+        // WHAT THE CHANNEL ACTUALLY READS, as a picture. A file path in a combo box says nothing about
+        // whether the right image is loaded, whether the path still exists, or whether it is the cubemap
+        // layout the renderer expects - all of which are answered by looking at it. Sized by the same DPI
+        // helper the rest of the chrome uses, so it is the same physical size on a 200% display.
+        m_channelPreviews[i] = new QLabel(m_channelRow);
+        m_channelPreviews[i]->setFixedHeight(ScaleHeightForDPI(34));
+        m_channelPreviews[i]->setMinimumWidth(ScaleWidthForDPI(44));
+        m_channelPreviews[i]->setAlignment(Qt::AlignCenter);
+        m_channelPreviews[i]->setScaledContents(false);
+        m_channelPreviews[i]->setTextInteractionFlags(Qt::NoTextInteraction);
+        channelLayout->addWidget(m_channelPreviews[i]);
     }
     channelLayout->addStretch(1);
     layout->addWidget(m_channelRow);
@@ -317,13 +339,14 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     // several places and a mistake there is invisible from the outside - the window simply looks unchanged,
     // which is indistinguishable from "the change was never made".
     GraphicsLog::info(QStringLiteral("shader buffer: window built - tabs=%1 compile=%2 new=%3 passBar=%4 "
-                                     "channelRow=%5 goToError=%6")
+                                     "channelRow=%5 goToError=%6 previews=%7")
                           .arg(m_tabs ? QStringLiteral("yes") : QStringLiteral("NO"))
                           .arg(m_compileButton ? QStringLiteral("yes") : QStringLiteral("NO"))
                           .arg(newButton ? QStringLiteral("yes") : QStringLiteral("NO"))
                           .arg(m_passBar ? QStringLiteral("yes") : QStringLiteral("NO"))
                           .arg(m_channelRow ? QStringLiteral("yes") : QStringLiteral("NO"))
-                          .arg(m_goToErrorButton ? QStringLiteral("yes") : QStringLiteral("NO")));
+                          .arg(m_goToErrorButton ? QStringLiteral("yes") : QStringLiteral("NO"))
+                          .arg(m_channelPreviews[0] ? QStringLiteral("yes") : QStringLiteral("NO")));
 
     // Which trigger fired, in the log. Two ways in - the button and Ctrl+Return - and "the key did
     // nothing" is otherwise indistinguishable from "the key never reached this window": the editor
@@ -945,6 +968,89 @@ void ShaderBufferWindow::deletePass(GraphicsPass pass)
     m_status->setText(tr("Deleted %1 (%2)").arg(graphicsPassLabel(pass), path));
 }
 
+// The thumbnail beside a channel: the picture that channel will sample, or an honest statement that there
+// is not one.
+//
+// Three rules, each from a way this kind of widget goes wrong:
+//
+//   * A FILE THAT IS NOT THERE IS SAID, not drawn as a blank square. The path can be edited by hand in
+//     channels.txt, and a deleted screenshot then reads as "my shader samples black" - which is exactly the
+//     failure a preview exists to make visible. The name is shown, and the tooltip carries the reason.
+//   * NOTHING IS DRAWN FOR A BUFFER. Its picture is the pass two lines up in this very window; reading it
+//     back would cost a GPU sync per refresh to show somebody what they can already see.
+//   * THE IMAGE IS DECODED AT THUMBNAIL SIZE (QImageReader::setScaledSize), not loaded and then shrunk. A
+//     phone photo is 12 megapixels, and decoding one per channel per refresh is a visible stall in a window
+//     that refreshes on every pass switch.
+void ShaderBufferWindow::refreshChannelPreviews(const QList<GraphicsChannelSource>& sources)
+{
+    const int box = ScaleHeightForDPI(30);
+    for (int i = 0; i < 4; ++i)
+    {
+        QLabel* preview = m_channelPreviews[i];
+        if (!preview)
+            continue;
+
+        const GraphicsChannelSource source = sources.value(i);
+        preview->setPixmap(QPixmap());
+        preview->setText(QString());
+        preview->setToolTip(QString());
+
+        if (!source.isTexture() && !source.isCubemap())
+        {
+            // None, or a buffer: no picture here. A buffer's combo already names it, and the pass it names
+            // has a tab of its own.
+            preview->setFixedWidth(ScaleWidthForDPI(44));
+            continue;
+        }
+
+        const QFileInfo info(source.path);
+        const bool cube = source.isCubemap();
+        const QString kind = cube ? tr("Cubemap") : tr("Image");
+
+        QImageReader reader(source.path);
+        reader.setAutoTransform(true);   // a photo's EXIF rotation is part of the picture, not a detail
+        QSize size = reader.size();
+        if (size.isValid() && !size.isEmpty())
+        {
+            // Keep the aspect ratio while bounding the SIDE that is too long, so a portrait photo does not
+            // come out as a letterbox and a panorama does not come out as a stripe.
+            const qreal scale = qMin(qreal(box) / size.width(), qreal(box) / size.height());
+            const QSize wanted(qMax(1, int(size.width() * scale)), qMax(1, int(size.height() * scale)));
+            reader.setScaledSize(wanted);
+        }
+        const QImage image = reader.read();
+
+        if (image.isNull())
+        {
+            // Said, with the reason, and with the name so the row still says WHICH file failed - but with a
+            // SHORT name in a fixed narrow width, because a missing file must not be the thing that widens
+            // the row either.
+            QString shortName = info.fileName();
+            if (shortName.size() > 14)
+                shortName = shortName.left(11) + QStringLiteral("...");
+            preview->setText(shortName + QStringLiteral("\n!"));
+            preview->setToolTip(tr("%1 could not be read as an image.\n%2\n%3")
+                                    .arg(kind, source.path, reader.errorString()));
+            preview->setFixedWidth(ScaleWidthForDPI(56));
+            GraphicsLog::warn(QStringLiteral("shader buffer: channel %1 preview could not read %2 (%3)")
+                                  .arg(i).arg(source.path, reader.errorString()));
+            continue;
+        }
+
+        preview->setPixmap(QPixmap::fromImage(image));
+        // NO NAME IN THE ROW: the thumbnail IS the answer to "which image", and a label beside it made the
+        // row as wide as the longest file name. The name and the path are one hover away.
+        preview->setFixedWidth(image.width() + ScaleWidthForDPI(4));
+        preview->setToolTip(cube
+                                ? tr("%1: %2\n%3x%4 - read as a 4x3 cross of six faces.\n"
+                                     "A file that is not 4:3 cannot be laid out this way, and the channel "
+                                     "would read black.")
+                                      .arg(kind, source.path).arg(image.width()).arg(image.height())
+                                : tr("%1: %2\n%3x%4 (thumbnail; loaded at full size by the renderer)")
+                                      .arg(kind, source.path).arg(image.width()).arg(image.height()));
+    }
+}
+
 void ShaderBufferWindow::refreshChannelRow()
 {
     if (!m_channelRow)
@@ -975,6 +1081,10 @@ void ShaderBufferWindow::refreshChannelRow()
     if (!applicable)
         return;
 
+    // The pictures come from the same read as the combos, so what is shown and what is selected cannot be
+    // two different answers to "what does this channel read".
+    refreshChannelPreviews(shown);
+
     for (int i = 0; i < 4; ++i)
     {
         QComboBox* combo = m_channelCombos[i];
@@ -1003,13 +1113,15 @@ void ShaderBufferWindow::refreshChannelRow()
         for (int b = 0; b < kBufferCount; ++b)
             combo->addItem(graphicsPassLabel(kDrawOrder[b]), graphicsPassName(kDrawOrder[b]));
 
-        // The chosen file, first among the file entries and selected, saying what it is and where it is.
+        // The chosen file, selected, and named only as "Image" / "Cubemap": the PICTURE beside this combo
+        // says which file it is, and a file name in a combo box makes the box as wide as the longest name
+        // anybody ever chose - which pushed the other three channels off the row. The name is in the
+        // tooltip and on the thumbnail for anyone who needs to read it.
         if (currentIsFile)
         {
-            combo->addItem(QStringLiteral("%1: %2")
-                               .arg(currentSource.isCubemap() ? tr("Cubemap") : tr("Image"),
-                                    QFileInfo(currentSource.path).fileName()),
-                           currentText);
+            combo->addItem(currentSource.isCubemap() ? tr("Cubemap") : tr("Image"), currentText);
+            combo->setItemData(combo->count() - 1, QFileInfo(currentSource.path).fileName(),
+                               Qt::ToolTipRole);
             combo->setCurrentIndex(combo->count() - 1);
         }
 
