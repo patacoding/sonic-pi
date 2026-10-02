@@ -27,6 +27,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QSignalBlocker>
 #include <QAction>
 #include <QComboBox>
 #include <QMenu>
@@ -244,6 +245,12 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     m_passBar->setDrawBase(false);
     m_passBar->setToolTip(tr("Which text of this document to edit (Ctrl+Return compiles it)"));
     connect(m_passBar, &QTabBar::currentChanged, this, [this](int index) {
+        // Logged before anything else, so a click is visible even if the handler returns early. "The tab did
+        // nothing" and "the tab was never clicked" have to be distinguishable, and they were not.
+        GraphicsLog::info(QStringLiteral("pass tab: clicked index %1 (tabData=%2, label='%3')")
+                              .arg(index)
+                              .arg(m_passBar ? m_passBar->tabData(index).toInt() : -999)
+                              .arg(m_passBar ? m_passBar->tabText(index) : QString()));
         if (!m_passBar || index < 0)
             return;
         setEditingPass(static_cast<GraphicsPass>(m_passBar->tabData(index).toInt()));
@@ -260,27 +267,15 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     addPassButton->setVisible(false);
     buttonsLayout->addWidget(addPassButton);
 
-    // Removing a pass, as Shadertoy's tab bar does: right-click the tab. Image is refused rather than
-    // hidden - a directory without image.frag is not a document, and a menu that silently lacks the entry
-    // leaves the rule invisible.
-    // No delete either: the six passes are the document, so there is nothing to remove.
-    m_passBar->setContextMenuPolicy(Qt::DefaultContextMenu);
-    connect(m_passBar, &QTabBar::customContextMenuRequested, this, [this](const QPoint& at) {
-        const int index = m_passBar->tabAt(at);
-        if (index < 0)
-            return;
-        const GraphicsPass pass = static_cast<GraphicsPass>(m_passBar->tabData(index).toInt());
-
-        QMenu menu(this);
-        QAction* remove = menu.addAction(tr("Delete %1").arg(graphicsPassLabel(pass)));
-        if (pass == GraphicsPass::Image)
-        {
-            remove->setEnabled(false);
-            remove->setToolTip(tr("Image is what makes a directory a document; it cannot be removed"));
-        }
-        connect(remove, &QAction::triggered, this, [this, pass]() { deletePass(pass); });
-        menu.exec(m_passBar->mapToGlobal(at));
-    });
+    // NO RIGHT-CLICK MENU ON THE PASS TABS. The six passes ARE the document (2026-10-02: "No delete
+    // either: the six passes are the document, so there is nothing to remove"), so a Delete entry would
+    // contradict the model - and the one that was wired here could never have appeared anyway:
+    // `customContextMenuRequested` is emitted only under Qt::CustomContextMenu, while the policy was left
+    // at Qt::DefaultContextMenu. Removing it rather than fixing the policy, because the menu should not
+    // exist: the reachable-looking dead code was the actual defect.
+    //
+    // deletePass() is kept - it is how a pass that was made by mistake is undone from the Add menu, and its
+    // refusal for Image is a rule worth keeping written down - but nothing offers it from the tab bar.
 
     buttonsLayout->addWidget(m_compileButton);
     buttonsLayout->addWidget(m_goToErrorButton);
@@ -596,6 +591,25 @@ bool ShaderBufferWindow::eventFilter(QObject* watched, QEvent* event)
     return QWidget::eventFilter(watched, event);
 }
 
+// The document a tab name means, from the same scan the renderer uses - so the editor and the pipeline
+// cannot disagree about which kind of thing a name is. That disagreement has already cost one round: the
+// editor drew the pass tabs and the channel row for a name whose file is a single-pass .frag.
+//
+// Stateless and a free function because the callers are static-ish helpers as much as member functions,
+// and because a cache here would be a second idea of "what is on disk" to keep in step with the scan.
+static GraphicsDocument scannedDocument(const QString& name)
+{
+    GraphicsDocument found;
+    if (name.isEmpty())
+        return found;
+    for (const GraphicsDocument& candidate : scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath()))
+    {
+        if (candidate.name.compare(name, Qt::CaseInsensitive) == 0)
+            return candidate;
+    }
+    return found;
+}
+
 QString ShaderBufferWindow::bufferFilePath(const QString& shaderName, GraphicsPass pass)
 {
     // Through GraphicsSettings, so this is the same file the renderer reads. Resolving it here by a
@@ -608,10 +622,17 @@ QString ShaderBufferWindow::bufferFilePath(const QString& shaderName, GraphicsPa
         QDir(GraphicsSettings::shaderDirectoryPath()).filePath(shaderName);
     if (QFileInfo::exists(QDir(documentDir).filePath(graphicsDocumentImageFileName())))
     {
-        const QString passFile = QDir(documentDir).filePath(graphicsDocumentPassFileName(
-            pass));
-        if (QFileInfo::exists(passFile))
-            return passFile;
+        // THE PASS PATH IS RETURNED WHETHER OR NOT THE FILE IS THERE YET. The existence test that used
+        // to be here is what made Compile write the WRONG FILE: for a pass with no file on disk it fell
+        // through to the single-pass branch below, which answers "<name>.frag" - and in a document that
+        // is either the directory's neighbour or nothing at all. Measured shape of the fault: editing
+        // Buffer B and pressing Compile wrote default.frag, so the pass stayed empty while a stray
+        // top-level file appeared, and the picture never changed.
+        //
+        // Writing is exactly the case where the file does not exist yet, so "does it exist?" is the wrong
+        // question for a path the editor WRITES to. GraphicsSettings::writableShaderPath() answers the
+        // same way for the single-pass case, and for the same reason.
+        return QDir(documentDir).filePath(graphicsDocumentPassFileName(pass));
     }
 
     return GraphicsSettings::writableShaderPath(GraphicsSettings::fragmentFileName(shaderName));
@@ -635,20 +656,29 @@ void ShaderBufferWindow::refreshPassSelector()
         return;
 
     const QString document = editingShaderName();
+    const GraphicsDocument found = scannedDocument(document);
 
-    // From the directory, not from a stored copy: the same scan the renderer uses, so the selector cannot
-    // offer a pass the pipeline does not have.
-    GraphicsDocument found;
-    const QList<GraphicsDocument> documents =
-        scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath());
-    for (const GraphicsDocument& candidate : documents)
-    {
-        if (candidate.name.compare(document, Qt::CaseInsensitive) == 0)
-        {
-            found = candidate;
-            break;
-        }
-    }
+    // A SINGLE-PASS .frag HAS NO PASSES, so the selector is hidden for it. Measured, not assumed: with the
+    // bar drawn for every tab, clicking "Buffer A" while a plain default.frag was on screen was accepted -
+    // the log read "default now edits Buffer A (…/default.frag)" - and the editor then claimed to be
+    // editing a buffer of a document that has no buffers. Nothing was lost (the path resolves to the one
+    // file a single-pass document has, so Compile still wrote the right place), but the window said
+    // something untrue, and the plan says plainly: a single-pass document shows no pass tabs.
+    const bool applicable = found.isValid() && !found.singlePass;
+    m_passBar->setVisible(applicable);
+
+    // Logged on every refresh, for the same reason the channel row logs: "the bar did not change" and "the
+    // bar was never refreshed" look identical from outside, and telling those apart has already cost rounds.
+    GraphicsLog::info(QStringLiteral("pass tabs: '%1' document=%2 applicable=%3 visible=%4")
+                          .arg(document.isEmpty() ? QStringLiteral("(none)") : document,
+                               found.isValid() ? (found.singlePass ? QStringLiteral("single-pass")
+                                                                   : QStringLiteral("multi-pass"))
+                                               : QStringLiteral("unknown"),
+                               applicable ? QStringLiteral("yes") : QStringLiteral("no"),
+                               m_passBar->isVisible() ? QStringLiteral("yes") : QStringLiteral("no")));
+    if (!applicable)
+        return;
+
     // SIX TABS, ALWAYS, in the order the user asked for: Image, Buffer A, Buffer B, Buffer C, Buffer D,
     // Common. Fixed rather than derived from the directory - a pass is a tab you can open and type into, and
     // compiling it creates its file. Nothing to create, nothing to delete, and no state in which a pass is
@@ -662,16 +692,37 @@ void ShaderBufferWindow::refreshPassSelector()
     // report: opening onto Common showed an empty editor while the code that was drawing sat in Image.
     const QList<GraphicsPass> display = passes;
 
-    m_passBar->blockSignals(true);
-    while (m_passBar->count() > 0)
-        m_passBar->removeTab(0);
-    int current = -1;
-    for (GraphicsPass pass : display)
+    // SIGNALS OFF FOR THE REBUILD, AND BACK ON WHEN IT IS DONE. That is not tidiness: this function runs
+    // at construction and after every pass change, and it removes and re-adds every tab, so without the
+    // block the bar would report a currentChanged per tab and the handler would fight the rebuild.
+    //
+    // The bug this replaces: the block was written as a bare `blockSignals(true)` with no matching
+    // `blockSignals(false)` (and no early return to excuse it), so the FIRST refresh - at construction,
+    // before the window was ever shown - left the pass bar muted for the life of the window. Every later
+    // click changed the tab and emitted nothing, which is exactly "clicking a pass does nothing", and it
+    // is why the handler's own log line never appeared in graphics.log. A scope guard cannot be
+    // forgotten the way a second call can, which is the whole reason to use one here.
     {
-        const int index = m_passBar->addTab(graphicsPassLabel(pass));
-        m_passBar->setTabData(index, int(pass));
-        if (pass == editingPass())
-            current = index;
+        const QSignalBlocker blocker(m_passBar);
+
+        while (m_passBar->count() > 0)
+            m_passBar->removeTab(0);
+
+        int current = -1;
+        for (GraphicsPass pass : display)
+        {
+            const int index = m_passBar->addTab(graphicsPassLabel(pass));
+            m_passBar->setTabData(index, int(pass));
+            if (pass == editingPass())
+                current = index;
+        }
+
+        // And the bar is put back on the pass actually being edited. A rebuilt bar starts at tab 0
+        // (Image) whatever the document's pass is, so without this the tabs said "you are in Image" while
+        // the editor below showed Buffer B - a disagreement that reads as data loss, and the reason
+        // `current` was computed here and then never used.
+        if (current >= 0)
+            m_passBar->setCurrentIndex(current);
     }
 }
 
@@ -706,12 +757,7 @@ SonicPiScintilla* ShaderBufferWindow::ensurePassEditor(const GraphicsDocument& d
 
 void ShaderBufferWindow::addPass(GraphicsPass pass)
 {
-    GraphicsDocument document;
-    const QList<GraphicsDocument> documents =
-        scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath());
-    for (const GraphicsDocument& candidate : documents)
-        if (candidate.name.compare(editingShaderName(), Qt::CaseInsensitive) == 0)
-            document = candidate;
+    GraphicsDocument document = scannedDocument(editingShaderName());
 
     if (!document.isValid() || document.singlePass)
         return;
@@ -769,12 +815,7 @@ void ShaderBufferWindow::addPass(GraphicsPass pass)
 
 void ShaderBufferWindow::showAddPassMenu(QWidget* anchor)
 {
-    GraphicsDocument document;
-    const QList<GraphicsDocument> documents =
-        scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath());
-    for (const GraphicsDocument& candidate : documents)
-        if (candidate.name.compare(editingShaderName(), Qt::CaseInsensitive) == 0)
-            document = candidate;
+    GraphicsDocument document = scannedDocument(editingShaderName());
 
     if (!document.isValid())
     {
@@ -862,12 +903,7 @@ void ShaderBufferWindow::deletePass(GraphicsPass pass)
         return;
     }
 
-    GraphicsDocument document;
-    const QList<GraphicsDocument> documents =
-        scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath());
-    for (const GraphicsDocument& candidate : documents)
-        if (candidate.name.compare(editingShaderName(), Qt::CaseInsensitive) == 0)
-            document = candidate;
+    GraphicsDocument document = scannedDocument(editingShaderName());
 
     if (!document.isValid() || document.singlePass)
         return;
@@ -933,24 +969,18 @@ void ShaderBufferWindow::refreshChannelRow()
     if (!m_channelRow)
         return;
 
-    GraphicsDocument document;
-    const QList<GraphicsDocument> documents =
-        scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath());
-    for (const GraphicsDocument& candidate : documents)
-    {
-        if (candidate.name.compare(editingShaderName(), Qt::CaseInsensitive) == 0)
-        {
-            document = candidate;
-            break;
-        }
-    }
+    const GraphicsDocument document = scannedDocument(editingShaderName());
 
     // Channels belong to a document; a single-pass .frag has none to assign, so the row is simply absent
-    // rather than shown with nothing in it.
+    // rather than shown with nothing in it. MEASURED, not assumed: with `default` (a plain .frag) selected,
+    // the log read "channel row: Image of 'default' reads [-1,-1,-1,-1] applicable=yes" - the row was on
+    // screen for a file that has no passes to assign anything to. The plan is explicit: a single-pass
+    // document shows no channel row.
     // Every pass has its own four channels - Image and Buffer A-D alike - so the row follows the pass and
     // only Common, which is not a pass, has none. Whether a file exists does not matter: a channel can
     // point at a buffer or a texture before the pass has been written, exactly as on Shadertoy.
-    const bool applicable = document.isValid() && editingPass() != GraphicsPass::Common;
+    const bool applicable = document.isValid() && !document.singlePass
+                            && editingPass() != GraphicsPass::Common;
 
     // Logged on every refresh - which happens on a pass change and not per frame: which pass this row shows
     // and what it read for it. Without it, "the row did not change" and "the row changed to identical values"
@@ -977,10 +1007,7 @@ void ShaderBufferWindow::refreshChannelRow()
         combo->clear();
         combo->addItem(tr("None"), -1);
         const QList<GraphicsChannelSource> passSourcesNow =
-            graphicsDocumentChannelSourcesFromFile(document, static_cast<GraphicsPass>(
-                m_passBar && m_passBar->count() > 0
-                    ? m_passBar->tabData(m_passBar->currentIndex()).toInt()
-                    : int(GraphicsPass::Image)));
+            graphicsDocumentChannelSourcesFromFile(document, editingPass());
         const GraphicsChannelSource currentSource = passSourcesNow.value(i);
         if (currentSource.isTexture())
             combo->addItem(tr("Texture: %1").arg(QFileInfo(currentSource.path).fileName()), 1000);
@@ -999,17 +1026,7 @@ void ShaderBufferWindow::refreshChannelRow()
 
 void ShaderBufferWindow::writeChannelsFromRow()
 {
-    GraphicsDocument document;
-    const QList<GraphicsDocument> documents =
-        scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath());
-    for (const GraphicsDocument& candidate : documents)
-    {
-        if (candidate.name.compare(editingShaderName(), Qt::CaseInsensitive) == 0)
-        {
-            document = candidate;
-            break;
-        }
-    }
+    const GraphicsDocument document = scannedDocument(editingShaderName());
     if (!document.isValid() || document.singlePass)
         return;
 
@@ -1075,10 +1092,7 @@ void ShaderBufferWindow::setEditingPass(GraphicsPass pass)
         if (!editor)
         {
             // The six tabs are always there, so a pass with no file yet has no editor until it is opened.
-            GraphicsDocument found;
-            for (const GraphicsDocument& candidate : scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath()))
-                if (candidate.name.compare(document, Qt::CaseInsensitive) == 0)
-                    found = candidate;
+            const GraphicsDocument found = scannedDocument(document);
             if (found.isValid())
                 editor = ensurePassEditor(found, pass);
         }
@@ -1089,13 +1103,6 @@ void ShaderBufferWindow::setEditingPass(GraphicsPass pass)
         }
     }
 
-    // The channel row belongs to the PASS, so switching passes must re-read it. Without these two calls the
-    // row keeps the previous pass's four values, which looks exactly like "both passes share one set of
-    // channels" - and then an edit writes pass A's values into pass B's section. (This call was silently lost
-    // once already: the file is CRLF and the pattern I matched with was LF.)
-    refreshPassSelector();
-    refreshChannelRow();
-
     // The channel row belongs to the PASS: without these two calls the row keeps the previous pass's four
     // values, which is indistinguishable from "both passes share one set of channels" - and an edit then
     // writes pass A's values into pass B's section. They belong HERE, in setEditingPass; an earlier attempt
@@ -1103,6 +1110,11 @@ void ShaderBufferWindow::setEditingPass(GraphicsPass pass)
     // symptom survived a green build.
     refreshPassSelector();
     refreshChannelRow();
+
+    // The window title and the tab tooltips name the buffer being edited, and a pass change moves neither
+    // by itself: switching from Image to Common left the title saying the same thing for both.
+    updateTabLabels();
+    updateWindowTitle();
 
     GraphicsLog::info(QStringLiteral("shader buffer: %1 now edits %2 (%3)")
                           .arg(document, graphicsPassLabel(pass), bufferFilePath(document, pass)));
@@ -1568,7 +1580,12 @@ void ShaderBufferWindow::compile()
     if (name.isEmpty() || !editor)
         return;
 
-    const QString path = bufferFilePath(name);
+    // THE PASS BEING EDITED, not the default. This call used the default argument (Image) while the text
+    // above came from whichever pass tab was selected, so in a document every pass wrote its text to
+    // image.frag: editing Buffer B and compiling replaced the Image pass with Buffer B's code, and Buffer
+    // B's own file was never written at all. Two facts about the same click have to name the same pass.
+    const GraphicsPass pass = editingPass();
+    const QString path = bufferFilePath(name, pass);
     const QString text = editor->text();
 
     // Written first, because the render thread reads the file rather than receiving the text. That is
@@ -1592,12 +1609,26 @@ void ShaderBufferWindow::compile()
     m_compilingShaderName = name;
 
     m_status->setText(tr("Compiling %1...").arg(name));
-    GraphicsLog::info(QStringLiteral("shader buffer: wrote buffer '%1' -> %2 (%3 bytes); asking the render "
-                                     "thread to compile and show it").arg(name, path).arg(text.size()));
+    GraphicsLog::info(QStringLiteral("shader buffer: wrote %1 of '%2' -> %3 (%4 bytes); asking the render "
+                                     "thread to compile and show it")
+                          .arg(graphicsPassLabel(pass), name, path)
+                          .arg(text.size()));
 
     // The render thread compiles it AND puts it on screen - one operation, because for a picture there
     // is nothing useful in between. A buffer that will not build leaves the current picture alone.
-    if (!m_renderThread->requestShaderCompile(name))
+    //
+    // A DOCUMENT's name is not a buffer name: there is no "<document>.frag", and its passes are compiled as
+    // a set (GraphicsPassPrograms). Asking the render thread to switch to the document - which is what
+    // requestPassDocument means - is what compiles the file that was just written, and it answers through
+    // the same shaderCompileFinished. The render thread also redirects to this path when a plain compile
+    // request names a document, so either spelling works and neither can end in "no such file".
+    bool asked = false;
+    if (documentIsMultiPass(name))
+        asked = m_renderThread->requestPassDocument(name);
+    else
+        asked = m_renderThread->requestShaderCompile(name);
+
+    if (!asked)
     {
         // No running loop means nothing will ever answer, so the window must say so rather than sit
         // on "Compiling..." forever. That state would be indistinguishable from a compile that takes
@@ -1606,6 +1637,19 @@ void ShaderBufferWindow::compile()
                                     "The file has been saved."),
                           QString(), 0);
     }
+}
+
+// Whether this tab is a multi-pass DOCUMENT (a directory holding image.frag) rather than a single-pass .frag.
+// Asked of the same scan the renderer uses, so the editor and the pipeline cannot disagree about which kind
+// of thing a name is - the disagreement that made Compile write to one file and read another.
+bool ShaderBufferWindow::documentIsMultiPass(const QString& name) const
+{
+    for (const GraphicsDocument& document : scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath()))
+    {
+        if (document.name.compare(name, Qt::CaseInsensitive) == 0)
+            return !document.singlePass;
+    }
+    return false;
 }
 
 void ShaderBufferWindow::compileFinished(bool ok, const QString& compilerLog,

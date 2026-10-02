@@ -202,7 +202,12 @@ public:
     // Ask the render loop to render a different DOCUMENT's passes. Requested rather than applied, for the
     // same reason every other switch is: a program belongs to a context, and the loop owns it. The switch
     // happens at a frame boundary. A single-pass .frag is ignored here - it stays with the active-buffer path.
-    bool requestPassDocument(const QString& documentName);
+    //
+    // `rebuild` says the request is "the files changed, compile them again" rather than "show me that
+    // document". Without it the loop refuses a request for the document that is already on screen - which is
+    // exactly what pressing Compile in a document tab asks for, and why an edited pass never reached the
+    // picture: the file was written, and the programs that read it were never rebuilt.
+    bool requestPassDocument(const QString& documentName, bool rebuild = false);
 
     bool requestShaderCompile(const QString& shaderName = QString());
 
@@ -531,6 +536,10 @@ private:
     void applyPassDocumentRequest();
     QString m_requestedPassDocument;              // guarded by m_bufferMutex, like m_requestedShaderName
     QString m_activePassDocument;
+    // Whether the pending request means "compile this document's passes AGAIN" (the editor saved a pass)
+    // rather than "show me this document". Guarded by m_bufferMutex with the name above, so the pair cannot
+    // be read half-applied; cleared by the consumer when it applies the request.
+    bool m_requestedPassDocumentRebuild = false;
 
     // Loaded channel textures, by file path, and the cubemaps built from a cross image. Loaded once and kept
     // until the document changes, because re-uploading an image every frame - or on every dropdown change -

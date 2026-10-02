@@ -353,12 +353,16 @@ bool GraphicsRenderThread::applyRenderTargetSizeRequest()
             // Kept for the frame loop: the channels are PER PASS now (Shadertoy binds them under each render
             // pass), so the loop asks for the pass it is about to draw instead of reading one set up front.
             m_passDocument = document;
+            // Recorded here as well as in applyPassDocumentRequest: this is the document the passes belong
+            // to, so a later request naming it is a rebuild rather than a switch, and the first click on its
+            // tab does not recompile five shaders that were just compiled.
+            m_activePassDocument = document.name;
 
-            // The channel textures belonged to the document being left, and their destruction needs the context
-    // this thread holds.
-    releaseChannelTextures();
+            // The channel textures belonged to the document being left, and their destruction needs the
+            // context this thread holds.
+            releaseChannelTextures();
 
-    m_passPrograms = std::make_unique<GraphicsPassPrograms>();
+            m_passPrograms = std::make_unique<GraphicsPassPrograms>();
             if (!m_passPrograms->create(document, QString())) {
                 GraphicsLog::error(QStringLiteral("pass programs: document '%1' compiled nothing")
                                        .arg(document.name));
@@ -398,8 +402,8 @@ bool GraphicsRenderThread::applyRenderTargetSizeRequest()
             names << (document.singlePass ? document.name + QStringLiteral(" (single pass)") : document.name);
         GraphicsLog::info(QStringLiteral("graphics documents: %1 found: %2")
                               .arg(documents.size())
-
                               .arg(names.isEmpty() ? QStringLiteral("(none)") : names.join(QStringLiteral(", "))));
+    }
 
     // The order the multi-pass pipeline will run in, said once here so the vocabulary in GraphicsPasses.h
     // is visible in the log rather than only in the code. One array decides it for everything that cares:
@@ -410,7 +414,6 @@ bool GraphicsRenderThread::applyRenderTargetSizeRequest()
             order << graphicsPassLabel(kDrawOrder[i]);
         GraphicsLog::info(QStringLiteral("pass order: %1 (Common is text, prepended to each, not a pass)")
                               .arg(order.join(QStringLiteral(" -> "))));
-    }
     }
     // Spout publishing follows the output size: the read-back buffers are the target's size, and the
     // sender is created at a size. A receiver will therefore see the sender disappear and come back when
@@ -484,7 +487,7 @@ bool GraphicsRenderThread::requestShaderForget(const QString& shaderName)
     return true;
 }
 
-bool GraphicsRenderThread::requestPassDocument(const QString& documentName)
+bool GraphicsRenderThread::requestPassDocument(const QString& documentName, bool rebuild)
 {
     if (!m_loopRunning.load(std::memory_order_relaxed))
     {
@@ -497,10 +500,14 @@ bool GraphicsRenderThread::requestPassDocument(const QString& documentName)
     {
         QMutexLocker lock(&m_bufferMutex);
         m_requestedPassDocument = documentName;
+        m_requestedPassDocumentRebuild = rebuild;
     }
     m_passDocumentRequested.store(true, std::memory_order_relaxed);
 
-    GraphicsLog::info(QStringLiteral("pass document: requested '%1'").arg(documentName));
+    GraphicsLog::info(QStringLiteral("pass document: requested '%1'%2")
+                          .arg(documentName,
+                               rebuild ? QStringLiteral(" (rebuild: the files changed)")
+                                       : QString()));
     return true;
 }
 
@@ -596,11 +603,18 @@ void GraphicsRenderThread::applyPassDocumentRequest()
         return;
 
     QString requested;
+    bool rebuild = false;
     {
         QMutexLocker lock(&m_bufferMutex);
         requested = m_requestedPassDocument;
+        rebuild = m_requestedPassDocumentRebuild;
+        m_requestedPassDocumentRebuild = false;
     }
-    if (requested.isEmpty() || requested.compare(m_activePassDocument) == 0)
+    // A rebuild is honoured for the document already on screen too: that is what pressing Compile in a
+    // document tab means - the pass file was just written, and the programs that read it must be built
+    // again. A plain switch to the document already on screen is still refused, so clicking the tab you are
+    // already in does not recompile five shaders.
+    if (requested.isEmpty() || (!rebuild && requested.compare(m_activePassDocument) == 0))
         return;
 
     // One scan, on the render thread, with the context current - the same rule as everything else here.
@@ -636,7 +650,8 @@ void GraphicsRenderThread::applyPassDocumentRequest()
     releaseChannelTextures();
 
     m_passPrograms = std::make_unique<GraphicsPassPrograms>();
-    if (!m_passPrograms->create(wanted, QString()))
+    const bool built = m_passPrograms->create(wanted, QString());
+    if (!built)
     {
         GraphicsLog::error(QStringLiteral("pass document: '%1' compiled nothing").arg(wanted.name));
         m_passPrograms.reset();
@@ -644,6 +659,14 @@ void GraphicsRenderThread::applyPassDocumentRequest()
     m_activePassDocument = wanted.name;
     GraphicsLog::info(QStringLiteral("pass document: now rendering '%1'").arg(wanted.name));
     m_passesDrawnLastFrame = -1;   // so the next frame reports what it drew, once
+
+    // A rebuild is somebody's Compile press, so it owes them an answer. Individual pass failures are
+    // already in the log, in the renderer's own words and attributed to the pass's file; this is the
+    // verdict that tells the editor the attempt finished, and that the document produced a picture or did
+    // not. Emitted only for a rebuild: a plain document switch is a view action, and answering it would
+    // file a compile report against a tab the user never compiled.
+    if (rebuild)
+        emit shaderCompileFinished(built, QString(), QString(), 0, QStringList());
 }
 
 void GraphicsRenderThread::applyShaderForget()
@@ -713,6 +736,27 @@ void GraphicsRenderThread::applyShaderCompile()
     const QString current = shaderName();
     if (wanted.isEmpty())
         wanted = current;
+
+    // A DOCUMENT IS NOT A BUFFER. A document is a directory holding image.frag, and its passes are compiled
+    // as a set by GraphicsPassPrograms - there is no "<document>.frag" for the single-shader path below to
+    // read. Without this branch, pressing Compile in a document tab built a renderer for "myShader.frag",
+    // found no such file, and reported a failure while the picture went on showing the OLD passes: the
+    // file had been written and nothing ever read it again. Handing the request to the pass path is what
+    // makes an edit visible. The verdict comes from there too (see applyPassDocumentRequest), so this
+    // returns without emitting one - two verdicts for one Compile would file a failure over a success.
+    {
+        const QList<GraphicsDocument> documents =
+            scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath());
+        for (const GraphicsDocument& document : documents)
+        {
+            if (document.singlePass || document.name.compare(wanted, Qt::CaseInsensitive) != 0)
+                continue;
+            GraphicsLog::info(QStringLiteral("compile: '%1' is a document; rebuilding its passes "
+                                             "(passes, not a '<name>.frag')").arg(wanted));
+            requestPassDocument(document.name, true);
+            return;
+        }
+    }
 
     GraphicsLog::info(QStringLiteral("compile: buffer '%1' (on screen: '%2')").arg(wanted, current));
 

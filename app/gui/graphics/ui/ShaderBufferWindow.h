@@ -211,6 +211,11 @@ private:
     // The file a buffer's text lives in, and where it is written. Empty when the name is unknown.
     static QString bufferFilePath(const QString& shaderName, GraphicsPass pass = GraphicsPass::Image);
 
+    // Whether `name` is a multi-pass document - a directory holding image.frag - rather than a single-pass
+    // .frag. The two are compiled by different machinery (GraphicsPassPrograms vs one GraphicsRenderer), so
+    // Compile has to know which one it is asking about; asked of the same scan the renderer uses.
+    bool documentIsMultiPass(const QString& name) const;
+
     SonicPiTheme* m_theme = nullptr;
     GraphicsRenderThread* m_renderThread = nullptr;
     // Not owned. The GUI's settings, for the file dialogs' remembered directory only.

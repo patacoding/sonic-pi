@@ -588,6 +588,15 @@ GraphicsCompileResult GraphicsRenderer::buildProgram(const QString& vertexFile,
                               .arg(frag)
                               .arg(common.assignedSourceString));
 
+        // Said out loud, because the text that gets compiled is then not the text in the file - and "my
+        // Common is not doing what it says" is otherwise a mystery with no trace anywhere. Why it is
+        // dropped rather than passed through: ShaderText::withCommon has the measured reason.
+        if (common.droppedVersionDirective)
+        {
+            GraphicsLog::info(QStringLiteral("shader: %1 carries a #version line; it was dropped and "
+                                             "replaced by a comment (the pass owns the version, and GLSL "
+                                             "allows one)").arg(commonFile.isEmpty() ? frag : commonFile));
+        }
     }
 
     // The frame values the shader is allowed to use without declaring them: iTime, iTimeDelta, iFrame and

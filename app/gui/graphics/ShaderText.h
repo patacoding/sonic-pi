@@ -356,6 +356,10 @@ struct CommonSource
     // Ready to merge into the table the expansion produced: { assignedSourceString -> commonFile }.
     // Empty when there was nothing to insert.
     QHash<int, QString> fileBySourceString;
+    // True when the Common text carried a `#version` line, which was dropped (see below). Reported rather
+    // than silently accepted: the user wrote it, and a text that is quietly not what they typed is the
+    // thing every other rule in this file exists to avoid.
+    bool droppedVersionDirective = false;
 };
 
 inline CommonSource withCommon(const QString& source, const QString& commonText,
@@ -380,7 +384,41 @@ inline CommonSource withCommon(const QString& source, const QString& commonText,
             assigned = it.key() + 1;
     }
 
+    // A `#version` IN COMMON IS DROPPED, and this is not a convenience - it is the difference between a
+    // document that compiles and one that cannot. GLSL allows exactly one version directive, as the first
+    // statement; a Common block is prepended to a pass, and every pass already carries its own. Measured
+    // on the real pipeline, with `#version 330 core` at the top of common.glsl:
+    //
+    //     shadertoytest/common.glsl:1 : error C0204: version directive must be first statement and may not
+    //                                   be repeated
+    //     shadertoytest/bufferA.frag:3 : error C1038: declaration of "v_uv" conflicts with previous
+    //                                   declaration at 1(3)
+    //
+    // Every pass of the document failed, so the document compiled nothing and the picture vanished - from
+    // one line that looks entirely reasonable in a shared library. The alternative (report it and fail the
+    // pass anyway) would keep the foot-gun and add an explanation to it; the choice made here is that the
+    // version belongs to the PASS, which is the file the driver sees first, and Common is a fragment of it.
     QString block = commonText;
+    {
+        QStringList kept;
+        const QStringList lines = block.split(QLatin1Char('\n'));
+        kept.reserve(lines.size());
+        for (const QString& line : lines)
+        {
+            if (line.trimmed().startsWith(QLatin1String("#version")))
+            {
+                result.droppedVersionDirective = true;
+                // Replaced by a comment, not deleted: the line NUMBERS of Common must not move, or every
+                // diagnostic inside it would point one line above the truth.
+                kept << QStringLiteral("// (a #version line was removed here: the version belongs to the "
+                                       "pass, which already has one)");
+                continue;
+            }
+            kept << line;
+        }
+        block = kept.join(QLatin1Char('\n'));
+    }
+
     // A file whose text does not end with a newline would otherwise leave `#line` attached to its last
     // line, and the driver refuses a directive preceded by another token. Same trap the expander
     // documents at its own resync.
