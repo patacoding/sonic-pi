@@ -300,37 +300,60 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     layout->addWidget(buttons);
     layout->addWidget(split, 1);
 
-    // The channel row: four combos, inline, under the editor. See the header for why it is not a dialog.
+    // The channel row: four channels, UNDER the editor, laid out the way Shadertoy lays its own out - a
+    // COLUMN each: the name, the combo that chooses, and the picture BELOW them, big enough to recognise
+    // the image by. See the header for why it is not a dialog.
+    //
+    // It was one line of four (name, combo, small thumbnail each) and the user rejected it: the pictures
+    // were too small to tell one screenshot from another, and a row that has to fit four of everything
+    // sideways has no room to make them bigger. Four columns give each channel its own full width, so the
+    // preview can be a real thumbnail rather than an icon.
     m_channelRow = new QWidget(this);
     auto* channelLayout = new QHBoxLayout(m_channelRow);
     channelLayout->setContentsMargins(0, 0, 0, 0);
-    channelLayout->addWidget(new QLabel(tr("Channels:"), m_channelRow));
+    channelLayout->setSpacing(ScaleWidthForDPI(12));
     for (int i = 0; i < 4; ++i)
     {
+        auto* column = new QVBoxLayout();
+        column->setContentsMargins(0, 0, 0, 0);
+        column->setSpacing(ScaleHeightForDPI(4));
+
+        column->addWidget(new QLabel(QStringLiteral("iChannel%0").arg(i), m_channelRow));
+
         m_channelCombos[i] = new QComboBox(m_channelRow);
         m_channelCombos[i]->setToolTip(tr("What iChannel%1 samples (this pass's own channels)").arg(i));
-        // A FIXED WIDTH, so choosing a file cannot move the row: Qt's default policy grows a combo to fit
-        // its widest entry, and with four channels on one line that pushed the last ones off the edge. The
-        // entries are kept short ("Image", "Buffer A") and the picture beside it carries the rest.
+        // A FIXED WIDTH, so choosing a file cannot move anything: Qt's default policy grows a combo to fit
+        // its widest entry, and the entries stay short ("Image", "Buffer A") - the picture below carries the
+        // rest. The column is what stretches, not the box, so the four columns stay aligned.
         m_channelCombos[i]->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-        m_channelCombos[i]->setMinimumContentsLength(10);
+        m_channelCombos[i]->setMinimumContentsLength(12);
         m_channelCombos[i]->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
         connect(m_channelCombos[i], QOverload<int>::of(&QComboBox::activated), this, [this](int) {
             writeChannelsFromRow();
-        });        channelLayout->addWidget(new QLabel(QStringLiteral("iChannel%0").arg(i), m_channelRow));
-        channelLayout->addWidget(m_channelCombos[i]);
+        });
+        column->addWidget(m_channelCombos[i]);
 
-        // WHAT THE CHANNEL ACTUALLY READS, as a picture. A file path in a combo box says nothing about
-        // whether the right image is loaded, whether the path still exists, or whether it is the cubemap
-        // layout the renderer expects - all of which are answered by looking at it. Sized by the same DPI
-        // helper the rest of the chrome uses, so it is the same physical size on a 200% display.
+        // WHAT THE CHANNEL ACTUALLY READS, as a picture - BELOW the combo, and sized to be recognised
+        // rather than merely present: a file path says nothing about whether the right image is loaded,
+        // whether the path still exists, or whether a cubemap is the 4x3 cross the renderer expects, and a
+        // 30-pixel icon answers none of those questions. Scaled by the same DPI helper as the rest of the
+        // chrome, so it is the same physical size on a 200% display.
         m_channelPreviews[i] = new QLabel(m_channelRow);
-        m_channelPreviews[i]->setFixedHeight(ScaleHeightForDPI(34));
-        m_channelPreviews[i]->setMinimumWidth(ScaleWidthForDPI(44));
+        m_channelPreviews[i]->setFixedSize(ScaleWidthForDPI(kChannelPreviewWidth),
+                                           ScaleHeightForDPI(kChannelPreviewHeight));
         m_channelPreviews[i]->setAlignment(Qt::AlignCenter);
         m_channelPreviews[i]->setScaledContents(false);
         m_channelPreviews[i]->setTextInteractionFlags(Qt::NoTextInteraction);
-        channelLayout->addWidget(m_channelPreviews[i]);
+        column->addWidget(m_channelPreviews[i]);
+
+        // The pass and the buffers are the same size, so the picture is never the thing that shifts a
+        // column: below the previews there is room for a word, and nothing here writes one.
+        auto* hint = new QLabel(m_channelRow);
+        hint->setAlignment(Qt::AlignHCenter);
+        m_channelHints[i] = hint;
+        column->addWidget(hint);
+
+        channelLayout->addLayout(column);
     }
     channelLayout->addStretch(1);
     layout->addWidget(m_channelRow);
@@ -968,14 +991,15 @@ void ShaderBufferWindow::deletePass(GraphicsPass pass)
     m_status->setText(tr("Deleted %1 (%2)").arg(graphicsPassLabel(pass), path));
 }
 
-// The thumbnail beside a channel: the picture that channel will sample, or an honest statement that there
-// is not one.
+// The thumbnail under a channel: the picture that channel will sample, or an honest statement that there is
+// not one.
 //
 // Three rules, each from a way this kind of widget goes wrong:
 //
 //   * A FILE THAT IS NOT THERE IS SAID, not drawn as a blank square. The path can be edited by hand in
 //     channels.txt, and a deleted screenshot then reads as "my shader samples black" - which is exactly the
-//     failure a preview exists to make visible. The name is shown, and the tooltip carries the reason.
+//     failure a preview exists to make visible. The name is shown in the cell, and the tooltip carries the
+//     reason.
 //   * NOTHING IS DRAWN FOR A BUFFER. Its picture is the pass two lines up in this very window; reading it
 //     back would cost a GPU sync per refresh to show somebody what they can already see.
 //   * THE IMAGE IS DECODED AT THUMBNAIL SIZE (QImageReader::setScaledSize), not loaded and then shrunk. A
@@ -983,10 +1007,15 @@ void ShaderBufferWindow::deletePass(GraphicsPass pass)
 //     that refreshes on every pass switch.
 void ShaderBufferWindow::refreshChannelPreviews(const QList<GraphicsChannelSource>& sources)
 {
-    const int box = ScaleHeightForDPI(30);
+    // The box, once: an image that is not square sits inside it rather than stretching it, so the four
+    // columns keep their line.
+    const int boxW = ScaleWidthForDPI(kChannelPreviewWidth);
+    const int boxH = ScaleHeightForDPI(kChannelPreviewHeight);
+
     for (int i = 0; i < 4; ++i)
     {
         QLabel* preview = m_channelPreviews[i];
+        QLabel* hint = m_channelHints[i];
         if (!preview)
             continue;
 
@@ -994,27 +1023,39 @@ void ShaderBufferWindow::refreshChannelPreviews(const QList<GraphicsChannelSourc
         preview->setPixmap(QPixmap());
         preview->setText(QString());
         preview->setToolTip(QString());
+        if (hint)
+            hint->setText(QString());
+
+        const QString shortName = [&source]() {
+            QString name = QFileInfo(source.path).fileName();
+            if (name.size() > 16)
+                name = name.left(13) + QStringLiteral("...");
+            return name;
+        }();
 
         if (!source.isTexture() && !source.isCubemap())
         {
-            // None, or a buffer: no picture here. A buffer's combo already names it, and the pass it names
-            // has a tab of its own.
-            preview->setFixedWidth(ScaleWidthForDPI(44));
+            // None, or a buffer. Nothing is drawn - a buffer's picture is the pass editor above, and the
+            // combo already names it - but the box keeps its size so the row does not jump when a channel
+            // changes between a file and a buffer.
+            if (hint)
+                hint->setText(source.isBuffer() ? graphicsPassLabel(kDrawOrder[qBound(0, source.bufferIndex,
+                                                                                     kDrawOrderCount - 1)])
+                                                : tr("none"));
             continue;
         }
 
-        const QFileInfo info(source.path);
         const bool cube = source.isCubemap();
         const QString kind = cube ? tr("Cubemap") : tr("Image");
 
         QImageReader reader(source.path);
         reader.setAutoTransform(true);   // a photo's EXIF rotation is part of the picture, not a detail
-        QSize size = reader.size();
+        const QSize size = reader.size();
         if (size.isValid() && !size.isEmpty())
         {
-            // Keep the aspect ratio while bounding the SIDE that is too long, so a portrait photo does not
-            // come out as a letterbox and a panorama does not come out as a stripe.
-            const qreal scale = qMin(qreal(box) / size.width(), qreal(box) / size.height());
+            // Keep the aspect ratio while fitting INSIDE the box, so a portrait photo and a panorama both
+            // come out as themselves rather than as a letterbox or a stripe.
+            const qreal scale = qMin(qreal(boxW) / size.width(), qreal(boxH) / size.height());
             const QSize wanted(qMax(1, int(size.width() * scale)), qMax(1, int(size.height() * scale)));
             reader.setScaledSize(wanted);
         }
@@ -1022,32 +1063,29 @@ void ShaderBufferWindow::refreshChannelPreviews(const QList<GraphicsChannelSourc
 
         if (image.isNull())
         {
-            // Said, with the reason, and with the name so the row still says WHICH file failed - but with a
-            // SHORT name in a fixed narrow width, because a missing file must not be the thing that widens
-            // the row either.
-            QString shortName = info.fileName();
-            if (shortName.size() > 14)
-                shortName = shortName.left(11) + QStringLiteral("...");
-            preview->setText(shortName + QStringLiteral("\n!"));
+            // Said, in the same fixed box, so a broken path is visible AND does not move anything.
+            preview->setText(tr("%1\ncannot be read\n%2").arg(kind, shortName));
             preview->setToolTip(tr("%1 could not be read as an image.\n%2\n%3")
                                     .arg(kind, source.path, reader.errorString()));
-            preview->setFixedWidth(ScaleWidthForDPI(56));
+            if (hint)
+                hint->setText(shortName);
             GraphicsLog::warn(QStringLiteral("shader buffer: channel %1 preview could not read %2 (%3)")
                                   .arg(i).arg(source.path, reader.errorString()));
             continue;
         }
 
         preview->setPixmap(QPixmap::fromImage(image));
-        // NO NAME IN THE ROW: the thumbnail IS the answer to "which image", and a label beside it made the
-        // row as wide as the longest file name. The name and the path are one hover away.
-        preview->setFixedWidth(image.width() + ScaleWidthForDPI(4));
+        // The name and the size BELOW the picture, not inside it: the picture is for recognising the image,
+        // the words are for when recognising is not enough - and neither one moves the other.
+        if (hint)
+            hint->setText(QStringLiteral("%1 %2x%3").arg(shortName).arg(size.width()).arg(size.height()));
         preview->setToolTip(cube
                                 ? tr("%1: %2\n%3x%4 - read as a 4x3 cross of six faces.\n"
                                      "A file that is not 4:3 cannot be laid out this way, and the channel "
                                      "would read black.")
-                                      .arg(kind, source.path).arg(image.width()).arg(image.height())
-                                : tr("%1: %2\n%3x%4 (thumbnail; loaded at full size by the renderer)")
-                                      .arg(kind, source.path).arg(image.width()).arg(image.height()));
+                                      .arg(kind, source.path).arg(size.width()).arg(size.height())
+                                : tr("%1: %2\n%3x%4 (shown fitted; the renderer loads it at full size)")
+                                      .arg(kind, source.path).arg(size.width()).arg(size.height()));
     }
 }
 

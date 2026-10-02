@@ -265,11 +265,19 @@ private:
 
     QComboBox* m_channelCombos[4] = { nullptr, nullptr, nullptr, nullptr };
 
-    // The picture of what each channel reads, beside its combo: the chosen image at thumbnail size, or
-    // nothing at all for a buffer (whose picture is the pass editor two lines up, and drawing it twice would
-    // only cost a readback). Named in the plan since the channel row was specified (23: "after choosing,
-    // show a thumbnail in the channel row; when there is no thumbnail, do not fake one").
+    // The picture of what each channel reads, UNDER its combo: the chosen image at thumbnail size, the
+    // name of a file that will not load (in the same box, so nothing moves), or nothing at all for a buffer
+    // - whose picture is the pass editor two lines up, and drawing it twice would cost a readback.
+    //
+    // Sized in DESIGN pixels and scaled by the DPI helper: big enough to tell two screenshots apart, which
+    // is what the user asked for after four 30-pixel icons proved too small to recognise anything in.
+    static constexpr int kChannelPreviewWidth = 132;
+    static constexpr int kChannelPreviewHeight = 88;
+
     QLabel* m_channelPreviews[4] = { nullptr, nullptr, nullptr, nullptr };
+    // What that channel reads, in words, under its picture: the file's name, or "none"/"Buffer A". The
+    // combo above says the KIND; this says which one, without widening anything.
+    QLabel* m_channelHints[4] = { nullptr, nullptr, nullptr, nullptr };
     // Fill them in from the same sources the combos were built from. Called with refreshChannelRow().
     void refreshChannelPreviews(const QList<GraphicsChannelSource>& sources);
 
