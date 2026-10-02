@@ -162,7 +162,8 @@ public:
     // not exist is a reported failure that leaves the previous program alone, exactly as a compile
     // error is - so an empty pass costs nothing and cannot take the picture away.
     GraphicsCompileResult buildAndInstallFrom(const QString& fragmentFile,
-                                              const QString& prependedText = QString());
+                                              const QString& prependedText = QString(),
+                                              const QString& commonFile = QString());
 
     // The document's Common text, prepended to every pass this renderer compiles. Empty by default,
     // which is exactly the single-shader case. It is a setter rather than a constructor argument
@@ -326,12 +327,13 @@ private:
     // one of its passes. Empty for a single-pass shader, which is what keeps the old path unchanged.
     GraphicsCompileResult buildProgram(const QString& vertexFile,
                                        const QString& fragmentFile,
-                                       const QString& commonText = QString());
+                                       const QString& commonText = QString(),
+                                       const QString& commonFile = QString());
 
     // Compile one fragment file (a path) with an optional Common block, then report it the way the log
     // wants it - the shared body of the single-pass and multi-pass entry points, so the two cannot drift
     // into reporting differently or into one of them forgetting to keep the previous program.
-    GraphicsCompileResult compileFile(const QString& fragmentFile, const QString& commonText);
+    GraphicsCompileResult compileFile(const QString& fragmentFile, const QString& commonText, const QString& commonFile = QString());
     void logCompiled(const GraphicsCompileResult& result, const QString& fragmentFile);
 
     // Compile the self-test's own shader pair. Both halves are string literals in the

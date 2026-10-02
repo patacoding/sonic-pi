@@ -39,6 +39,7 @@ bool GraphicsPassPrograms::create(const GraphicsDocument& document, const QStrin
     // an error - a document need not have one.
     m_commonText.clear();
     const QString commonFile = document.passPath(GraphicsPass::Common);
+    m_commonFile = commonFile;
     if (!commonFile.isEmpty()) {
         QFile common(commonFile);
         if (common.open(QIODevice::ReadOnly))
@@ -78,7 +79,7 @@ bool GraphicsPassPrograms::create(const GraphicsDocument& document, const QStrin
         // shipped copy. Measured - handing it an absolute path produced "Shader file not found" for a
         // file that was plainly on disk (1236 bytes).
         const QString name = QDir(GraphicsSettings::shaderDirectoryPath()).relativeFilePath(file);
-        const GraphicsCompileResult result = renderer->buildAndInstallFrom(name, m_commonText);
+        const GraphicsCompileResult result = renderer->buildAndInstallFrom(name, m_commonText, m_commonFile);
         if (!result.ok() && !result.installed) {
             GraphicsLog::error(QStringLiteral("pass programs: %1 did not build from %2; it stays an empty "
                                               "pass. %3")

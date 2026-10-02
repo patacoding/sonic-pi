@@ -84,7 +84,8 @@ private:
     // mapping to keep in step with it.
     std::array<std::unique_ptr<GraphicsRenderer>, kDrawOrderCount> m_passes;
 
-    QString m_commonText;   // handed to every pass's renderer; empty when the document has no common.glsl
+    QString m_commonText;
+    QString m_commonFile;   // its path: what a diagnostic in Common is attributed TO, not the pass   // handed to every pass's renderer; empty when the document has no common.glsl
 };
 
 } // namespace SonicPi

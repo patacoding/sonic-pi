@@ -249,13 +249,13 @@ GraphicsCompileResult GraphicsRenderer::buildAndInstall()
 }
 
 GraphicsCompileResult GraphicsRenderer::buildAndInstallFrom(const QString& fragmentFile,
-                                                           const QString& prependedText)
+                                                           const QString& prependedText, const QString& commonFile)
 {
     // The same two halves buildAndInstall() keeps together - compile, then install only if it built -
     // with the file and the Common text supplied from outside instead of derived from a buffer name.
     // Nothing else differs on purpose: this is the entry point multi-pass needs, not a second compile
     // path, so a failure here keeps the previous program exactly as a failure there does.
-    GraphicsCompileResult result = compileFile(fragmentFile, prependedText);
+    GraphicsCompileResult result = compileFile(fragmentFile, prependedText, commonFile);
     if (!result.ok())
         return result;
 
@@ -265,10 +265,10 @@ GraphicsCompileResult GraphicsRenderer::buildAndInstallFrom(const QString& fragm
 }
 
 GraphicsCompileResult GraphicsRenderer::compileFile(const QString& fragmentFile,
-                                                    const QString& commonText)
+                                                    const QString& commonText, const QString& commonFile)
 {
     const QString vertexFile = QString::fromLatin1(kVertexShaderFile);
-    GraphicsCompileResult result = buildProgram(vertexFile, fragmentFile, commonText);
+    GraphicsCompileResult result = buildProgram(vertexFile, fragmentFile, commonText, commonFile);
     if (!result.ok())
     {
         GraphicsLog::error(QStringLiteral("shader load FAILED; keeping the previous program. "
@@ -511,7 +511,7 @@ bool GraphicsRenderer::readExpandedShader(const QString& path, QString* text, QS
 
 GraphicsCompileResult GraphicsRenderer::buildProgram(const QString& vertexFile,
                                                      const QString& fragmentFile,
-                                                     const QString& commonText)
+                                                     const QString& commonText, const QString& commonFile)
 {
     GraphicsCompileResult result;
     result.fragmentPath = resolveShaderPath(fragmentFile);
@@ -572,7 +572,7 @@ GraphicsCompileResult GraphicsRenderer::buildProgram(const QString& vertexFile,
     if (!commonText.isEmpty())
     {
         const ShaderText::CommonSource common =
-            ShaderText::withCommon(fragSource, commonText, frag, fragSourceStrings);
+            ShaderText::withCommon(fragSource, commonText, commonFile, fragSourceStrings);
         fragSource = common.text;
         if (!common.fileBySourceString.isEmpty())
         {
