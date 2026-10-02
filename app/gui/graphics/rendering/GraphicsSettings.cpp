@@ -12,6 +12,7 @@
 //++
 
 #include "GraphicsSettings.h"
+#include "GraphicsDocuments.h"
 #include "GraphicsLog.h"
 
 #include <QDir>
@@ -313,6 +314,22 @@ QStringList shaderNames()
 
     // The default buffer always exists as a name, even before its file does: it is what a fresh session
     // renders, and a menu or tab bar with nothing in it would look broken rather than empty.
+    if (!names.contains(defaultShaderName(), Qt::CaseInsensitive))
+        names.prepend(defaultShaderName());
+
+    return names;
+}
+
+QStringList documentNames()
+{
+    QStringList names;
+
+    // Both kinds come from one scan: the rule for "what is a document" lives there, and nowhere else.
+    const QList<GraphicsDocument> documents = scanGraphicsDocuments(shaderDirectoryPath());
+    for (const GraphicsDocument& document : documents)
+        names << document.name;
+
+    // Same guarantee as shaderNames(): the default buffer is always a name, even before its file exists.
     if (!names.contains(defaultShaderName(), Qt::CaseInsensitive))
         names.prepend(defaultShaderName());
 

@@ -152,6 +152,17 @@ void setActiveShaderName(const QString& shaderName);
 // read rather than a stored list that could disagree with what is on disk.
 QStringList shaderNames();
 
+// Every DOCUMENT in the shader directory, as names, sorted - which is what a tab now stands for.
+//
+// A document is a directory holding image.frag (Common + Image + Buffer A-D); a top-level .frag stays a
+// single-pass document, exactly as before, so nothing on disk has to move. Both kinds come from
+// scanGraphicsDocuments(), so this list and the pipeline's own idea of "what is on disk" cannot disagree:
+// a second rule here is how the editor ends up showing a document the renderer does not have.
+//
+// The default name is guaranteed present for the same reason as in shaderNames(): a tab bar with nothing
+// in it looks broken rather than empty.
+QStringList documentNames();
+
 // Whether the graphics output is published as a Spout sender.
 //
 // A property of the OUTPUT, so it lives with the output's other settings (size, frame cap) rather than
