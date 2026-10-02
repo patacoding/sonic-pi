@@ -1886,105 +1886,208 @@ void ShaderBufferWindow::compileFinished(bool ok, const QString& compilerLog,
     showCompileReport(ok, compilerLog, errorFile, errorLine, name, includedShaders);
 }
 
-// Import a fragment shader from an arbitrary file.
+// Load a document from one of these saved directories: the record is what is chosen, and the six texts, the
+// images and the channels come with it.
 //
-// Deliberately does NOT compile. Importing changes what is being edited, and whether that code goes
-// into the renderer is a separate decision the user makes by pressing Compile. Compiling here would
-// mean that opening the wrong file could change the live output - the thing this whole feature is
-// arranged to prevent.
+// THE RECORD IS CHOSEN, not the folder: a folder says nothing about whether it IS a document, and picking a
+// folder would leave "why did nothing load" as the only feedback. Picking the json says exactly what the
+// user means, and the file dialog's filter teaches the name at the same time.
 void ShaderBufferWindow::loadFromFile()
 {
     const QString startDir = m_settings
-                                 ? m_settings->value(QStringLiteral("lastShaderDir"),
+                                 ? m_settings->value(QStringLiteral("lastDocumentDir"),
                                                      QDir::homePath() + QStringLiteral("/Desktop")).toString()
                                  : QDir::homePath();
 
-    QString selectedFilter = tr("Fragment shaders (*.frag)");
-    const QString fileName = QFileDialog::getOpenFileName(
-        this, tr("Load Shader into Buffer"), startDir,
-        QStringLiteral("%1 (*.frag);;%2 (*.glsl *.fs *.txt);;%3 (*.*)")
-            .arg(tr("Fragment shaders")).arg(tr("GLSL files")).arg(tr("All files")),
-        &selectedFilter);
-    if (fileName.isEmpty())
+    const QString chosen = QFileDialog::getOpenFileName(
+        this, tr("Open a saved document"), startDir,
+        tr("ShaderToy documents (%1);;All files (*)").arg(graphicsDocumentRecordFileName()));
+    if (chosen.isEmpty())
         return;   // cancelled, which is not an error
 
     if (m_settings)
-        m_settings->setValue(QStringLiteral("lastShaderDir"), QDir(fileName).absolutePath());
+        m_settings->setValue(QStringLiteral("lastDocumentDir"), QFileInfo(chosen).absolutePath());
 
-    importFrom(fileName);
+    importDocumentFrom(chosen);
 }
 
-bool ShaderBufferWindow::importFrom(const QString& fileName)
+// Put a loaded document into the shaders directory, where the renderer reads documents from, and show it.
+//
+// It goes THERE and not "wherever it was saved": the renderer compiles from the shaders directory, so a
+// document loaded anywhere else would be visible in the editor and invisible to the picture. A file that is
+// already there is overwritten only after the record has been read successfully, so a failed load cannot
+// destroy the document that is open.
+bool ShaderBufferWindow::importDocumentFrom(const QString& recordPath)
 {
-    QFile file(fileName);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    GraphicsDocumentFile file;
+    const GraphicsDocumentIoResult loaded = loadGraphicsDocument(recordPath, &file);
+    if (!loaded.ok)
     {
-        m_status->setText(tr("Could not read %1").arg(fileName));
-        GraphicsLog::warn(QStringLiteral("shader buffer: could not read %1").arg(fileName));
+        m_status->setText(tr("Load failed: %1").arg(loaded.message));
+        GraphicsLog::error(QStringLiteral("shader buffer: load of %1 failed: %2")
+                               .arg(recordPath, loaded.message));
         return false;
     }
-    QTextStream in(&file);
-    const QString text = in.readAll();
-    file.close();
 
-    SonicPiScintilla* editor = currentEditor();
-    if (editor)
-        editor->setText(text);
-    // The report is cleared because it describes the PREVIOUS contents. Leaving a stale compiler error
-    // beside freshly imported code would point at a line that no longer means anything.
-    showCompileReport(true, QString(), QString(), 0);
-    m_status->setText(tr("Loaded %1 into this buffer. Press Compile to put it on screen.").arg(fileName));
-    GraphicsLog::info(QStringLiteral("shader buffer: imported %1 (%2 bytes) into buffer '%3'")
-                          .arg(fileName).arg(text.size()).arg(editingShaderName()));
+    const QString directory = QDir(GraphicsSettings::shaderDirectoryPath()).filePath(file.name);
+    const GraphicsDocumentIoResult saved = saveGraphicsDocument(file, directory);
+    if (!saved.ok)
+    {
+        m_status->setText(tr("Load failed: %1").arg(saved.message));
+        GraphicsLog::error(QStringLiteral("shader buffer: could not write the loaded document into %1: %2")
+                               .arg(directory, saved.message));
+        return false;
+    }
+
+    // Everything that went wrong on the way is passed on rather than swallowed: a record whose bufferB.frag
+    // is missing loads a document with five passes, and the difference between that and a complete one is
+    // invisible in the picture.
+    for (const QString& warning : loaded.warnings)
+        GraphicsLog::warn(QStringLiteral("shader buffer: load of %1: %2").arg(file.name, warning));
+    for (const QString& warning : saved.warnings)
+        GraphicsLog::warn(QStringLiteral("shader buffer: load of %1: %2").arg(file.name, warning));
+
+    // THIS SESSION'S COPIES ARE NOW WRONG. Tabs are only ever added to, never rebuilt, and their editors hold
+    // the text they were built with - so without this the tab would show the PREVIOUS document's code while
+    // the file on disk held the new one, which is the one failure this whole feature exists to avoid.
+    for (int i = 0; i < kDrawOrderCount; ++i)
+    {
+        const GraphicsPass pass = kDrawOrder[i];
+        const QString key = file.name + QLatin1Char('/') + graphicsPassName(pass);
+        if (SonicPiScintilla* editor = m_editorsByPass.value(key, nullptr))
+            editor->setText(file.textFor(pass));
+    }
+
+    // The channels, into the document's own file - so what the row shows and what the renderer reads come
+    // from the same place, and re-saving this document writes the same assignments back.
+    {
+        const GraphicsDocument scanned = scannedDocument(file.name);
+        if (scanned.isValid())
+        {
+            for (int i = 0; i < kDrawOrderCount; ++i)
+            {
+                const GraphicsPass pass = kDrawOrder[i];
+                if (!writeGraphicsDocumentChannelSources(scanned, pass, file.channels[int(pass)]))
+                {
+                    GraphicsLog::warn(QStringLiteral("shader buffer: could not write the channels of %1")
+                                          .arg(graphicsPassLabel(pass)));
+                }
+            }
+        }
+    }
+
+    // And the picture: the renderer is told to build this document's passes, exactly as Compile does.
+    m_compilingShaderName = file.name;
+    if (m_renderThread)
+        m_renderThread->requestPassDocument(file.name, true);
+
+    // The tab exists only if this document was on disk when the window was built; a load can bring in a name
+    // nobody has seen before.
+    rebuildTabs(file.name);
+    selectTab(file.name);
+    m_passByDocument.insert(file.name, GraphicsPass::Image);
+    refreshPassSelector();
+    refreshChannelRow();
+    updateTabLabels();
+    updateWindowTitle();
+
+    GraphicsLog::info(QStringLiteral("shader buffer: loaded document '%1' from %2 into %3 "
+                                     "(%4 warning(s)); press Compile to put it on screen")
+                          .arg(file.name, recordPath, directory)
+                          .arg(loaded.warnings.size() + saved.warnings.size()));
+    m_status->setText(loaded.warnings.isEmpty() && saved.warnings.isEmpty()
+                          ? tr("Loaded %1. Compile (Ctrl+Return) puts it on screen.").arg(file.name)
+                          : tr("Loaded %1, with %2 warning(s) - see graphics.log")
+                                .arg(file.name)
+                                .arg(loaded.warnings.size() + saved.warnings.size()));
     return true;
 }
 
-// Export the editor's text to an arbitrary file.
+// Save the WHOLE DOCUMENT, not the pass being edited: six texts, the images their channels read, and a
+// record that can rebuild all of it.
 //
-// Does not write the buffer's own file either: exporting a copy is not the same act as putting this
-// text into the renderer, and conflating them would make "Save to File" silently change the output.
+// Why one act rather than "export this pass": a Shadertoy document is a set of passes that only mean
+// anything together - an Image that samples a Buffer that is fed by a Common function - so saving one text
+// saves something that cannot be run. The old single-file export is gone with this: it wrote the current
+// editor's text to a path the user chose, which is now what "Save" does for six texts at once.
 void ShaderBufferWindow::saveToFile()
 {
+    const QString name = editingShaderName();
+    if (name.isEmpty())
+        return;
+
     const QString startDir = m_settings
-                                 ? m_settings->value(QStringLiteral("lastShaderDir"),
+                                 ? m_settings->value(QStringLiteral("lastDocumentDir"),
                                                      QDir::homePath() + QStringLiteral("/Desktop")).toString()
                                  : QDir::homePath();
 
-    QString selectedFilter = tr("Fragment shaders (*.frag)");
-    QString fileName = QFileDialog::getSaveFileName(
-        this, tr("Save Shader Buffer As"), startDir,
-        QStringLiteral("%1 (*.frag);;%2 (*.glsl);;%3 (*.*)")
-            .arg(tr("Fragment shaders")).arg(tr("GLSL files")).arg(tr("All files")),
-        &selectedFilter);
-    if (fileName.isEmpty())
-        return;
+    // A DIRECTORY, because a document is a directory: six files, an img/ folder and a record. Asking for a
+    // file name here would be asking the user to name one sixth of what is being saved.
+    const QString target = QFileDialog::getExistingDirectory(
+        this, tr("Save document '%1' into a folder").arg(name), startDir,
+        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+    if (target.isEmpty())
+        return;   // cancelled, which is not an error
 
     if (m_settings)
-        m_settings->setValue(QStringLiteral("lastShaderDir"), QDir(fileName).absolutePath());
+        m_settings->setValue(QStringLiteral("lastDocumentDir"), target);
 
-    exportTo(fileName);
+    saveDocumentTo(target);
 }
 
-bool ShaderBufferWindow::exportTo(const QString& chosenName)
+// Gather the document as the EDITOR has it, which is not what is on disk: the user may have typed without
+// compiling, and those keystrokes are exactly what a save is for.
+GraphicsDocumentFile ShaderBufferWindow::currentDocumentFile() const
 {
-    const QString fileName = ShaderText::withFragmentExtension(chosenName);
+    GraphicsDocumentFile file;
+    file.name = editingShaderName();
 
-    QFile file(fileName);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
+    const GraphicsDocument scanned = scannedDocument(file.name);
+    for (GraphicsPass pass : { GraphicsPass::Common, GraphicsPass::Image, GraphicsPass::BufferA,
+                               GraphicsPass::BufferB, GraphicsPass::BufferC, GraphicsPass::BufferD })
     {
-        m_status->setText(tr("Could not write %1").arg(fileName));
-        GraphicsLog::warn(QStringLiteral("shader buffer: could not write %1").arg(fileName));
+        // The editor's text when that pass has one; the file's when it does not (a pass never opened in
+        // this session, whose text is still perfectly good).
+        const QString key = file.name + QLatin1Char('/') + graphicsPassName(pass);
+        if (SonicPiScintilla* editor = m_editorsByPass.value(key, nullptr))
+            file.setTextFor(pass, editor->text());
+        else if (!scanned.passPath(pass).isEmpty())
+        {
+            QFile passFile(scanned.passPath(pass));
+            if (passFile.open(QIODevice::ReadOnly | QIODevice::Text))
+                file.setTextFor(pass, QString::fromUtf8(passFile.readAll()));
+        }
+    }
+
+    for (int i = 0; i < kDrawOrderCount; ++i)
+        file.channels[int(kDrawOrder[i])] = graphicsDocumentChannelSourcesFromFile(scanned, kDrawOrder[i]);
+
+    return file;
+}
+
+bool ShaderBufferWindow::saveDocumentTo(const QString& targetDirectory)
+{
+    const GraphicsDocumentFile file = currentDocumentFile();
+    const GraphicsDocumentIoResult saved = saveGraphicsDocument(file, targetDirectory);
+
+    if (!saved.ok)
+    {
+        m_status->setText(tr("Save failed: %1").arg(saved.message));
+        GraphicsLog::error(QStringLiteral("shader buffer: save of '%1' failed: %2")
+                               .arg(file.name, saved.message));
         return false;
     }
-    {
-        QTextStream out(&file);
-        SonicPiScintilla* editor = currentEditor();
-        out << (editor ? editor->text() : QString());
-    }
-    file.close();
 
-    m_status->setText(tr("Saved to %1").arg(fileName));
-    GraphicsLog::info(QStringLiteral("shader buffer: exported to %1").arg(fileName));
+    for (const QString& warning : saved.warnings)
+        GraphicsLog::warn(QStringLiteral("shader buffer: save of '%1': %2").arg(file.name, warning));
+
+    GraphicsLog::info(QStringLiteral("shader buffer: saved document '%1' -> %2 (%3 warning(s))")
+                          .arg(file.name, saved.message).arg(saved.warnings.size()));
+    m_status->setText(saved.warnings.isEmpty()
+                          ? tr("Saved %1 (six passes, images, %2)")
+                                .arg(file.name, graphicsDocumentRecordFileName())
+                          : tr("Saved %1, with %2 warning(s) - see graphics.log")
+                                .arg(file.name).arg(saved.warnings.size()));
     return true;
 }
 

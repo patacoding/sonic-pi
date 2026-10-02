@@ -122,6 +122,26 @@ inline QString graphicsDocumentChannelsPath(const GraphicsDocument& document)
     return QDir(document.directory).filePath(graphicsDocumentChannelsFileName());
 }
 
+// WHERE A CHANNEL'S IMAGE PATH POINTS. A path may be absolute ("C:/Users/me/x.png") or relative to the
+// document's own directory ("img/x.png").
+//
+// Both are needed, and for different reasons. Absolute is what the file dialog hands over when a person
+// picks a picture from anywhere on the machine, which is the ordinary case and must keep working. Relative
+// is what a SAVED document needs: the record and the pictures travel together, so a directory can be moved,
+// copied to another machine, or put in version control - and an absolute path inside it would break all
+// three the moment it left this machine.
+//
+// Relative is resolved against the document directory, and left alone when there is no directory to resolve
+// against (a document that is not on disk yet): the honest answer then is "as written", not a guess.
+inline QString graphicsDocumentPath(const GraphicsDocument& document, const QString& path)
+{
+    if (path.isEmpty() || QDir::isAbsolutePath(path))
+        return path;
+    if (document.directory.isEmpty())
+        return path;
+    return QDir(document.directory).absoluteFilePath(path);
+}
+
 // The channel whose line names `name`, or -1 when the line says none or anything unrecognised.
 inline int graphicsChannelSourceFromName(const QString& name)
 {
@@ -354,6 +374,25 @@ inline bool writeGraphicsDocumentChannelSources(const GraphicsDocument& document
     if (path.isEmpty())
         return false;
 
+    // An image that lives INSIDE the document's own directory is written as a path relative to it, and
+    // anything else is written as it is. Both forms are read back identically (graphicsDocumentPath), and
+    // the reason for preferring the relative one is that it is the form a document can be moved with: a
+    // saved directory is meant to be copyable, and an absolute path to an image sitting right beside the
+    // code would break the moment the directory left this machine.
+    QList<GraphicsChannelSource> stored = sources;
+    if (!document.directory.isEmpty())
+    {
+        const QDir directory(document.directory);
+        for (GraphicsChannelSource& source : stored)
+        {
+            if (!source.isTexture() && !source.isCubemap())
+                continue;
+            const QString relative = directory.relativeFilePath(source.path);
+            if (!relative.startsWith(QLatin1String("..")))
+                source.path = relative;
+        }
+    }
+
     // Read the other passes' sections first, so writing one pass cannot drop another's settings.
     QHash<QString, QList<GraphicsChannelSource>> otherSections;
     {
@@ -395,7 +434,7 @@ inline bool writeGraphicsDocumentChannelSources(const GraphicsDocument& document
             flush(section);
         }
     }
-    otherSections.insert(graphicsChannelSectionKey(graphicsPassName(pass)), sources);
+    otherSections.insert(graphicsChannelSectionKey(graphicsPassName(pass)), stored);
     // The legacy wildcard section is NOT carried over as a literal "[*]": it meant "applies to every pass"
     // only while there were no sections at all, and once this file has per-pass sections it would read as a
     // pass named "*" - a section the reader would then apply to nothing. The callers that migrate it (the
@@ -450,6 +489,9 @@ inline QList<GraphicsChannelSource> graphicsDocumentChannelSources(const Graphic
 
 // The same four channels, read from the file's TEXT so texture:/cubemap: prefixes survive. This is the one the
 // renderer and the editor should use; the index-based readers above remain for compatibility.
+//
+// A relative image path is resolved against the document's own directory (see graphicsDocumentPath), so a
+// saved document can be copied to another machine and still find its pictures.
 inline QList<GraphicsChannelSource> graphicsDocumentChannelSourcesFromFile(const GraphicsDocument& document,
                                                                           GraphicsPass pass)
 {
@@ -498,13 +540,22 @@ inline QList<GraphicsChannelSource> graphicsDocumentChannelSourcesFromFile(const
     }
 
     // No sections at all: the legacy document-level form, which applies to every pass.
+    const auto resolved = [&document](const QList<GraphicsChannelSource>& four) {
+        QList<GraphicsChannelSource> out = four;
+        for (GraphicsChannelSource& source : out)
+        {
+            if (source.isTexture() || source.isCubemap())
+                source.path = graphicsDocumentPath(document, source.path);
+        }
+        return out;
+    };
     if (sources == QList<GraphicsChannelSource>() << GraphicsChannelSource{} << GraphicsChannelSource{}
             << GraphicsChannelSource{} << GraphicsChannelSource{}
         && legacy != sources)
     {
-        return legacy;
+        return resolved(legacy);
     }
-    return sources;
+    return resolved(sources);
 }
 
 // The six faces of a cubemap, in the order QOpenGLTexture wants them (+X, -X, +Y, -Y, +Z, -Z), taken from ONE

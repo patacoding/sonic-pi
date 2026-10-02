@@ -22,6 +22,9 @@
 
 #include "GraphicsPasses.h"
 #include "GraphicsRenderThread.h"
+// The document save/load format: widget-free and GL-free, so the round trip is exercised on its own by a
+// probe rather than through a file dialog (docs/dev-discipline.md 4.1).
+#include "GraphicsDocumentFile.h"
 
 class QLabel;
 class QPlainTextEdit;
@@ -114,8 +117,15 @@ public:
     // exercised by an automated run, and "import a shader" is the kind of logic that is wrong in
     // small ways - a BOM, a truncated read, an extension that does not get appended. Split, the
     // dialog is the only untested part and the logic is testable.
-    bool importFrom(const QString& fileName);
-    bool exportTo(const QString& fileName);
+    //
+    // As of the document save/load these two are about a WHOLE DOCUMENT: see GraphicsDocumentFile.h for
+    // the format. `importDocumentFrom` takes the record (shadertoy.json) and puts the document into the
+    // shaders directory, where the renderer reads documents from; `saveDocumentTo` takes a directory.
+    bool importDocumentFrom(const QString& recordPath);
+    bool saveDocumentTo(const QString& targetDirectory);
+    // The document as the EDITOR has it - six texts, channels included - which is what a save must write:
+    // the user may have typed without compiling, and those keystrokes are the point of saving.
+    GraphicsDocumentFile currentDocumentFile() const;
 
 signals:
     // Emitted when the user closes this window, so the menu action that opened it can be un-ticked.
