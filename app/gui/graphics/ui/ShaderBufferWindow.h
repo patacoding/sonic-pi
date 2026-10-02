@@ -234,6 +234,7 @@ private:
     GraphicsPass editingPass() const;
     void setEditingPass(GraphicsPass pass);
     void refreshPassSelector();
+    void editChannels();
 
     // Owned by the editors (set on them), and held here so applyTheme() can re-colour them.
     GlslLexer* m_lexer = nullptr;

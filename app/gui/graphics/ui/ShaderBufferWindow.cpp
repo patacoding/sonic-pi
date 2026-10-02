@@ -28,6 +28,9 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QComboBox>
+#include <QFormLayout>
+#include <QDialogButtonBox>
+#include <QDialog>
 
 #include "GraphicsDocuments.h"
 #include <QHBoxLayout>
@@ -221,6 +224,13 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     buttonsLayout->setContentsMargins(0, 0, 0, 0);
     buttonsLayout->addWidget(m_compileButton);
     buttonsLayout->addWidget(newButton);
+
+    // Channels: which buffer each of the four reads. A dialog rather than four inline combos, because this
+    // is a setting of the DOCUMENT rather than a control of the tab, and it reads as a set.
+    auto* channelsButton = new QPushButton(tr("Channels..."), this);
+    channelsButton->setToolTip(tr("Which buffer each of this document's four channels reads"));
+    connect(channelsButton, &QPushButton::clicked, this, [this]() { editChannels(); });
+    buttonsLayout->addWidget(channelsButton);
     buttonsLayout->addWidget(loadButton);
     buttonsLayout->addWidget(saveButton);
     buttonsLayout->addWidget(m_status, 1);
@@ -558,6 +568,84 @@ void ShaderBufferWindow::refreshPassSelector()
     // Nothing to choose for a single-pass document, so it does not sit there pretending otherwise.
     m_passSelector->setVisible(passes.size() > 1);
     m_passSelector->blockSignals(false);
+}
+
+void ShaderBufferWindow::editChannels()
+{
+    const QString name = editingShaderName();
+
+    GraphicsDocument document;
+    const QList<GraphicsDocument> documents =
+        scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath());
+    for (const GraphicsDocument& candidate : documents)
+    {
+        if (candidate.name.compare(name, Qt::CaseInsensitive) == 0)
+        {
+            document = candidate;
+            break;
+        }
+    }
+
+    if (!document.isValid() || document.singlePass)
+    {
+        m_status->setText(tr("Channels belong to a document - a directory holding image.frag"));
+        return;
+    }
+
+    const QList<GraphicsPass> available = graphicsDocumentPasses(document);
+    const QList<int> current = graphicsDocumentChannels(document);
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Channels - %1").arg(name));
+    auto* form = new QFormLayout(&dialog);
+    QList<QComboBox*> combos;
+    for (int i = 0; i < 4; ++i)
+    {
+        auto* combo = new QComboBox(&dialog);
+        combo->addItem(tr("None"), -1);
+        for (GraphicsPass pass : available)
+            combo->addItem(graphicsPassLabel(pass), graphicsPassDrawIndex(pass));
+        const int index = combo->findData(i < current.size() ? current[i] : -1);
+        if (index >= 0)
+            combo->setCurrentIndex(index);
+        form->addRow(QStringLiteral("iChannel%1").arg(i), combo);
+        combos << combo;
+    }
+    auto* box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    connect(box, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(box, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    form->addRow(box);
+
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    QList<int> chosen;
+    for (QComboBox* combo : combos)
+        chosen << combo->currentData().toInt();
+
+    // A channel may only name a pass this document HAS. Refused here, before anything is written: the
+    // alternative is a black picture the user has to explain, which is the failure mode this whole feature
+    // keeps trying to avoid (an absent buffer is an empty pass, and sampling it is black - but a CHOICE
+    // that cannot work should be stopped, not silently obeyed).
+    for (int i = 0; i < chosen.size(); ++i)
+    {
+        if (chosen[i] >= 0 && !available.contains(kDrawOrder[chosen[i]]))
+        {
+            m_status->setText(tr("iChannel%1: this document has no file for that buffer").arg(i));
+            return;
+        }
+    }
+
+    if (!writeGraphicsDocumentChannels(document, chosen))
+    {
+        m_status->setText(tr("Could not write %1").arg(graphicsDocumentChannelsPath(document)));
+        return;
+    }
+
+    GraphicsLog::info(QStringLiteral("shader buffer: channels written for %1 -> %2")
+                          .arg(name, graphicsDocumentChannelsPath(document)));
+    m_status->setText(tr("Channels written to %1 (takes effect on the next reload)")
+                          .arg(graphicsDocumentChannelsPath(document)));
 }
 
 void ShaderBufferWindow::setEditingPass(GraphicsPass pass)
