@@ -230,6 +230,12 @@ private:
     // the only pass a top-level .frag has, so this changes nothing for what is on disk today.
     QHash<QString, GraphicsPass> m_passByDocument;
 
+    // The text of each pass, kept in memory while the window is open, keyed by "<document>/<pass>". The
+    // document IS its code (web 4.8): switching passes must not touch the disk, and editing one pass while
+    // another is on screen must not lose the first one's unsaved text. Writing happens when the user
+    // compiles, which is also when the renderer needs the file.
+    QHash<QString, QString> m_textByPass;
+
     // The pass selector of the current document: which of Common/Image/Buffer A-D this tab is editing.
     QTabBar* m_passBar = nullptr;
 
@@ -243,7 +249,6 @@ private:
     GraphicsPass editingPass() const;
     void setEditingPass(GraphicsPass pass);
     void refreshPassSelector();
-    void editChannels();
 
     // Owned by the editors (set on them), and held here so applyTheme() can re-colour them.
     GlslLexer* m_lexer = nullptr;
