@@ -264,7 +264,7 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     {
         m_channelCombos[i] = new QComboBox(m_channelRow);
         m_channelCombos[i]->setToolTip(tr("What iChannel%1 samples (applies to every pass of this document)").arg(i));
-        connect(m_channelCombos[i], QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
+        connect(m_channelCombos[i], QOverload<int>::of(&QComboBox::activated), this, [this](int) {
             writeChannelsFromRow();
         });
         channelLayout->addWidget(new QLabel(QStringLiteral("iChannel%0").arg(i), m_channelRow));
