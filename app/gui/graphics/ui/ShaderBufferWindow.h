@@ -257,6 +257,7 @@ private:
     // out because a pass created after the tab was built still needs an editor of its own.
     SonicPiScintilla* ensurePassEditor(const GraphicsDocument& document, GraphicsPass pass);
     void addPass(GraphicsPass pass);
+    void deletePass(GraphicsPass pass);
     void writeChannelsFromRow();
     GraphicsPass editingPass() const;
     void setEditingPass(GraphicsPass pass);

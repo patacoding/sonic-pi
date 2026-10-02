@@ -278,6 +278,27 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     });
     buttonsLayout->addWidget(addPassButton);
 
+    // Removing a pass, as Shadertoy's tab bar does: right-click the tab. Image is refused rather than
+    // hidden - a directory without image.frag is not a document, and a menu that silently lacks the entry
+    // leaves the rule invisible.
+    m_passBar->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_passBar, &QTabBar::customContextMenuRequested, this, [this](const QPoint& at) {
+        const int index = m_passBar->tabAt(at);
+        if (index < 0)
+            return;
+        const GraphicsPass pass = static_cast<GraphicsPass>(m_passBar->tabData(index).toInt());
+
+        QMenu menu(this);
+        QAction* remove = menu.addAction(tr("Delete %1").arg(graphicsPassLabel(pass)));
+        if (pass == GraphicsPass::Image)
+        {
+            remove->setEnabled(false);
+            remove->setToolTip(tr("Image is what makes a directory a document; it cannot be removed"));
+        }
+        connect(remove, &QAction::triggered, this, [this, pass]() { deletePass(pass); });
+        menu.exec(m_passBar->mapToGlobal(at));
+    });
+
     buttonsLayout->addWidget(m_compileButton);
     buttonsLayout->addWidget(m_goToErrorButton);
     buttonsLayout->addWidget(newButton);
@@ -755,6 +776,82 @@ void ShaderBufferWindow::addPass(GraphicsPass pass)
     GraphicsLog::info(QStringLiteral("shader buffer: added %1 to %2 -> %3")
                           .arg(graphicsPassLabel(pass), updated.name, path));
     m_status->setText(tr("Added %1 (%2)").arg(graphicsPassLabel(pass), path));
+}
+
+void ShaderBufferWindow::deletePass(GraphicsPass pass)
+{
+    // Image is what makes a directory a document, so removing it would delete the document rather than a
+    // pass. Refused with a reason, not silently.
+    if (pass == GraphicsPass::Image)
+    {
+        m_status->setText(tr("Image cannot be deleted: it is what makes a document a document"));
+        return;
+    }
+
+    GraphicsDocument document;
+    const QList<GraphicsDocument> documents =
+        scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath());
+    for (const GraphicsDocument& candidate : documents)
+        if (candidate.name.compare(editingShaderName(), Qt::CaseInsensitive) == 0)
+            document = candidate;
+
+    if (!document.isValid() || document.singlePass)
+        return;
+
+    const QString path = document.passPath(pass);
+    if (path.isEmpty())
+        return;
+
+    // Asked twice, because this removes a file the user wrote. The default is No, so a stray Return does
+    // nothing.
+    const auto answer = QMessageBox::question(
+        this, tr("Delete pass"),
+        tr("Delete %1?\n\n%2\n\nThe file is removed from the document. Channels that named it will read "
+           "black until they are pointed somewhere else.")
+            .arg(graphicsPassLabel(pass), path),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (answer != QMessageBox::Yes)
+        return;
+
+    if (!QFile::remove(path))
+    {
+        m_status->setText(tr("Could not delete %1").arg(path));
+        return;
+    }
+
+    // The editor goes with it: the stack owns it, and a pass that no longer exists must not be reachable.
+    const QString key = document.name + QLatin1Char('/') + graphicsPassName(pass);
+    if (SonicPiScintilla* editor = m_editorsByPass.take(key))
+    {
+        if (QStackedWidget* stack = m_editorStacks.value(document.name, nullptr))
+        {
+            stack->removeWidget(editor);
+            editor->deleteLater();
+        }
+    }
+
+    // The document is re-scanned rather than edited in place, so what the tabs show comes from the disk.
+    GraphicsDocument updated;
+    for (const GraphicsDocument& candidate : scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath()))
+        if (candidate.name.compare(document.name, Qt::CaseInsensitive) == 0)
+            updated = candidate;
+
+    m_passByDocument.insert(updated.name, GraphicsPass::Image);
+    refreshPassSelector();
+    refreshChannelRow();
+
+    if (QStackedWidget* stack = m_editorStacks.value(updated.name, nullptr))
+    {
+        if (SonicPiScintilla* image = m_editorsByPass.value(updated.name + QLatin1Char('/') + graphicsPassName(GraphicsPass::Image), nullptr))
+        {
+            stack->setCurrentWidget(image);
+            m_editors.insert(updated.name, image);
+        }
+    }
+
+    GraphicsLog::info(QStringLiteral("shader buffer: deleted %1 from %2 -> %3")
+                          .arg(graphicsPassLabel(pass), updated.name, path));
+    m_status->setText(tr("Deleted %1 (%2)").arg(graphicsPassLabel(pass), path));
 }
 
 void ShaderBufferWindow::refreshChannelRow()
