@@ -214,6 +214,7 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     m_tabs->setTabsClosable(true);
     m_tabs->setMovable(false);
     m_tabs->setTabPosition(QTabWidget::South);
+    m_tabs->tabBar()->setVisible(false);
     m_tabs->tabBar()->setFixedHeight(ScaleHeightForDPI(SonicPi::kChromeControlDp));
 
     // MANY BUFFERS HAVE TO STAY NAVIGABLE. The tab bar is a strip that overflows, and there are three ways
@@ -946,7 +947,10 @@ void ShaderBufferWindow::refreshChannelRow()
 
     // Channels belong to a document; a single-pass .frag has none to assign, so the row is simply absent
     // rather than shown with nothing in it.
-    const bool applicable = document.isValid() && !document.singlePass;
+    // Every pass has its own four channels - Image and Buffer A-D alike - so the row follows the pass and
+    // only Common, which is not a pass, has none. Whether a file exists does not matter: a channel can
+    // point at a buffer or a texture before the pass has been written, exactly as on Shadertoy.
+    const bool applicable = document.isValid() && editingPass() != GraphicsPass::Common;
     m_channelRow->setVisible(applicable);
     if (!applicable)
         return;
@@ -1153,7 +1157,20 @@ void ShaderBufferWindow::rebuildTabs(const QString& selectName)
     refreshChannelRow();
     updateTabLabels();
 
-    const QString wanted = selectName.isEmpty() ? editingShaderName() : selectName;
+        // ONE document at a time: start on a directory document when there is one, because the six pass tabs and
+    // the channel rows describe a document - a top-level .frag has none of that structure to show.
+    QString wanted = selectName.isEmpty() ? editingShaderName() : selectName;
+    if (wanted.isEmpty())
+    {
+        for (const GraphicsDocument& candidate : scanned)
+        {
+            if (!candidate.singlePass)
+            {
+                wanted = candidate.name;
+                break;
+            }
+        }
+    }
     selectTab(wanted.isEmpty() ? GraphicsSettings::defaultShaderName() : wanted);
 }
 
