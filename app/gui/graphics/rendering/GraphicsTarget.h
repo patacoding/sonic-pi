@@ -68,6 +68,11 @@ public:
     // correctness while only needing to rebuild its own state when the NAME changes.
     GLuint texture() const { return m_fbo ? m_fbo->texture() : 0; }
 
+    // The framebuffer NAME, for operations that address a target as a read or draw framebuffer rather than
+    // as a bound one - glBlitFramebuffer needs both ends by name. Qt's own accessor, so the target keeps
+    // owning its framebuffer and nothing here invents a second way to reach it.
+    GLuint framebuffer() const { return m_fbo ? m_fbo->handle() : 0; }
+
     // Make this the current draw target. Pair with release().
     void bind() { if (m_fbo) m_fbo->bind(); }
     void release() { if (m_fbo) m_fbo->release(); }

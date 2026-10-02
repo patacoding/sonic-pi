@@ -1438,7 +1438,48 @@ void GraphicsRenderThread::run()
             // of it, so iResolution cannot disagree with the target being drawn
             // into.
             frame.resolution = target.size();
-            if (activeRenderer->renderInto(target, frame))
+            // While a document is on screen, its Image pass IS the picture: blit that pass's finished result
+            // into this very target, in place of the candidate renderer's own draw. Everything else in this
+            // block - the fences above, the timing and stats below, the publish - runs unchanged, which is
+            // the point: the display path is not rewritten, only fed. A blit re-runs no shader and does not
+            // touch the channels, which stay bound inside the pass loop where the passes draw. Sizes may
+            // differ (blitFramebuffer scales, per Qt's documentation), which will matter as soon as output
+            // size and pass size are allowed to differ.
+            const int documentImageIndex = (m_passPrograms && m_passPrograms->isValid())
+                                               ? graphicsPassDrawIndex(GraphicsPass::Image)
+                                               : -1;
+            GraphicsTarget* documentImage = (documentImageIndex >= 0 && m_bufferTargets[documentImageIndex])
+                                                ? m_bufferTargets[documentImageIndex]->read()
+                                                : nullptr;
+            bool drewDocumentImage = false;
+            if (documentImage && documentImage->isValid())
+            {
+                QOpenGLExtraFunctions* blit = m_context ? m_context->extraFunctions() : nullptr;
+                if (blit)
+                {
+                    const QSize from = documentImage->size();
+                    const QSize to = target.size();
+                    blit->glBindFramebuffer(GL_READ_FRAMEBUFFER, documentImage->framebuffer());
+                    blit->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, target.framebuffer());
+                    blit->glBlitFramebuffer(0, 0, from.width(), from.height(),
+                                            0, 0, to.width(), to.height(),
+                                            GL_COLOR_BUFFER_BIT, GL_NEAREST);
+                    blit->glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                    drewDocumentImage = true;
+
+                    // Said when the source CHANGES, not per frame - and the pixel is read back once for the
+                    // same reason: one number that can be wrong beats 60 lines a second that nobody reads.
+                    if (m_screenSource != documentImageIndex)
+                    {
+                        m_screenSource = documentImageIndex;
+                        GraphicsLog::info(QStringLiteral("screen source: the document's Image pass "
+                                                         "(%1x%2 -> %3x%4)")
+                                              .arg(from.width()).arg(from.height())
+                                              .arg(to.width()).arg(to.height()));
+                    }
+                }
+            }
+            if (!drewDocumentImage && activeRenderer->renderInto(target, frame))
             {
                 if (f)
                 {

@@ -511,6 +511,9 @@ private:
 
     // How many passes were drawn last frame, so the line is emitted when that CHANGES and not per frame.
     int m_passesDrawnLastFrame = -1;
+
+    // Which pass the screen was last fed from, so the line is emitted when it CHANGES and not per frame.
+    int m_screenSource = -1;
     // Index of the target currently published for consumers, or -1 before the first
     // frame. Written only by this thread.
     int m_readyIndex = -1;
