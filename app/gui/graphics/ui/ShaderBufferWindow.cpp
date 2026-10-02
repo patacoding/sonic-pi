@@ -313,6 +313,18 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     channelLayout->addStretch(1);
     layout->addWidget(m_channelRow);
 
+    // What this window actually built, once, at construction. Not decoration: the controls are added in
+    // several places and a mistake there is invisible from the outside - the window simply looks unchanged,
+    // which is indistinguishable from "the change was never made".
+    GraphicsLog::info(QStringLiteral("shader buffer: window built - tabs=%1 compile=%2 new=%3 passBar=%4 "
+                                     "channelRow=%5 goToError=%6")
+                          .arg(m_tabs ? QStringLiteral("yes") : QStringLiteral("NO"))
+                          .arg(m_compileButton ? QStringLiteral("yes") : QStringLiteral("NO"))
+                          .arg(newButton ? QStringLiteral("yes") : QStringLiteral("NO"))
+                          .arg(m_passBar ? QStringLiteral("yes") : QStringLiteral("NO"))
+                          .arg(m_channelRow ? QStringLiteral("yes") : QStringLiteral("NO"))
+                          .arg(m_goToErrorButton ? QStringLiteral("yes") : QStringLiteral("NO")));
+
     // Which trigger fired, in the log. Two ways in - the button and Ctrl+Return - and "the key did
     // nothing" is otherwise indistinguishable from "the key never reached this window": the editor
     // widget sits between the two, and whether it swallows a chord is its business, not something to
