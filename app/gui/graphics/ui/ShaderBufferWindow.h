@@ -252,6 +252,11 @@ private:
     QComboBox* m_channelCombos[4] = { nullptr, nullptr, nullptr, nullptr };
     QWidget* m_channelRow = nullptr;
     void refreshChannelRow();
+
+    // Adding and removing the passes of a document, as Shadertoy's tab bar does. ensurePassEditor() is split
+    // out because a pass created after the tab was built still needs an editor of its own.
+    SonicPiScintilla* ensurePassEditor(const GraphicsDocument& document, GraphicsPass pass);
+    void addPass(GraphicsPass pass);
     void writeChannelsFromRow();
     GraphicsPass editingPass() const;
     void setEditingPass(GraphicsPass pass);
@@ -262,6 +267,12 @@ private:
     QPlainTextEdit* m_report = nullptr;
     QLabel* m_status = nullptr;
     QPushButton* m_compileButton = nullptr;
+
+    // Shadertoy jumps you to the failing line; this is that, as a button because the report pane is plain
+    // text. Enabled only when the last compile named a line inside the document being edited.
+    QPushButton* m_goToErrorButton = nullptr;
+    int m_lastErrorLine = 0;
+    QString m_lastErrorFile;
 };
 
 } // namespace SonicPi

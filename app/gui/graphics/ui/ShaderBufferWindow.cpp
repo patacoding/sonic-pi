@@ -27,7 +27,9 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QAction>
 #include <QComboBox>
+#include <QMenu>
 #include <QFormLayout>
 #include <QDialogButtonBox>
 #include <QDialog>
@@ -162,6 +164,13 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     m_lexer = new GlslLexer(m_theme, this);
 
     m_compileButton = new QPushButton(tr("Compile"), this);
+    m_goToErrorButton = new QPushButton(tr("Go to Error"), this);
+    m_goToErrorButton->setToolTip(tr("Jump to the line the last compile complained about"));
+    m_goToErrorButton->setEnabled(false);
+    connect(m_goToErrorButton, &QPushButton::clicked, this, [this]() {
+        if (m_lastErrorLine > 0)
+            jumpToLine(m_lastErrorLine);
+    });
     QPushButton* newButton = new QPushButton(tr("New Buffer..."), this);
     QPushButton* loadButton = new QPushButton(tr("Load into Buffer..."), this);
     QPushButton* saveButton = new QPushButton(tr("Save Buffer As..."), this);
@@ -237,7 +246,40 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     });
     buttonsLayout->addWidget(m_passBar);
 
+    // Shadertoy offers the passes you do not have yet from a "+" beside the tabs; this is that. The menu is
+    // built when it opens, so it always reflects what the document has at that moment.
+    auto* addPassButton = new QPushButton(tr("+"), this);
+    addPassButton->setToolTip(tr("Add a pass: Common or a Buffer this document does not have yet"));
+    connect(addPassButton, &QPushButton::clicked, this, [this, addPassButton]() {
+        GraphicsDocument document;
+        const QList<GraphicsDocument> documents =
+            scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath());
+        for (const GraphicsDocument& candidate : documents)
+            if (candidate.name.compare(editingShaderName(), Qt::CaseInsensitive) == 0)
+                document = candidate;
+        if (!document.isValid() || document.singlePass)
+        {
+            m_status->setText(tr("Passes belong to a document - a directory holding image.frag"));
+            return;
+        }
+
+        QMenu menu(this);
+        for (GraphicsPass pass : { GraphicsPass::Common, GraphicsPass::BufferA, GraphicsPass::BufferB,
+                                   GraphicsPass::BufferC, GraphicsPass::BufferD })
+        {
+            if (!document.passPath(pass).isEmpty())
+                continue;   // already there: a pass is a file, so its absence is what makes it addable
+            QAction* action = menu.addAction(tr("Add %1").arg(graphicsPassLabel(pass)));
+            connect(action, &QAction::triggered, this, [this, pass]() { addPass(pass); });
+        }
+        if (menu.isEmpty())
+            menu.addAction(tr("Every pass already exists"))->setEnabled(false);
+        menu.exec(addPassButton->mapToGlobal(QPoint(0, addPassButton->height())));
+    });
+    buttonsLayout->addWidget(addPassButton);
+
     buttonsLayout->addWidget(m_compileButton);
+    buttonsLayout->addWidget(m_goToErrorButton);
     buttonsLayout->addWidget(newButton);
 
 
@@ -621,6 +663,98 @@ void ShaderBufferWindow::refreshPassSelector()
         if (pass == editingPass())
             current = index;
     }
+}
+
+SonicPiScintilla* ShaderBufferWindow::ensurePassEditor(const GraphicsDocument& document, GraphicsPass pass)
+{
+    const QString key = document.name + QLatin1Char('/') + graphicsPassName(pass);
+    if (SonicPiScintilla* existing = m_editorsByPass.value(key, nullptr))
+        return existing;
+
+    QStackedWidget* stack = m_editorStacks.value(document.name, nullptr);
+    if (!stack)
+        return nullptr;
+
+    auto* editor = new SonicPiScintilla(nullptr, m_theme, QStringLiteral("shader_%1").arg(key), false);
+    editor->setLexer(m_lexer);
+    restoreEditingKeys(editor);
+    editor->zoomTo(editorZoom());
+    editor->setAutoIndent(true);
+
+    QFile file(bufferFilePath(document.name, pass));
+    if (file.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        QTextStream in(&file);
+        editor->setText(in.readAll());
+        file.close();
+    }
+
+    m_editorsByPass.insert(key, editor);
+    stack->addWidget(editor);
+    return editor;
+}
+
+void ShaderBufferWindow::addPass(GraphicsPass pass)
+{
+    GraphicsDocument document;
+    const QList<GraphicsDocument> documents =
+        scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath());
+    for (const GraphicsDocument& candidate : documents)
+        if (candidate.name.compare(editingShaderName(), Qt::CaseInsensitive) == 0)
+            document = candidate;
+
+    if (!document.isValid() || document.singlePass)
+        return;
+    if (!document.passPath(pass).isEmpty())
+        return;   // it is a file, and the file is there
+
+    const QString path = QDir(document.directory).filePath(graphicsDocumentPassFileName(pass));
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+    {
+        m_status->setText(tr("Could not create %1").arg(path));
+        return;
+    }
+    {
+        QTextStream out(&file);
+        // A file that compiles and does nothing, which is what a new pass should be: an empty editor would
+        // fail on the first compile and look like a fault rather than a blank page.
+        out << QStringLiteral("#version 330 core\n\nvoid main()\n{\n}\n");
+    }
+    file.close();
+
+    // Re-scan: passPath() reads the disk, so the document object has to be rebuilt to see the new file.
+    GraphicsDocument updated;
+    for (const GraphicsDocument& candidate : scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath()))
+        if (candidate.name.compare(document.name, Qt::CaseInsensitive) == 0)
+            updated = candidate;
+
+    ensurePassEditor(updated, pass);
+    m_passByDocument.insert(updated.name, pass);
+    refreshPassSelector();
+    refreshChannelRow();
+
+    // The pass tab bar is rebuilt from the document, so the new pass appears there; select it so the user
+    // lands in the file they just asked for.
+    for (int i = 0; i < m_passBar->count(); ++i)
+    {
+        if (m_passBar->tabData(i).toInt() == int(pass))
+        {
+            m_passBar->setCurrentIndex(i);
+            setEditingPass(pass);
+            break;
+        }
+    }
+    if (QStackedWidget* stack = m_editorStacks.value(updated.name, nullptr))
+        if (SonicPiScintilla* editor = m_editorsByPass.value(updated.name + QLatin1Char('/') + graphicsPassName(pass), nullptr))
+        {
+            stack->setCurrentWidget(editor);
+            m_editors.insert(updated.name, editor);
+        }
+
+    GraphicsLog::info(QStringLiteral("shader buffer: added %1 to %2 -> %3")
+                          .arg(graphicsPassLabel(pass), updated.name, path));
+    m_status->setText(tr("Added %1 (%2)").arg(graphicsPassLabel(pass), path));
 }
 
 void ShaderBufferWindow::refreshChannelRow()
@@ -1390,10 +1524,20 @@ void ShaderBufferWindow::showCompileReport(bool ok, const QString& compilerLog,
     //
     // No position is a normal outcome, not a failure to parse: some diagnostics name none, and
     // inventing one would be worse than saying only the file.
+    // Remembered so "Go to Error" has something to jump to. Whether that line is inside the document this
+    // window is showing is decided below, once the file has been resolved to a name.
+    m_lastErrorLine = errorLine;
+    m_lastErrorFile = errorFile;
+
     const QString ownFile = ShaderText::diagnosticName(bufferFilePath(name),
                                                        GraphicsSettings::shaderDirectoryPath());
     const QString file = errorFile.isEmpty() ? ownFile : errorFile;
     const QString where = errorLine > 0 ? QStringLiteral("%1:%2").arg(file).arg(errorLine) : file;
+
+    // Shadertoy jumps to the failing line; this is the same offer, enabled only when the line is in the
+    // text this window shows - a diagnostic in a library file is named but cannot be jumped to.
+    if (m_goToErrorButton)
+        m_goToErrorButton->setEnabled(errorLine > 0 && file == ownFile);
 
     // The one decision the line number alone cannot make: is that line in the document this window is
     // showing? A diagnostic inside an included library points at a line of a file this editor is not
