@@ -257,6 +257,10 @@ private:
     // out because a pass created after the tab was built still needs an editor of its own.
     SonicPiScintilla* ensurePassEditor(const GraphicsDocument& document, GraphicsPass pass);
     void addPass(GraphicsPass pass);
+
+    // Shadertoy's New: the passes this document does not have yet. Shared by the tab bar's + and the toolbar
+    // button, so there is one list and one behaviour rather than two that drift apart.
+    void showAddPassMenu(QWidget* anchor);
     void deletePass(GraphicsPass pass);
     void writeChannelsFromRow();
     GraphicsPass editingPass() const;

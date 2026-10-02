@@ -171,7 +171,7 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
         if (m_lastErrorLine > 0)
             jumpToLine(m_lastErrorLine);
     });
-    QPushButton* newButton = new QPushButton(tr("New Buffer..."), this);
+    QPushButton* newButton = new QPushButton(tr("New"), this);
     QPushButton* loadButton = new QPushButton(tr("Load into Buffer..."), this);
     QPushButton* saveButton = new QPushButton(tr("Save Buffer As..."), this);
 
@@ -251,30 +251,7 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     auto* addPassButton = new QPushButton(tr("+"), this);
     addPassButton->setToolTip(tr("Add a pass: Common or a Buffer this document does not have yet"));
     connect(addPassButton, &QPushButton::clicked, this, [this, addPassButton]() {
-        GraphicsDocument document;
-        const QList<GraphicsDocument> documents =
-            scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath());
-        for (const GraphicsDocument& candidate : documents)
-            if (candidate.name.compare(editingShaderName(), Qt::CaseInsensitive) == 0)
-                document = candidate;
-        if (!document.isValid() || document.singlePass)
-        {
-            m_status->setText(tr("Passes belong to a document - a directory holding image.frag"));
-            return;
-        }
-
-        QMenu menu(this);
-        for (GraphicsPass pass : { GraphicsPass::Common, GraphicsPass::BufferA, GraphicsPass::BufferB,
-                                   GraphicsPass::BufferC, GraphicsPass::BufferD })
-        {
-            if (!document.passPath(pass).isEmpty())
-                continue;   // already there: a pass is a file, so its absence is what makes it addable
-            QAction* action = menu.addAction(tr("Add %1").arg(graphicsPassLabel(pass)));
-            connect(action, &QAction::triggered, this, [this, pass]() { addPass(pass); });
-        }
-        if (menu.isEmpty())
-            menu.addAction(tr("Every pass already exists"))->setEnabled(false);
-        menu.exec(addPassButton->mapToGlobal(QPoint(0, addPassButton->height())));
+        showAddPassMenu(addPassButton);
     });
     buttonsLayout->addWidget(addPassButton);
 
@@ -344,7 +321,7 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
         GraphicsLog::info(QStringLiteral("shader buffer: compile by button (%1)").arg(editingShaderName()));
         compile();
     });
-    connect(newButton, &QPushButton::clicked, this, &ShaderBufferWindow::newBuffer);
+    connect(newButton, &QPushButton::clicked, this, [this, newButton]() { showAddPassMenu(newButton); });
     connect(loadButton, &QPushButton::clicked, this, &ShaderBufferWindow::loadFromFile);
     connect(saveButton, &QPushButton::clicked, this, &ShaderBufferWindow::saveToFile);
 
@@ -776,6 +753,37 @@ void ShaderBufferWindow::addPass(GraphicsPass pass)
     GraphicsLog::info(QStringLiteral("shader buffer: added %1 to %2 -> %3")
                           .arg(graphicsPassLabel(pass), updated.name, path));
     m_status->setText(tr("Added %1 (%2)").arg(graphicsPassLabel(pass), path));
+}
+
+void ShaderBufferWindow::showAddPassMenu(QWidget* anchor)
+{
+    GraphicsDocument document;
+    const QList<GraphicsDocument> documents =
+        scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath());
+    for (const GraphicsDocument& candidate : documents)
+        if (candidate.name.compare(editingShaderName(), Qt::CaseInsensitive) == 0)
+            document = candidate;
+
+    if (!document.isValid() || document.singlePass)
+    {
+        m_status->setText(tr("Passes belong to a document - a directory holding image.frag"));
+        return;
+    }
+
+    // Only the passes that do not exist yet, and only the ones Shadertoy names: a pass is one of Common or
+    // Buffer A-D, so there is nothing to type and no way to invent a name the pipeline would not know.
+    QMenu menu(this);
+    for (GraphicsPass pass : { GraphicsPass::Common, GraphicsPass::BufferA, GraphicsPass::BufferB,
+                               GraphicsPass::BufferC, GraphicsPass::BufferD })
+    {
+        if (!document.passPath(pass).isEmpty())
+            continue;
+        QAction* action = menu.addAction(tr("Add %1").arg(graphicsPassLabel(pass)));
+        connect(action, &QAction::triggered, this, [this, pass]() { addPass(pass); });
+    }
+    if (menu.isEmpty())
+        menu.addAction(tr("Every pass already exists"))->setEnabled(false);
+    menu.exec(anchor->mapToGlobal(QPoint(0, anchor->height())));
 }
 
 void ShaderBufferWindow::deletePass(GraphicsPass pass)
