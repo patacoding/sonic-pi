@@ -951,6 +951,19 @@ void ShaderBufferWindow::refreshChannelRow()
     // only Common, which is not a pass, has none. Whether a file exists does not matter: a channel can
     // point at a buffer or a texture before the pass has been written, exactly as on Shadertoy.
     const bool applicable = document.isValid() && editingPass() != GraphicsPass::Common;
+
+    // Logged on every refresh - which happens on a pass change and not per frame: which pass this row shows
+    // and what it read for it. Without it, "the row did not change" and "the row changed to identical values"
+    // are indistinguishable from outside, and telling those apart has already cost two rounds.
+    {
+        const QList<int> shown = graphicsDocumentChannels(document, editingPass());
+        GraphicsLog::info(QStringLiteral("channel row: %1 of '%2' reads [%3] applicable=%4")
+                              .arg(graphicsPassLabel(editingPass()), document.name,
+                                   QStringLiteral("%1,%2,%3,%4")
+                                       .arg(shown.value(0, -1)).arg(shown.value(1, -1))
+                                       .arg(shown.value(2, -1)).arg(shown.value(3, -1)),
+                                   applicable ? QStringLiteral("yes") : QStringLiteral("no")));
+    }
     m_channelRow->setVisible(applicable);
     if (!applicable)
         return;
