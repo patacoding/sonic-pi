@@ -328,6 +328,75 @@ inline BuiltinUniforms withBuiltinUniforms(const QString& source)
     return result;
 }
 
+// Shadertoy's Common: one text, prepended to every pass of a document (docs/graphics-desktop-multipass-plan.md
+// 15: `#include` is dropped in favour of this, and documents do not share).
+//
+// WHERE IT GOES, and why each half of that matters:
+//
+//   * AFTER the `#include` expansion, because that expansion is what emits the `#line` directives that
+//     attach diagnostics to files. Inserting text ahead of it would move every line the driver reports.
+//   * BEFORE the built-in uniform declarations, which inject themselves after `#version` and skip any
+//     name the shader already declares. A Common that declares `iTime` itself therefore keeps its own,
+//     which is the same rule a pass gets.
+//
+// IT IS A SOURCE STRING OF ITS OWN, for the same reason an included file is: the driver numbers its
+// lines from 1 under `#line 1 k`, so an error written on Common's third line is reported as
+// "3" - and without a number of its own, "3" would send the user to line 3 of their pass, which is a
+// different file with different text. `assignedSourceString` and `fileBySourceString` are what make the
+// existing attribution (`attributeDiagnostics`) name Common instead, so the mechanism an error report
+// already uses for `#include` covers this with no second one.
+//
+// An empty common text returns the source unchanged and takes no number: a document without a Common
+// must compile exactly what it compiled before this existed.
+struct CommonSource
+{
+    QString text;
+    // The source string number given to the Common block, or 0 when there was none to insert.
+    int assignedSourceString = 0;
+    // Ready to merge into the table the expansion produced: { assignedSourceString -> commonFile }.
+    // Empty when there was nothing to insert.
+    QHash<int, QString> fileBySourceString;
+};
+
+inline CommonSource withCommon(const QString& source, const QString& commonText,
+                               const QString& commonPath,
+                               const QHash<int, QString>& expansionTable)
+{
+    CommonSource result;
+    result.text = source;
+
+    // Nothing to prepend is NOT an error (plan 17.2: a document without common.glsl has no Common), and
+    // it must not spend a source string number either - a table entry pointing at a file that was never
+    // compiled would only be reachable through a diagnostic nobody can produce.
+    if (commonText.trimmed().isEmpty())
+        return result;
+
+    // ONE PAST THE HIGHEST NUMBER IN USE, rather than counting entries: the expansion assigns 1, 2, 3…
+    // and this must not borrow a number it already handed to an included file.
+    int assigned = 1;
+    for (auto it = expansionTable.constBegin(); it != expansionTable.constEnd(); ++it)
+    {
+        if (it.key() >= assigned)
+            assigned = it.key() + 1;
+    }
+
+    QString block = commonText;
+    // A file whose text does not end with a newline would otherwise leave `#line` attached to its last
+    // line, and the driver refuses a directive preceded by another token. Same trap the expander
+    // documents at its own resync.
+    if (!block.endsWith(QLatin1Char('\n')))
+        block += QLatin1Char('\n');
+
+    // `#line 1 k` for the block, then `#line 1 0` to hand the pass's own numbering back. Both are
+    // emitted on their own lines, and the pass's first line follows the second one.
+    result.text = QStringLiteral("#line 1 %1\n").arg(assigned) + block
+                  + QStringLiteral("#line 1 0\n") + source;
+    result.assignedSourceString = assigned;
+    if (!commonPath.isEmpty())
+        result.fileBySourceString.insert(assigned, commonPath);
+    return result;
+}
+
 // The first position mentioned in a compiler diagnostic, or a Diagnostic with line 0 when none is
 // recognisable.
 //
