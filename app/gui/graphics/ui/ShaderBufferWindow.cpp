@@ -2218,9 +2218,12 @@ bool ShaderBufferWindow::saveDocumentTo(const QString& targetDirectory)
 
     if (!saved.ok)
     {
+        // The REASON, in the two places a person looks: the status line (which is on screen) and the log.
+        // The first version of this reported only that it had failed, and a user who then found an empty
+        // folder had no way at all to tell why - which is the failure this message exists to prevent.
         m_status->setText(tr("Save failed: %1").arg(saved.message));
-        GraphicsLog::error(QStringLiteral("shader buffer: save of '%1' failed: %2")
-                               .arg(file.name, saved.message));
+        GraphicsLog::error(QStringLiteral("shader buffer: save of '%1' into %2 failed: %3")
+                               .arg(file.name, targetDirectory, saved.message));
         return false;
     }
 

@@ -234,6 +234,26 @@ inline GraphicsDocumentIoResult saveGraphicsDocument(const GraphicsDocumentFile&
         return result;
     }
 
+    // CAN THIS FOLDER BE WRITTEN AT ALL? Asked BEFORE anything is written, with the same call the writes
+    // below use, so the answer is the filesystem's rather than a guess from permissions.
+    //
+    // This exists because of a real report: a save into a folder that looked perfectly writable produced an
+    // empty folder and one log line, and the user's reasonable reading was "this feature does nothing". A
+    // save now says WHICH file failed and WHY (QFile's own words - "Access is denied", "The system cannot
+    // find the path specified"), and it says so before it has written half a document.
+    {
+        const QString probePath = target.filePath(QStringLiteral(".sonic-pi-write-test"));
+        QFile probe(probePath);
+        if (!probe.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        {
+            result.message = QStringLiteral("Cannot write in %1: %2")
+                                 .arg(target.absolutePath(), probe.errorString());
+            return result;
+        }
+        probe.close();
+        probe.remove();
+    }
+
     // The six texts, named by the SAME rule the renderer reads: what is saved can be used as a document
     // directory as it stands.
     for (GraphicsPass pass : { GraphicsPass::Common, GraphicsPass::Image, GraphicsPass::BufferA,
@@ -243,7 +263,7 @@ inline GraphicsDocumentIoResult saveGraphicsDocument(const GraphicsDocumentFile&
         QFile out(path);
         if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
         {
-            result.message = QStringLiteral("Could not write %1").arg(path);
+            result.message = QStringLiteral("Could not write %1: %2").arg(path, out.errorString());
             return result;
         }
         {
@@ -251,6 +271,14 @@ inline GraphicsDocumentIoResult saveGraphicsDocument(const GraphicsDocumentFile&
             stream << file.textFor(pass);
         }
         out.close();
+        if (out.error() != QFileDevice::NoError)
+        {
+            // A write that fails while CLOSING (a full disk, a file that went away) would otherwise leave a
+            // truncated pass file and a record that claims it is complete.
+            result.message = QStringLiteral("Could not finish writing %1: %2")
+                                 .arg(path, out.errorString());
+            return result;
+        }
     }
 
     // The images, each copied once, into img/.
@@ -322,11 +350,16 @@ inline GraphicsDocumentIoResult saveGraphicsDocument(const GraphicsDocumentFile&
     QFile out(record);
     if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate))
     {
-        result.message = QStringLiteral("Could not write %1").arg(record);
+        result.message = QStringLiteral("Could not write %1: %2").arg(record, out.errorString());
         return result;
     }
     out.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
     out.close();
+    if (out.error() != QFileDevice::NoError)
+    {
+        result.message = QStringLiteral("Could not finish writing %1: %2").arg(record, out.errorString());
+        return result;
+    }
 
     result.ok = true;
     result.message = record;
