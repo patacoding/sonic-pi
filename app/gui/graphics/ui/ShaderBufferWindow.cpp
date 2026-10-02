@@ -237,13 +237,36 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
                           "(Ctrl+Return) puts the buffer being edited on screen. The x closes the tab - "
                           "the shader file stays on disk.").arg(kOnScreenMark));
 
+    // TWO ROWS, and which control belongs to which is the point (user, 2026-10-02: "put the compile
+    // buttons on the row ABOVE the Image/Buffer tabs").
+    //
+    //   TOP    : what you do   - Compile, Go to Error, New, Load, Save, and the status line
+    //   BOTTOM : what you edit - the pass tabs, Image first
+    //
+    // They were one row, which read as if the pass tabs were one more button. The tabs are a CHOICE OF
+    // DOCUMENT POSITION and the buttons are ACTIONS ON IT, so the actions sit above the thing they act on -
+    // the shape a person expects, and the shape Shadertoy uses.
     auto* buttons = new QWidget(this);
-    auto* buttonsLayout = new QHBoxLayout(buttons);
-    buttonsLayout->setContentsMargins(0, 0, 0, 0);
-    // The PASS TABS: Common | Buffer A | ... | Image, the shape Shadertoy and the web editor both use
+    auto* rows = new QVBoxLayout(buttons);
+    rows->setContentsMargins(0, 0, 0, 0);
+    rows->setSpacing(ScaleHeightForDPI(6));
+
+    auto* actions = new QHBoxLayout();
+    actions->setContentsMargins(0, 0, 0, 0);
+    actions->addWidget(m_compileButton);
+    actions->addWidget(m_goToErrorButton);
+    actions->addWidget(newButton);
+    actions->addWidget(loadButton);
+    actions->addWidget(saveButton);
+    actions->addWidget(m_status, 1);
+    rows->addLayout(actions);
+
+    // The PASS TABS: Image | Buffer A | ... | Common, the shape Shadertoy and the web editor both use
     // (graphics-web-canvas.md 4.7). Tabs rather than a dropdown, because a document's structure should be
-    // visible at a glance - a dropdown hides which passes exist behind one click, and "which passes are
-    // there" is the first thing this feature is about. Hidden entirely for a single-pass .frag.
+    // visible at a glance - a dropdown hides which passes there are behind one click, and "which passes are
+    // there" is the first thing this feature is about.
+    auto* passRow = new QHBoxLayout();
+    passRow->setContentsMargins(0, 0, 0, 0);
     m_passBar = new QTabBar(this);
     m_passBar->setExpanding(false);
     m_passBar->setDrawBase(false);
@@ -259,7 +282,7 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
             return;
         setEditingPass(static_cast<GraphicsPass>(m_passBar->tabData(index).toInt()));
     });
-    buttonsLayout->addWidget(m_passBar);
+    passRow->addWidget(m_passBar);
 
     // Shadertoy offers the passes you do not have yet from a "+" beside the tabs; this is that. The menu is
     // built when it opens, so it always reflects what the document has at that moment.
@@ -269,7 +292,9 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
         showAddPassMenu(addPassButton);
     });
     addPassButton->setVisible(false);
-    buttonsLayout->addWidget(addPassButton);
+    passRow->addWidget(addPassButton);
+    passRow->addStretch(1);
+    rows->addLayout(passRow);
 
     // NO RIGHT-CLICK MENU ON THE PASS TABS. The six passes ARE the document (2026-10-02: "No delete
     // either: the six passes are the document, so there is nothing to remove"), so a Delete entry would
@@ -280,15 +305,6 @@ ShaderBufferWindow::ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread
     //
     // deletePass() is kept - it is how a pass that was made by mistake is undone from the Add menu, and its
     // refusal for Image is a rule worth keeping written down - but nothing offers it from the tab bar.
-
-    buttonsLayout->addWidget(m_compileButton);
-    buttonsLayout->addWidget(m_goToErrorButton);
-    buttonsLayout->addWidget(newButton);
-
-
-    buttonsLayout->addWidget(loadButton);
-    buttonsLayout->addWidget(saveButton);
-    buttonsLayout->addWidget(m_status, 1);
 
     auto* split = new QSplitter(Qt::Vertical, this);
     split->addWidget(m_tabs);
