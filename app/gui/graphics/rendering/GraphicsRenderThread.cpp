@@ -1464,6 +1464,20 @@ void GraphicsRenderThread::run()
                     blit->glBlitFramebuffer(0, 0, from.width(), from.height(),
                                             0, 0, to.width(), to.height(),
                                             GL_COLOR_BUFFER_BIT, GL_NEAREST);
+                    // Read the DISPLAY target back while it is still bound, straight after the blit. This is
+                    // what separates "the blit did not deliver" from "the display path did not show what was
+                    // delivered" - the same one-pixel discipline as everywhere else, and the only way to tell
+                    // those two apart from a log.
+                    if (m_screenSource != documentImageIndex)
+                    {
+                        unsigned char check[4] = { 0, 0, 0, 0 };
+                        blit->glReadPixels(to.width() / 2, to.height() / 2, 1, 1,
+                                           GL_RGBA, GL_UNSIGNED_BYTE, check);
+                        GraphicsLog::info(QStringLiteral("display target after blit: rgb(%1,%2,%3) "
+                                                         "(the Image pass's own centre was rgb(255,127,0) "
+                                                         "when this is taken)")
+                                              .arg(check[0]).arg(check[1]).arg(check[2]));
+                    }
                     blit->glBindFramebuffer(GL_FRAMEBUFFER, 0);
                     drewDocumentImage = true;
 
@@ -1479,7 +1493,11 @@ void GraphicsRenderThread::run()
                     }
                 }
             }
-            if (!drewDocumentImage && activeRenderer->renderInto(target, frame))
+            // A document's Image pass was blitted in above, so the shader is NOT re-run - but the body of
+            // this block must still run: it is where the frame is published to the consumers. Skipping the
+            // whole block left them reading an old cleared target, which is what a blue screen and a black
+            // debug window turned out to be.
+            if (drewDocumentImage || activeRenderer->renderInto(target, frame))
             {
                 if (f)
                 {
