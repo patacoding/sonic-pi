@@ -14,6 +14,7 @@
 #pragma once
 
 #include <QComboBox>
+#include <QStackedWidget>
 #include <QTabBar>
 #include <QWidget>
 
@@ -235,6 +236,12 @@ private:
     // another is on screen must not lose the first one's unsaved text. Writing happens when the user
     // compiles, which is also when the renderer needs the file.
     QHash<QString, QString> m_textByPass;
+
+    // One EDITOR per pass, as Shadertoy has: switching pass tabs is a change of view, so undo, selection
+    // and scroll belong to the pass. A single editor handed different text shares all three silently -
+    // which is what this did before, and it is the difference between a Shadertoy editor and a text box.
+    QHash<QString, QStackedWidget*> m_editorStacks;
+    QHash<QString, SonicPiScintilla*> m_editorsByPass;   // "<document>/<pass>"
 
     // The pass selector of the current document: which of Common/Image/Buffer A-D this tab is editing.
     QTabBar* m_passBar = nullptr;

@@ -730,25 +730,28 @@ void ShaderBufferWindow::setEditingPass(GraphicsPass pass)
 
 SonicPiScintilla* ShaderBufferWindow::currentEditor() const
 {
-    return m_editors.value(editingShaderName(), nullptr);
+    const QString name = editingShaderName();
+    if (QStackedWidget* stack = m_editorStacks.value(name, nullptr))
+        return qobject_cast<SonicPiScintilla*>(stack->currentWidget());
+    return m_editors.value(name, nullptr);
 }
 
 void ShaderBufferWindow::rebuildTabs(const QString& selectName)
 {
-    // The list IS the directory (GraphicsSettings::shaderNames()), so nothing has to be kept in step.
+    // OUTER layer: one tab per DOCUMENT - a directory holding image.frag, or a top-level .frag as before.
+    // INNER layer: that document's own Shadertoy panel, whose pass tabs are drawn by refreshPassSelector().
     //
     // Tabs are only ever ADDED here, never removed: a file that disappears from the directory while
     // the window is open may still have unsaved text in its tab, and silently dropping that would be
     // data loss dressed up as tidiness.
-    // A tab is a DOCUMENT: a directory holding image.frag, or a top-level .frag as before.
     const QStringList names = GraphicsSettings::documentNames();
-    for (const QString& name : names)
-    {
-        if (m_editors.contains(name))
-            continue;
+    const QList<GraphicsDocument> scanned = scanGraphicsDocuments(GraphicsSettings::shaderDirectoryPath());
 
-        auto* editor = new SonicPiScintilla(nullptr, m_theme,
-                                            QStringLiteral("shader_%1").arg(name), false);
+    // Every pass gets its OWN editor, as on Shadertoy. Switching pass tabs is then a change of view, so
+    // undo, selection and scroll stay with the pass; one editor handed different text - which is what this
+    // did before - shares all three without saying so.
+    const auto makeEditor = [this](const QString& key) {
+        auto* editor = new SonicPiScintilla(nullptr, m_theme, QStringLiteral("shader_%1").arg(key), false);
         editor->setLexer(m_lexer);
         restoreEditingKeys(editor);
         editor->zoomTo(editorZoom());
@@ -758,27 +761,81 @@ void ShaderBufferWindow::rebuildTabs(const QString& selectName)
         // main window connects that to the API). Nothing answers it here, so turning it on would make the
         // Return key do nothing at all. This call keeps the work local, which is what a GLSL editor needs.
         editor->setAutoIndent(true);
+        return editor;
+    };
 
-        // Read the buffer's file into its editor. Missing is a normal state - a buffer created by name
-        // whose file was never written - and it is reported in that buffer's own status, not as a
-        // window-wide failure.
-        QFile file(bufferFilePath(name, m_passByDocument.value(name, GraphicsPass::Image)));
-        if (file.open(QIODevice::ReadOnly | QIODevice::Text))
+    for (const QString& name : names)
+    {
+        if (m_editorStacks.contains(name) || m_editors.contains(name))
+            continue;
+
+        GraphicsDocument document;
+        for (const GraphicsDocument& candidate : scanned)
         {
-            QTextStream in(&file);
-            editor->setText(in.readAll());
-            file.close();
-        }
-        else
-        {
-            m_statusByBuffer.insert(name, tr("No file yet at %1 - Compile will create it.")
-                                              .arg(bufferFilePath(name)));
+            if (candidate.name.compare(name, Qt::CaseInsensitive) == 0)
+            {
+                document = candidate;
+                break;
+            }
         }
 
-        m_editors.insert(name, editor);
-        m_tabs->addTab(editor, name);
-        GraphicsLog::info(QStringLiteral("shader buffer: tab '%1' -> %2").arg(name,
-                                                                             bufferFilePath(name)));
+        // Shadertoy's tab order: Image first and selected, then Common, then the buffers. The RENDER order
+        // (A -> B -> C -> D -> Image) belongs to the pipeline and stays out of a strip a person clicks -
+        // putting it there would say the wrong thing about what happens first.
+        QList<GraphicsPass> order;
+        order << GraphicsPass::Image;
+        if (document.isValid() && !document.singlePass)
+        {
+            if (!document.passPath(GraphicsPass::Common).isEmpty())
+                order << GraphicsPass::Common;
+            for (int i = 0; i < kDrawOrderCount; ++i)
+            {
+                if (kDrawOrder[i] != GraphicsPass::Image
+                    && !document.passPath(kDrawOrder[i]).isEmpty())
+                {
+                    order << kDrawOrder[i];
+                }
+            }
+        }
+
+        auto* stack = new QStackedWidget(m_tabs);
+        SonicPiScintilla* shown = nullptr;
+        for (GraphicsPass pass : order)
+        {
+            const QString key = name + QLatin1Char('/') + graphicsPassName(pass);
+            SonicPiScintilla* editor = makeEditor(key);
+
+            // Read the pass's file into ITS editor. Missing is a normal state - a pass created by name whose
+            // file was never written - and it is reported in that document's own status, not as a
+            // window-wide failure.
+            QFile file(bufferFilePath(name, pass));
+            if (file.open(QIODevice::ReadOnly | QIODevice::Text))
+            {
+                QTextStream in(&file);
+                editor->setText(in.readAll());
+                file.close();
+            }
+            else if (pass == GraphicsPass::Image)
+            {
+                m_statusByBuffer.insert(name, tr("No file yet at %1 - Compile will create it.")
+                                                  .arg(bufferFilePath(name, pass)));
+            }
+
+            m_editorsByPass.insert(key, editor);
+            stack->addWidget(editor);
+            if (pass == m_passByDocument.value(name, GraphicsPass::Image) || !shown)
+                shown = editor;
+        }
+        stack->setCurrentWidget(shown);
+
+        m_editorStacks.insert(name, stack);
+        m_editors.insert(name, shown);
+        m_tabs->addTab(stack, name);
+
+        GraphicsLog::info(QStringLiteral("shader buffer: tab '%1' holds %2 pass editor(s), showing %3")
+                              .arg(name)
+                              .arg(order.size())
+                              .arg(graphicsPassLabel(m_passByDocument.value(name, GraphicsPass::Image))));
     }
 
     refreshPassSelector();
