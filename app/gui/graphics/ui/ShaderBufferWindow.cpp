@@ -1083,6 +1083,14 @@ void ShaderBufferWindow::setEditingPass(GraphicsPass pass)
     refreshPassSelector();
     refreshChannelRow();
 
+    // The channel row belongs to the PASS: without these two calls the row keeps the previous pass's four
+    // values, which is indistinguishable from "both passes share one set of channels" - and an edit then
+    // writes pass A's values into pass B's section. They belong HERE, in setEditingPass; an earlier attempt
+    // anchored on a string that occurs in several functions and landed in the wrong one, which is why the
+    // symptom survived a green build.
+    refreshPassSelector();
+    refreshChannelRow();
+
     GraphicsLog::info(QStringLiteral("shader buffer: %1 now edits %2 (%3)")
                           .arg(document, graphicsPassLabel(pass), bufferFilePath(document, pass)));
     m_status->setText(tr("Editing %1 of %2").arg(graphicsPassLabel(pass), document));
