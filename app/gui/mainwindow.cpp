@@ -2742,8 +2742,17 @@ void MainWindow::honourPrefs()
     // place the editor asks - so "the file I am editing" and "the file being rendered" cannot end up
     // being two different files.
     if (graphicsRenderThread)
-        SonicPi::GraphicsSettings::ensureShaderFile(SonicPi::GraphicsSettings::fragmentFileName(
-            graphicsRenderThread->shaderName()));
+    {
+        // A DOCUMENT IS NOT SEEDED. Its passes are its own files, and there is no `<name>.frag` for it - so
+        // asking for one produced "no shipped copy of <name>.frag to seed from" on every start of a document
+        // session, which reads as a fault and is not one.
+        const QString active = graphicsRenderThread->shaderName();
+        if (!SonicPi::graphicsDocumentExists(SonicPi::GraphicsSettings::shaderDirectoryPath(), active))
+        {
+            SonicPi::GraphicsSettings::ensureShaderFile(
+                SonicPi::GraphicsSettings::fragmentFileName(active));
+        }
+    }
 
     changeShowAutoCompletion();
     changeShowCompletionHelp();
@@ -4152,11 +4161,17 @@ void MainWindow::showShaderBuffer()
             return;
         }
 
-        const QString seeded = SonicPi::GraphicsSettings::ensureShaderFile(
-            SonicPi::GraphicsSettings::fragmentFileName(graphicsRenderThread->shaderName()));
-        if (seeded.isEmpty())
-            SonicPi::GraphicsLog::warn(QStringLiteral("shader buffer: no shader file could be produced; "
-                                                      "the editor will show whatever it can read"));
+        // Seeded only for a single-pass .frag, for the same reason as at startup: a document's passes are
+        // its own files and it has no `<name>.frag` to produce.
+        const QString active = graphicsRenderThread->shaderName();
+        if (!SonicPi::graphicsDocumentExists(SonicPi::GraphicsSettings::shaderDirectoryPath(), active))
+        {
+            const QString seeded = SonicPi::GraphicsSettings::ensureShaderFile(
+                SonicPi::GraphicsSettings::fragmentFileName(active));
+            if (seeded.isEmpty())
+                SonicPi::GraphicsLog::warn(QStringLiteral("shader buffer: no shader file could be produced; "
+                                                          "the editor will show whatever it can read"));
+        }
 
         graphicsShaderWindow = new SonicPi::ShaderBufferWindow(theme, graphicsRenderThread, gui_settings);
         // A QWidget with no parent is a top-level window, which is what this is. Sized generously

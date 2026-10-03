@@ -31,7 +31,9 @@ bool GraphicsPassPrograms::create(const GraphicsDocument& document, const QStrin
     destroy();
 
     if (!document.isValid()) {
-        GraphicsLog::error(QStringLiteral("pass programs: no document to compile"));
+        GraphicsLog::error(QStringLiteral("pass programs: no document to compile (no directory holding "
+                                          "%1 was scanned)")
+                               .arg(graphicsDocumentImageFileName()));
         return false;
     }
 
@@ -59,11 +61,22 @@ bool GraphicsPassPrograms::create(const GraphicsDocument& document, const QStrin
     // perfectly valid. This is why the existence test is here and not in the path rule above: a plain .frag
     // is a document whose Image is its own file and whose four buffers do not exist until somebody writes
     // them, and "does it exist" is exactly the question a compile has to ask.
+    //
+    // EVERY PASS IS NAMED IN THE LOG, WITH THE FILE IT LOOKED FOR - present or not. This is the line that
+    // answers "why is my pass empty?" without anybody having to guess: the path is printed whether the file
+    // was found (so a wrong path is visible) or not (so a missing file is), and it is the same computed path
+    // the renderer is then handed, so the log and the compile cannot disagree about which file was meant.
+    QStringList looked;
     for (int i = 0; i < kDrawOrderCount; ++i) {
         const GraphicsPass pass = kDrawOrder[i];
         const QString file = graphicsDocumentPassFilePath(document, pass);
-        if (file.isEmpty() || !QFileInfo::exists(file))
+        if (file.isEmpty() || !QFileInfo::exists(file)) {
+            looked << QStringLiteral("%1=%2").arg(graphicsPassLabel(pass),
+                                                  file.isEmpty() ? QStringLiteral("(no path)")
+                                                                 : QStringLiteral("MISSING %1").arg(file));
             continue;
+        }
+        looked << QStringLiteral("%1=%2").arg(graphicsPassLabel(pass), file);
 
         auto renderer = std::make_unique<GraphicsRenderer>();
         // Named before compiling, because the name is what the log lines and the compile result carry: a
@@ -77,15 +90,16 @@ bool GraphicsPassPrograms::create(const GraphicsDocument& document, const QStrin
             continue;
         }
 
-        // The entry point multi-pass needed, which turned out to exist already (GraphicsRenderer.cpp:251):
-        // explicit file, document's Common, and a failure that keeps the previous program - which is what
-        // gives each pass its own protection rather than one bad pass taking the frame down.
-        // A NAME, not the absolute path: buildProgram() reaches the file through
-        // GraphicsSettings::shaderPath(name), which looks in the user shader directory and then in the
-        // shipped copy. Measured - handing it an absolute path produced "Shader file not found" for a
-        // file that was plainly on disk (1236 bytes).
-        const QString name = QDir(GraphicsSettings::shaderDirectoryPath()).relativeFilePath(file);
-        const GraphicsCompileResult result = renderer->buildAndInstallFrom(name, m_commonText, m_commonFile);
+        // THE FILE WE RESOLVED, BY ABSOLUTE PATH - not a name for the renderer to resolve again.
+        //
+        // It used to convert this path to one relative to the shader directory and hand THAT over, on the
+        // strength of an earlier measurement ("handing it an absolute path produced 'Shader file not
+        // found'"). That conversion is lossy in exactly the case that matters: a single-pass document's
+        // pass files are named `<name>.frag` and `<name>.common.glsl`, NOT `<name>/image.frag`, so the
+        // round trip could name a file that does not exist and the pass silently became empty. The
+        // renderer now accepts an absolute path as-is (GraphicsSettings::shaderPath), so the path computed
+        // here - the one that was just checked with QFileInfo::exists - is the one that gets compiled.
+        const GraphicsCompileResult result = renderer->buildAndInstallFrom(file, m_commonText, m_commonFile);
         if (!result.ok() && !result.installed) {
             GraphicsLog::error(QStringLiteral("pass programs: %1 did not build from %2; it stays an empty "
                                               "pass. %3")
@@ -95,6 +109,17 @@ bool GraphicsPassPrograms::create(const GraphicsDocument& document, const QStrin
 
         m_passes[i] = std::move(renderer);
     }
+
+    // WHAT EACH PASS RESOLVED TO, and what the Common contributed - one line, printed before the summary, so
+    // a report of "this pass is empty" can be read against the file that was actually looked for.
+    GraphicsLog::info(QStringLiteral("pass programs: document '%1' in %2; common %3; %4")
+                          .arg(document.name,
+                               document.singlePass ? QStringLiteral("single pass (.frag)")
+                                                   : QStringLiteral("pass directory"),
+                               m_commonFile.isEmpty()
+                                   ? QStringLiteral("none")
+                                   : QStringLiteral("%1 (%2 bytes)").arg(m_commonFile).arg(m_commonText.size()),
+                               looked.join(QStringLiteral("  "))));
 
     GraphicsLog::info(describe());
     return passCount() > 0;

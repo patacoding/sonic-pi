@@ -15,17 +15,12 @@
 #include "GraphicsDocuments.h"
 #include "GraphicsLog.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QRegularExpression>
 #include <QSettings>
-
-// Where the shader files live in the source tree. Set by CMake to the source-tree copy; the user copy
-// takes priority so the shipped files are never edited in place. Defined here rather than in
-// GraphicsRenderer because this module now owns the shader paths - see shaderPath().
-#ifndef GRAPHICS_SHADER_DIR
-#define GRAPHICS_SHADER_DIR ""
-#endif
 
 namespace SonicPi
 {
@@ -353,20 +348,71 @@ QString writableShaderPath(const QString& fileName)
     return shaderDirectoryPath() + QLatin1Char('/') + fileName;
 }
 
+QString shippedShaderDirectory()
+{
+    // WHERE THE SHADERS THAT SHIP WITH THE APPLICATION LIVE, resolved AT RUNTIME, beside the executable.
+    //
+    // This used to be a COMPILE-TIME ABSOLUTE PATH into the checkout, expanded by CMake at configure time
+    // (`GRAPHICS_SHADER_DIR`). That is wrong in three ways, and a packaged build shows all three at once:
+    //
+    //   * IT NAMES A DIRECTORY THAT ONLY EXISTS ON THE MACHINE THAT BUILT IT. Every other machine got a
+    //     fallback pointing at `C:/Users/<the builder>/...`, so a fresh install with no ~/.sonic-pi had no
+    //     shader at all - the graphics output could not start - and every failure message printed the
+    //     builder's home directory into the user's log. Measured on a packaged build:
+    //         renderer: shader 'default/image.frag' not found. Looked in:
+    //             <user home>/.sonic-pi/graphics/shaders/default/image.frag
+    //             C:/Users/<builder>/my/dev/.../app/gui/graphics/shaders/default/image.frag
+    //   * The files WERE copied next to the executable by CMake, but the compiled-in path did not point
+    //     there, so the copy was invisible to the code that needed it.
+    //   * It baked a developer's directory layout into a shipped binary.
+    //
+    // The candidates now, in order - all relative to the running executable, which is the one place every
+    // packager carries (the portable build ships `app/gui/build/Release/` wholesale; the MSI stages the same
+    // directory, and a full development build is no different):
+    //
+    //     <exe>/graphics/shaders      ← beside the executable
+    //     <exe>/../graphics/shaders   ← one level up, for a layout that keeps binaries in a subdirectory
+    //
+    // The second is what makes this independent of how deep the executable sits: Sonic Pi's own tree keeps
+    // it three levels down, and that is a packaging decision, not something this function should assume.
+    const QString beside = QCoreApplication::applicationDirPath() + QStringLiteral("/graphics/shaders");
+    if (QFileInfo::exists(beside))
+        return beside;
+
+    const QString oneUp = QDir(QCoreApplication::applicationDirPath() + QStringLiteral("/.."))
+                              .absoluteFilePath(QStringLiteral("graphics/shaders"));
+    if (QFileInfo::exists(oneUp))
+        return oneUp;
+
+    // Nothing found. The executable-relative path is the honest answer to report, because that is where a
+    // packaged copy belongs - and a message naming a path inside the installation is actionable, while one
+    // naming the build machine is not.
+    return beside;
+}
+
 QString shaderPath(const QString& fileName)
 {
+    // AN ABSOLUTE PATH IS ALREADY AN ANSWER. The callers that resolve a document's pass files know exactly
+    // which file they mean (that is what graphicsDocumentPassFilePath() computed), so re-resolving it against
+    // a directory can only lose information - and when the document is a single-pass .frag it DID lose it:
+    // the pass chain asked for "<name>/image.frag" while the file was "<name>.frag", which is the
+    // "shader 'default/image.frag' not found" this fixes.
+    if (QDir::isAbsolutePath(fileName))
+        return QFile::exists(fileName) ? fileName : QString();
+
     // User copy first: this is the one to edit, and editing it cannot dirty the source tree.
     const QString userPath = writableShaderPath(fileName);
     if (QFile::exists(userPath))
         return userPath;
 
-    // Then the copy shipped with the source, so a fresh checkout works without a copying step.
-    const QString shipped = QStringLiteral(GRAPHICS_SHADER_DIR) + QLatin1Char('/') + fileName;
+    // Then the copy shipped with the application.
+    const QString shipped = shippedShaderDirectory() + QLatin1Char('/') + fileName;
     if (QFile::exists(shipped))
         return shipped;
 
     return QString();
 }
+
 
 QString ensureShaderFile(const QString& fileName)
 {
@@ -374,7 +420,7 @@ QString ensureShaderFile(const QString& fileName)
     if (QFile::exists(target))
         return target;   // already the user's, and left exactly as they left it
 
-    const QString shipped = QStringLiteral(GRAPHICS_SHADER_DIR) + QLatin1Char('/') + fileName;
+    const QString shipped = shippedShaderDirectory() + QLatin1Char('/') + fileName;
     if (!QFile::exists(shipped))
     {
         GraphicsLog::warn(QStringLiteral("shader: no shipped copy of %1 to seed from (looked in %2)")

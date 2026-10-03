@@ -604,6 +604,22 @@ inline QList<GraphicsPass> graphicsDocumentPasses(const GraphicsDocument& docume
     return passes;
 }
 
+// Whether a NAME means a multi-pass document - a directory holding image.frag - rather than a single-pass
+// .frag whose file is `<name>.frag`.
+//
+// Asked by everything that is about to treat a name as a single-pass shader, because a document has no
+// `<name>.frag` BY DESIGN: seeding one, compiling one, or warning that one is missing are all wrong for a
+// document, and each of them did happen. The check is one file's existence, and it is the same rule
+// scanGraphicsDocuments() applies, so the two cannot disagree about what a document is.
+inline bool graphicsDocumentExists(const QString& shadersDir, const QString& name)
+{
+    if (name.isEmpty() || shadersDir.isEmpty())
+        return false;
+    const QDir root(shadersDir);
+    return QFileInfo::exists(root.filePath(name + QLatin1Char('/')
+                                           + graphicsDocumentImageFileName()));
+}
+
 // The FILE a pass's text lives in, whether or not it exists yet.
 //
 // `GraphicsDocument::passPath()` answers a different question - "which pass has text I can read" - and

@@ -15,6 +15,9 @@
 #include "GraphicsLog.h"
 #include "GraphicsSettings.h"
 #include "GraphicsTarget.h"
+// For the document vocabulary: a renderer has to be able to tell that a name means a directory of passes
+// rather than a single .frag, because compiling a document here is wrong rather than merely noisy.
+#include "GraphicsDocuments.h"
 
 // The `#include` expander. Header-only, GL-free and widget-free, so the rules it implements are
 // tested on their own in tools/settings-probe/shader-include-check.cpp rather than through a build of
@@ -24,6 +27,7 @@
 // file in a report. Pure text, so tools/settings-probe/shader-text-check.cpp covers it.
 #include "graphics/ShaderText.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -316,6 +320,30 @@ bool GraphicsRenderer::initialize(bool fallbackWhenNothingBuilds)
     if (!prepare())
         return false;
 
+    // A DOCUMENT IS NOT THIS RENDERER'S BUSINESS, and asking it to compile one is wrong rather than merely
+    // noisy: a document is a directory of passes (image.frag, bufferA.frag …) and there is no `<name>.frag`
+    // for the single-file path to read, so the compile fails, the built-in fallback is installed over a
+    // perfectly healthy document, and the log fills with a failure that is not one. Measured on a packaged
+    // build whose active buffer was a document:
+    //
+    //     renderer: shader 'default/image.frag' not found. Looked in: …
+    //     renderer: shader '<doc>.frag' not found. Looked in: …
+    //     renderer: the shader on disk did not build at startup; installing the built-in fallback
+    //
+    // The pass chain (GraphicsPassPrograms) compiles a document's passes; this renderer stays out of it and
+    // reports nothing, which leaves the picture to whatever is already running.
+    {
+        const QString directory =
+            QDir(GraphicsSettings::shaderDirectoryPath()).filePath(m_shaderName);
+        if (QFileInfo::exists(QDir(directory).filePath(graphicsDocumentImageFileName())))
+        {
+            GraphicsLog::info(QStringLiteral("renderer: '%1' is a document; its passes are compiled by the "
+                                             "pass chain, so this single-shader path does not touch it")
+                                  .arg(m_shaderName));
+            return true;
+        }
+    }
+
     // A shader that will not compile is reported but not fatal, and now it is not a blank output
     // either: at startup there is no previous program to keep, so the choice is a built-in fallback
     // shader or nothing at all. The fallback draws something unmistakably not the user's shader, so
@@ -405,10 +433,24 @@ QString GraphicsRenderer::resolveShaderPath(const QString& fileName) const
     const QString path = GraphicsSettings::shaderPath(fileName);
     if (path.isEmpty())
     {
-        GraphicsLog::error(QStringLiteral("renderer: shader '%1' not found. Looked in:\n  %2\n  %3")
+        // WHERE IT ACTUALLY LOOKED, with no build-machine paths in it, and WHAT IT MEANS.
+        //
+        // The old message named the source-tree directory the compiler was configured with, which on a
+        // packaged machine is somebody else's hard disk: a user read `C:/Users/<the builder>/my/dev/...` in
+        // their own log and had no way to tell whether it was their mistake or ours. The shipped directory
+        // is resolved relative to the running executable now, so this names a path that exists in the
+        // installation - and if it does not, that itself is the answer.
+        GraphicsLog::error(QStringLiteral("renderer: shader '%1' not found.\n"
+                                          "  the user's copy      : %2\n"
+                                          "  the shipped copy     : %3\n"
+                                          "  the shipped copy is the one installed with the application, "
+                                          "beside the executable (%4). If it is missing, the installation "
+                                          "is incomplete")
                                .arg(fileName,
                                     GraphicsSettings::writableShaderPath(fileName),
-                                    QStringLiteral(GRAPHICS_SHADER_DIR) + QLatin1Char('/') + fileName));
+                                    GraphicsSettings::shippedShaderDirectory()
+                                        + QLatin1Char('/') + fileName,
+                                    QCoreApplication::applicationDirPath()));
     }
     return path;
 }

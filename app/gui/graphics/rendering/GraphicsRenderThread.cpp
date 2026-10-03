@@ -456,12 +456,24 @@ void GraphicsRenderThread::setActiveShaderName(const QString& name)
 
     // Recorded, worded for what it is: this is the buffer the session STARTS on - the picture changes
     // only when a compile puts another buffer on screen (requestShaderCompile).
+    //
+    // A DOCUMENT IS NOT A MISSING FILE. The stored name may be a document - a directory holding image.frag -
+    // and then there is no `<name>.frag` by design: the passes are compiled from the directory. Asking for
+    // the single-file path anyway produced a warning on every start of a document session ("'<name>' has no
+    // file yet"), which reads as a fault and is not one. That is exactly the noise a log must not carry.
+    const QString directory =
+        QDir(GraphicsSettings::shaderDirectoryPath()).filePath(wanted);
+    if (QFileInfo::exists(QDir(directory).filePath(graphicsDocumentImageFileName())))
+    {
+        GraphicsLog::info(QStringLiteral("buffer: starting on the document '%1' (%2)")
+                              .arg(wanted, directory));
+        return;
+    }
+
     const QString path = GraphicsSettings::shaderPath(GraphicsSettings::fragmentFileName(wanted));
     if (path.isEmpty())
-        GraphicsLog::warn(QStringLiteral("buffer: starting on '%1', which has no file yet (looked for %2)")
-                              .arg(wanted,
-                                   GraphicsSettings::writableShaderPath(
-                                       GraphicsSettings::fragmentFileName(wanted))));
+        GraphicsLog::warn(QStringLiteral("buffer: starting on '%1', which has no file yet (looked in %2)")
+                              .arg(wanted, GraphicsSettings::shaderDirectoryPath()));
     else
         GraphicsLog::info(QStringLiteral("buffer: starting on '%1' (%2)").arg(wanted, path));
 }

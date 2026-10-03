@@ -32,6 +32,9 @@
 #include "graphics/rendering/GraphicsRenderThread.h"
 #include "graphics/rendering/GraphicsSettings.h"
 
+#include <QCoreApplication>
+#include <QFileInfo>
+
 #include "mainwindow.h"
 
 #include "widgets/sonicpilog.h"
@@ -200,6 +203,35 @@ int main(int argc, char* argv[])
         static SonicPi::GraphicsSharedFrameSlot gfxSharedFrame;
 
         auto* gfxThread = new SonicPi::GraphicsRenderThread(&app);
+
+        // WHAT THIS RUN IS, in one block, before anything can go wrong.
+        //
+        // Every question a reader of this file asks first is answered here rather than deduced: which
+        // executable is running and from where (an installed build and a build tree look identical
+        // otherwise), where the shader files come from (the user's copy or the one shipped beside the
+        // executable - the difference between "my edit did nothing" and "there is no shipped copy at all"),
+        // where the user's own files live, and which log this is.
+        //
+        // It is written as one block so that a report can be read top to bottom, and it is written BEFORE
+        // the render loop starts so that a crash later still leaves it behind.
+        {
+            SonicPi::GraphicsLog::info(QStringLiteral("run: executable %1 (%2)")
+                                           .arg(QCoreApplication::applicationDirPath(),
+                                                QCoreApplication::applicationFilePath()));
+            SonicPi::GraphicsLog::info(QStringLiteral("run: shaders shipped beside the executable: %1")
+                                           .arg(SonicPi::GraphicsSettings::shippedShaderDirectory()));
+            SonicPi::GraphicsLog::info(QStringLiteral("run: user files (edits, saves) : %1")
+                                           .arg(SonicPi::GraphicsSettings::shaderDirectoryPath()));
+            SonicPi::GraphicsLog::info(QStringLiteral("run: this log                 : %1")
+                                           .arg(SonicPi::GraphicsLog::filePath()));
+            const QFileInfo shippedProbe(
+                SonicPi::GraphicsSettings::shippedShaderDirectory() + QStringLiteral("/default.frag"));
+            SonicPi::GraphicsLog::info(QStringLiteral("run: shipped default.frag    : %1")
+                                           .arg(shippedProbe.exists()
+                                                    ? QStringLiteral("present")
+                                                    : QStringLiteral("ABSENT - the installation is incomplete")));
+        }
+
         // The frame rate ceiling, from Graphics' own settings file. 0 means no
         // explicit preference, so the renderer uses its default cap.
         //

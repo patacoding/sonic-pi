@@ -175,11 +175,22 @@ void setSpoutPublish(bool publish);
 
 // The file to READ for a given role. The user's copy when it exists, otherwise the shipped copy, and
 // an empty string when neither is present.
+//
+// An ABSOLUTE path is taken as already answered: the callers that resolve a document's pass files know
+// exactly which file they mean, and re-resolving it against a directory can only lose information.
 QString shaderPath(const QString& fileName);
 
 // The path the EDITOR should write to, whether or not the file exists yet: always the user's copy,
 // never the shipped one. Writing into the source tree is not something this feature does.
 QString writableShaderPath(const QString& fileName);
+
+// The directory holding the shader files that SHIP WITH THE APPLICATION, resolved at RUNTIME relative to the
+// executable - the compile-time source-tree path is a development fallback only.
+//
+// Public because it is the honest answer to two questions a packaged build asks: where a copy of the shaders
+// belongs, and where a lookup actually went. Compiling an absolute path into the binary is what made a
+// packaged build search the build machine for its own files.
+QString shippedShaderDirectory();
 
 // Make sure the editor has something to open: when the user's copy is missing, copy the shipped one
 // into place. Returns the writable path, or an empty string when there is no shipped copy to seed
