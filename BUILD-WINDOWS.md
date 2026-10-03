@@ -255,6 +255,29 @@ Or from anywhere using the full path:
 C:\dev\sonic-pi\app\build\gui\Release\sonic-pi.exe
 ```
 
+## 5. Making an installer (optional)
+
+This file is about running Sonic Pi from your build tree. To produce an
+**installer for a machine with nothing on it**, there is a separate, tested
+recipe in this repository:
+
+```
+install/windows/wix/BUILD_MSI.md     ← the authority: prerequisites, usage, checks
+install/windows/build-msi.bat        ← what it drives
+```
+
+It needs the **WiX v6 CLI** and a `vcredist_<arch>.exe`; the script finds the
+redistributable under your Visual Studio install, and the resulting MSI embeds
+it and installs it when the target machine lacks the VC++ runtime — so the
+person installing needs no prerequisites of their own. Run a **full** build
+first (`win-build-all.bat`, not `win-build-gui.bat`): the installer takes the
+GUI build output, the engine and the Qt deployment from the build tree, and the
+GUI-only build skips two of those.
+
+Two things it does not do: sign anything (see `install/windows/sign-payload.ps1`
+and set `SP_SIGN_CERT_NAME` if you have a certificate), and work without
+administrator rights — it is a per-machine install.
+
 
 ## Building for ARM64
 
