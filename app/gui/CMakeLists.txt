@@ -726,3 +726,25 @@ source_group(Qt\\AutoMoc REGULAR_EXPRESSION "(mocs_*|qrc_.*)" )
 # and editable where they are.
 target_compile_definitions(${APP_NAME} PRIVATE
     GRAPHICS_SHADER_DIR="${QTAPP_ROOT}/graphics/shaders")
+
+# AND THE FILES HAVE TO BE THERE AT RUNTIME, not only in the source tree.
+#
+# That compiled-in path is an absolute path into the checkout, and the comment above assumed it would still
+# be there when the application runs. For a build that stays in its tree that holds; for anything that is
+# PACKAGED it does not - and the symptom is quiet and total: a machine with no ~/.sonic-pi yet has no
+# graphics output at all, because the user copy does not exist and the shipped copy was never packaged.
+#
+# Measured, 2026-10-02: a portable build had NO shader files anywhere under its app/gui (the packager copies
+# the executable's output directory and nothing else), and neither the MSI recipe nor any install() rule
+# mentioned them. It went unnoticed here because this machine's ~/.sonic-pi was seeded by an older run.
+#
+# SO THEY ARE COPIED NEXT TO THE EXECUTABLE, which is the one place every packager already takes:
+#   * the portable build copies app/gui/build/Release wholesale;
+#   * the MSI stages the same directory.
+# The user copy still wins at runtime, so nothing about editing or overriding changes.
+add_custom_command(TARGET ${APP_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${QTAPP_ROOT}/graphics/shaders
+        $<TARGET_FILE_DIR:${APP_NAME}>/graphics/shaders
+    COMMENT "Copying the shipped shaders next to the executable")
+
