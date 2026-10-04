@@ -558,6 +558,18 @@ GraphicsCompileResult GraphicsRenderer::buildProgram(const QString& vertexFile,
     GraphicsCompileResult result;
     result.fragmentPath = resolveShaderPath(fragmentFile);
 
+    // REMEMBER IT HERE, because this is the only place that knows which file was read.
+    //
+    // adoptProgram()'s comment says the fragment path "is the one the compile just read", and its fallback
+    // re-resolves the file from `m_shaderName` for the benefit of "a hypothetical bare adoptProgram()". It
+    // was not hypothetical: nothing wrote this member, so EVERY compile took the fallback. For a plain
+    // buffer the fallback agrees by construction and the bug is invisible; for a DOCUMENT pass the buffer
+    // name is "<name>/<pass>" and there is no such file, so the fallback resolved to
+    // "<shaders>/<name>/<pass>.frag", logged "shader ... not found" about a file the compile had just read
+    // successfully, and left the member empty - which is why the pass summary printed "Image=empty" for a
+    // pass that had just compiled. Two symptoms, one line.
+    m_fragmentPath = result.fragmentPath;
+
     const QString vert = resolveShaderPath(vertexFile);
     const QString frag = result.fragmentPath;
     if (vert.isEmpty() || frag.isEmpty())
@@ -780,13 +792,22 @@ void GraphicsRenderer::adoptProgram(std::unique_ptr<QOpenGLShaderProgram> progra
     // Resolved from the same two names the compile used, so the paths reported to the user cannot
     // describe a different file from the one that was built.
     m_vertexPath = resolveShaderPath(QString::fromLatin1(kVertexShaderFile));
-    // The fragment path is the one the compile just read, NOT a second resolution from the buffer name:
-    // for a single-pass buffer the two agree by construction, and for a multi-pass pass only the compile
-    // knows which file of the document was read. Re-deriving it here would let the reported path name a
-    // different file from the compiled one - the exact confusion this pair of members exists to prevent.
-    // buildProgram always fills it in, so the fallback is only for a hypothetical bare adoptProgram().
+    // The fragment path is set by buildProgram(), which is the only place that knows which file was read:
+    // for a single-pass buffer the two agree by construction, and for a document pass only the compile
+    // knows which file of the document was read.
+    //
+    // IT IS NOT RE-DERIVED FROM `m_shaderName` HERE. A fallback used to do that "for a hypothetical bare
+    // adoptProgram()", and it was not hypothetical - nothing wrote the member, so every compile took it. For
+    // a plain buffer it agreed by construction and hid the bug; for a document pass the name is
+    // "<name>/<pass>" and the fallback resolved "<shaders>/<name>/<pass>.frag", a file that does not exist,
+    // so it logged a not-found error about the file the compile had JUST READ, and left the reported path
+    // empty. A renderer that arrives here without a path is a programming error, and saying so is more
+    // useful than a guess that names the wrong file.
     if (m_fragmentPath.isEmpty())
-        m_fragmentPath = resolveShaderPath(GraphicsSettings::fragmentFileName(m_shaderName));
+        GraphicsLog::error(QStringLiteral("renderer: no fragment path was recorded for '%1'; it is left "
+                                          "empty rather than guessed, because a guessed path would name a "
+                                          "different file from the compiled one")
+                               .arg(m_shaderName));
     cacheUniformLocations();
 }
 
