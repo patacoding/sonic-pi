@@ -155,7 +155,10 @@ export class LiveCore {
     p.tickMs += t1 - t0;
     p.tickMsMax = Math.max(p.tickMsMax, t1 - t0);
     p.statusMsMax = Math.max(p.statusMsMax, t2 - t1);
-    if (next < 0) { this.running = false; this.#deps.state?.(false); return; }
+    // Nothing scheduled, so nothing that could lose time: the last tick is forgotten. Kept, a tick long after (a
+    // Run, a cue) would take the clock's move since then for time lost, and hold the new run back by it: an engine
+    // rebuilt after the audio was away has its clock move on by the time away (a phone, 2026-09-28).
+    if (next < 0) { this.running = false; this.#lastNow = null; this.#deps.state?.(false); return; }
     const delay = Math.max(0, (next - now) * 1000);
     this.#expectedWake = performance.now() + delay;
     this.#timer = setTimeout(() => this.tick(), delay);
@@ -173,14 +176,6 @@ export class LiveCore {
     this.#runtime.module._sp_stop_job(job);
     this.#drain();
     this.#deps.ticked?.();
-  }
-
-  /** A subtree stops (Scheduler#stop_subtree): a thread with everything under it, or an fx block's threads and sounds. */
-  stopSubtree(uid, fade = 0) {
-    this.#runtime.module._sp_stop_subtree(uid, fade, this.#deps.now());
-    this.#drain();
-    this.#deps.ticked?.();
-    if (!this.running) { this.running = true; this.#deps.state?.(true); this.tick(); }
   }
 
   /**
@@ -204,6 +199,14 @@ export class LiveCore {
     else { this.running = true; this.#deps.state?.(true); this.tick(); }
   }
 
+  /** A run stops, by its job (Scheduler#stop_run): what is under it in the tree, faded over `fade` seconds and freed after. */
+  stopRun(job, fade = 0) {
+    this.#runtime.module._sp_stop_run(job, fade, this.#deps.now());
+    this.#drain();
+    this.#deps.ticked?.();
+    if (!this.running) { this.running = true; this.#deps.state?.(true); this.tick(); }   // the frees at the fade's end are the runtime's to send
+  }
+
   /** A group sits under another (Scheduler#group_under): the parent's stop takes it too. */
   groupUnder(group, parent) { this.#runtime.module._sp_group_under(group, parent); }
 
@@ -215,7 +218,10 @@ export class LiveCore {
     if (!this.running) { this.running = true; this.#deps.state?.(true); this.tick(); }   // the frees at the fade's end are the runtime's to send
   }
 
-  /** Every job stops where it stands; a sound still waiting on a load never goes. The session silences the engine. */
+  /**
+   * Every job stops where it stands; a sound still waiting on a load never goes, and nothing is sent. The session
+   * empties the engine's schedule, then silence().
+   */
   stop() {
     clearTimeout(this.#timer);
     this.#expectedWake = null;
@@ -229,6 +235,18 @@ export class LiveCore {
     this.#deps.ticked?.();
     this.#deps.state?.(false);
   }
+
+  /**
+   * After a Stop, once the engine's schedule is empty: what the runs are sounding fades out over `fade` seconds and
+   * goes, and the studio stays (Scheduler#silence). since: the engine's clock before the schedule was emptied.
+   */
+  silence(fade, since) {
+    this.#runtime.module._sp_silence(fade, since, this.#deps.now());
+    this.#drain();
+  }
+
+  /** The engine was made again: nothing the runtime made in the old one is in it (Scheduler#engine_lost). */
+  engineLost() { this.#runtime.module._sp_engine_lost(); }
 
   /** Link's tempo, changing a schedule-ahead from now, where the next sounds are made. */
   setLinkBpm(bpm) {

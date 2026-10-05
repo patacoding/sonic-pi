@@ -20,6 +20,11 @@
 //
 // It reads the runtime's process table (web/sonic_pi.js processTable): rows
 // of numbers straight out of the runtime's memory, every frame.
+//
+// It is for looking, and for finding a line: a click on a node takes the editor
+// to the line it is at. It changes nothing that plays — nothing here stops a
+// thread, a block or a run (a shift-click once did), so nothing here can be
+// done by accident. Stopping is the transport's, and a card's own buttons'.
 import { css } from "./theme.js";
 import { animateWhileShown } from "./ui/shown.js";
 import { perfAdd } from "./perf.js";
@@ -29,6 +34,9 @@ const SOUND_LINGER = 1.0;
 const isSound = (n) => n.kind === KIND.synth || n.kind === KIND.sample;
 export const STATE = { running: 0, sleeping: 1, waiting: 2, done: 3, error: 4, stopped: 5 };
 const MAX_ANIMATED = 200;
+// labels while few enough threads, runs and fx to read them: counted without the sounds (they have no label, and come
+// and go on every beat), off past the most, back only below fewer, so a count at the edge does not flash them
+const LABELS_OFF = 60, LABELS_ON = 48;
 const LINGER = 2.5;
 
 // Native's colours by kind: groups NumberForeground, synths
@@ -111,7 +119,7 @@ const STATE_WORDS = ["running", "sleeping", "waiting on sync", "done", "failed",
 
 /**
  * @param root element to fill
- * @param hooks { read() → process rows, or null with no session; now() → engine clock; jump(line, job); stop(uid) — a node's subtree stops (a run, a loop, an fx block) }
+ * @param hooks { read() → process rows, or null with no session; now() → engine clock; jump(line, job) }
  */
 export function createProcessTree(root, hooks) {
   const layout = new Map();   // id → {cx, cy, tx, ty, visc, seeded}
@@ -119,6 +127,7 @@ export function createProcessTree(root, hooks) {
   let lastKey = "";
   let lastStep = null;
   let labels = true;
+  let crowded = false;   // too many to label (LABELS_OFF, LABELS_ON)
   let hover = null;
   const screen = new Map();   // id → {x, y, r}
   const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)");
@@ -220,6 +229,8 @@ export function createProcessTree(root, hooks) {
       return;
     }
     const dense = nodes.length > MAX_ANIMATED;
+    const labelled = nodes.reduce((k, n) => k + (isSound(n) ? 0 : 1), 0);
+    crowded = labelled > (crowded ? LABELS_ON : LABELS_OFF);
     const margin = 26;
     const pw = Math.max(1, w - 2 * margin), ph = Math.max(1, h - 2 * margin - (labels ? 12 : 0));
     const px = (nx) => margin + nx * pw, py = (ny) => margin + ny * ph;
@@ -317,7 +328,7 @@ export function createProcessTree(root, hooks) {
         ctx.lineWidth = 1.5;
         ctx.stroke();
       }
-      if (labels && !dense && !sound && nodes.length <= 60) {
+      if (labels && !dense && !sound && !crowded) {
         ctx.fillStyle = css("mutedForeground");
         ctx.textAlign = "center";
         ctx.fillText(processLabel(n).replace(/^(live_loop|in_thread|with_fx) /, ""), x, y + r + 12);
@@ -330,14 +341,15 @@ export function createProcessTree(root, hooks) {
 
   function renderStats(rows) {
     const count = (f) => (rows || []).filter(f).length;
-    const swatch = (key, label, n) => `<span class="ptree-stat"><i style="background:${css(key)}"></i>${label} ${n}</span>`;
+    // each count in a box of its own width (style.css .ptree-n), so a count going from 9 to 12 moves nothing after it
+    const swatch = (key, label, n) => `<span class="ptree-stat"><i style="background:${css(key)}"></i>${label} <span class="ptree-n">${n}</span></span>`;
     const html = swatch("NumberForeground", "Runs", count((r) => r.kind === KIND.run && r.state === STATE.running))
       + swatch("FunctionMethodNameForeground", "Live loops", count((r) => r.kind === KIND.liveLoop && r.ended < 0))
       + swatch("KeywordForeground", "Named", count((r) => r.kind === KIND.named && r.ended < 0))
       + swatch("DoubleQuotedStringForeground", "Threads", count((r) => (r.kind === KIND.thread || r.kind === KIND.main) && r.ended < 0))
       + swatch("KeywordForeground", "FX", count((r) => r.kind === KIND.fx && r.ended < 0))
       + swatch("FunctionMethodNameForeground", "Synths", count((r) => isSound(r) && r.state === STATE.running))
-      + `<span class="ptree-stat ptree-waiting">waiting on sync ${count((r) => r.state === STATE.waiting)}</span>`;
+      + `<span class="ptree-stat ptree-waiting">waiting on sync <span class="ptree-n">${count((r) => r.state === STATE.waiting)}</span></span>`;
     if (stats.innerHTML !== html) stats.innerHTML = html;
   }
 
@@ -357,7 +369,6 @@ export function createProcessTree(root, hooks) {
       lines.push(state);
       if (n.kind !== KIND.run) lines.push(`beat ${Math.round(n.beat * 100) / 100} · ${Math.round(n.bpm * 10) / 10} bpm · ${n.events} sounds${n.redefs ? ` · redefined ${n.redefs}×` : ""}`);
     }
-    if (stoppable(n)) lines.push("shift-click: stop it, and everything under it");
     tip.textContent = lines.join("\n");
     tip.hidden = false;
     const x = Math.min(s.x + 12, wrap.clientWidth - tip.offsetWidth - 4);
@@ -382,14 +393,9 @@ export function createProcessTree(root, hooks) {
     if (hover == null) tip.hidden = true;
   });
   canvas.addEventListener("mouseleave", () => { hover = null; tip.hidden = true; });
-  // a node still going — a run, a loop, a thread, an fx block — can be stopped with everything under it (Scheduler#stop_subtree)
-  const stoppable = (n) => !!n && hooks.stop && n.uid > 0 && ((n.kind >= KIND.run && n.kind <= KIND.thread && n.state <= STATE.waiting) || (n.kind === KIND.fx && n.state < 3) || (n.kind === KIND.group && n.state === STATE.running));
   canvas.addEventListener("click", (e) => {
-    const id = nearest(e);
-    const n = nodes.find((x) => x.uid === id);
-    if (!n) return;
-    if (e.shiftKey && stoppable(n)) { hooks.stop(n.uid); tip.hidden = true; return; }
-    if (n.line > 0) hooks.jump(n.line, n.job);
+    const n = nodes.find((x) => x.uid === nearest(e));
+    if (n && n.line > 0) hooks.jump(n.line, n.job);   // the one thing a click does: the editor, at the node's line
   });
 
   animateWhileShown(root, draw, { onStop: () => { lastStep = null; } });

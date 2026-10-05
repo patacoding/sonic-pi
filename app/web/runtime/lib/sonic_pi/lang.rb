@@ -30,6 +30,7 @@ module SonicPi
     # when the synth ends (logical time), or for an fx, its with_fx frame
     attr_accessor :ends_at, :frame
     attr_accessor :frame_place   # live_audio's: the fx it sounds into (Scheduler#live_place)
+    attr_accessor :job           # live: the run whose place in the engine it is in (Scheduler#track)
     def initialize(name, args, info = nil, id = nil, ref = nil)
       @name = name
       @args = args
@@ -862,6 +863,10 @@ module SonicPi
       scsynth = info[:scsynth_name]
       __validate!(info, args_h, sn) if __local(:check_synth_args)
       return BlankNode.new(args_h) unless __should_trigger?(args_h)
+      # as native's on_start: the studio's random stream, which slicer, panslicer and wobble toss their probability:
+      # coins with (and winwood_lead sets its lfo's phase from), named as a sample is: Scheduler#audio_buffer numbers
+      # it, and the sound waits for it to load
+      args_h[:rand_buf] = Rand::FILES[:white] if info[:rand_buf]
       recorded = {}
       args_h.each { |k, v| recorded[k.to_s] = v }
       p = __p

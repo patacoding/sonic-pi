@@ -5,14 +5,13 @@
  * drawing and layout, a busy or throttled tab) never stands between a program
  * and its sounds. The mruby runtime ticks here on the worker's own timers,
  * which browsers do not throttle as they do a page's, and each sound goes straight to SuperSonic's
- * AudioWorklet through the OscChannel the page hands over. The page keeps what
- * only it can do: loading synthdefs and samples, which this worker asks for; the
- * engine's clock, which it posts here as anchors, since a worker cannot read an
- * AudioContext; and every view of the records, which it gets in batches.
+ * AudioWorklet through the OscChannel the page hands over, which also reads it the
+ * engine's clock. The page keeps what only it can do: loading synthdefs and samples,
+ * which this worker asks for, and every view of the records, which it gets in batches.
  * sonic_pi.js WorkerSession is the page's half.
  *
- * Page → worker: live {channel, clock}, clock {clock}, run {code, group},
- * stop, stopJob {job}, stopGroup {group, fade}, cue {address, args}, groupUnder {group, parent}, stopSubtree {uid, fade}, linkBpm {bpm}, timeWarp {ms}, loaded {synthdef|bufnum, ok}.
+ * Page → worker: live {channel, clock}, run {code, group},
+ * stop, silence {fade, since}, lost, stopJob {job}, stopGroup {group, fade}, stopRun {job, fade}, cue {address, args}, groupUnder {group, parent}, linkBpm {bpm}, timeWarp {ms}, loaded {synthdef|bufnum, ok}.
  * Worker → page: ready {version, samples} or failed {error}; reply {id, value|error};
  * batch {records, table, heap, perf, started, host, running, t0};
  * load {ops: [["synthdef", name, url?] | ["sample", bufnum, file] | ["free", bufnum, file]]};
@@ -22,21 +21,34 @@ import { loadRuntime, programTables, programSynthdefUrls, SUPERSONIC_BASE } from
 import { LiveCore } from "./live-core.js";
 import { decode } from "./osc.js";
 
-// What the page says before the runtime is up (the engine's egress: SuperSonic hands it over as it boots, beside
-// this worker's own start rather than after it) is held here, and handled in order once it is (the foot)
+// What the page says before the runtime is up is held here, and handled in order once it is (the foot) — all but
+// the engine's egress. SuperSonic hands that over as it boots, beside this worker's own start, and gives its reader
+// five seconds to answer (sab_transport.js #initWorker); over a slow link the runtime takes longer than that to
+// arrive, and the engine's boot failed ("OSC IN worker initialization timeout"). So the reader starts the moment the
+// port arrives, needing only SuperSonic's small osc_in_pump.js, and what it hears before the runtime is up waits
+// for egressFrames (the foot).
 const early = [];
-self.onmessage = (e) => early.push(e);
+const inPump = import(`${SUPERSONIC_BASE}osc_in_pump.js`).then((m) => m.runOscInPump);
+inPump.catch(() => {});   // said where it is used (readEgress)
+let egressFrames = null;  // (port, messages): the handler, once the runtime is up
+const heldFrames = [];
+let egressSeen = false;   // the engine is booting: :white is wanted as soon as the runtime can take it
+function readEgress(port) {
+  egressSeen = true;
+  inPump.then((run) => run({ name: "SonicPiEgress", endpoint: port, onFrames: (messages) => (egressFrames ? egressFrames(port, messages) : heldFrames.push([port, messages])) }))
+    .catch((e) => postMessage({ type: "error", error: `the engine's reader did not start: ${e?.message ?? e}` }));
+}
+self.onmessage = (e) => (e.data?.type === "egress" ? readEgress(e.data.port) : early.push(e));
 postMessage({ type: "alive" });   // a worker that runs modules: the engine may hand its egress here (main.js)
 
 const fail = (e) => postMessage({ type: "failed", error: String(e?.message ?? e) });
-let OscChannel, runOscInPump, midiInDecode, runtime;
+let OscChannel, midiInDecode, runtime;
 try {
   // all at once: over a slow link each is a round trip or two, and one after another they are seconds.
   // No random tables yet: :white arrives with the engine (the "live" message), the rest only if a program asks
   // for them. They are 840 kB each, and most programs draw from :white alone.
-  [{ OscChannel }, { runOscInPump }, { midiInDecode }, runtime] = await Promise.all([
+  [{ OscChannel }, { midiInDecode }, runtime] = await Promise.all([
     import(`${SUPERSONIC_BASE}osc_channel.js`),
-    import(`${SUPERSONIC_BASE}osc_in_pump.js`),
     import(`${SUPERSONIC_BASE}midi_event.js`),
     loadRuntime("./", { sources: [] }),
   ]);
@@ -45,12 +57,14 @@ try {
   throw e;
 }
 
-// ── The engine's clock, counted from the page's last anchor ──────────────
-// performance.timeOrigin + performance.now() is the same clock on the page
-// and here, so an anchor stays true however late its message arrives.
+// ── The engine's clock ─────────────────────────────────────────────────────
+// The channel reads it from the audio thread itself (Clockwork's OscChannel#now): the time the engine has reached,
+// once a block, standing still while the audio does, and the new engine's after a reload. It reads 0 until the engine
+// has rendered a block of its own; until then the page's reading as it handed the channel over stands in, counted on
+// by the wall clock (performance.timeOrigin + performance.now() is the same clock on the page and here).
 let anchor = null;
 const wall = () => performance.timeOrigin + performance.now();
-const now = () => anchor.ntp + (wall() - anchor.wall) / 1000;
+const now = () => channel?.now() || anchor.ntp + (wall() - anchor.wall) / 1000;
 
 // ── Loads, asked of the page: the Bridge's interface, answered by message ──
 class RemoteLoader {
@@ -164,32 +178,27 @@ const MIDI_IN = "/clockwork/midi/in/";
 const PAD_IN = "/clockwork/gamepad/in/", PAD_DEVICES = "/clockwork/gamepad/devices";
 const addressOf = (bytes) => { let n = 0; while (n < bytes.length && bytes[n] !== 0) n++; return n > 64 ? "" : String.fromCharCode.apply(null, bytes.subarray(0, n)); };
 
-function startEgress(port) {
-  runOscInPump({
-    name: "SonicPiEgress",
-    endpoint: port,
-    onFrames: (messages) => {
-      // Split first, and send the page's on their way BEFORE running any of ours. Nothing the engine says is
-      // for the runtime — its channel only writes — so these are the page's: a refusal to log, the ports, and
-      // the sends that make MIDI leave a port. Handling a cue means a tick, and a tick can be long; the page
-      // should not wait behind it for something that was never ours.
-      let keep = null, mine = null, pads = null;
-      for (const m of messages) {
-        const address = m.oscData ? addressOf(m.oscData) : "";
-        if (address.startsWith(MIDI_IN)) (mine ??= []).push(m.oscData);
-        else if (address.startsWith(PAD_IN)) (pads ??= []).push(m.oscData);
-        else {
-          if (address === PAD_DEVICES) padDevices(m.oscData);   // a cue here, and the page's list of controllers
-          (keep ??= []).push(m);
-        }
-      }
-      if (keep) port.postMessage({ type: "messages", messages: keep });
-      if (pads) { for (const b of pads) padIn(b); }
-      // A cue from outside, at the address Sonic Pi knows it by. What midiIn will not take (a tempo from a
-      // clock) goes on to the page after all.
-      if (mine) { let late = null; for (const b of mine) if (!midiIn(b)) (late ??= []).push({ oscData: b }); if (late) port.postMessage({ type: "messages", messages: late }); }
-    },
-  });
+// What the engine says, as its reader hears it (readEgress, above)
+function handleEgress(port, messages) {
+  // Split first, and send the page's on their way BEFORE running any of ours. Nothing the engine says is
+  // for the runtime — its channel only writes — so these are the page's: a refusal to log, the ports, and
+  // the sends that make MIDI leave a port. Handling a cue means a tick, and a tick can be long; the page
+  // should not wait behind it for something that was never ours.
+  let keep = null, mine = null, pads = null;
+  for (const m of messages) {
+    const address = m.oscData ? addressOf(m.oscData) : "";
+    if (address.startsWith(MIDI_IN)) (mine ??= []).push(m.oscData);
+    else if (address.startsWith(PAD_IN)) (pads ??= []).push(m.oscData);
+    else {
+      if (address === PAD_DEVICES) padDevices(m.oscData);   // a cue here, and the page's list of controllers
+      (keep ??= []).push(m);
+    }
+  }
+  if (keep) port.postMessage({ type: "messages", messages: keep });
+  if (pads) { for (const b of pads) padIn(b); }
+  // A cue from outside, at the address Sonic Pi knows it by. What midiIn will not take (a tempo from a
+  // clock) goes on to the page after all.
+  if (mine) { let late = null; for (const b of mine) if (!midiIn(b)) (late ??= []).push({ oscData: b }); if (late) port.postMessage({ type: "messages", messages: late }); }
 }
 
 // True when this worker has taken the message: only what it can act on. A tempo from a clock, and the ports,
@@ -278,9 +287,9 @@ let live = null;
 const handle = async ({ data: d }) => {
   try {
     switch (d.type) {
-      case "egress":   // the engine's reader lives here (bootEngine); the engine is booting, so :white is wanted
-        runtime.installTable("white").catch(() => {});   // on its way now, beside the engine's own start ("live" awaits it)
-        return startEgress(d.port);
+      case "egress":   // an engine made again after this worker was up (the one at boot is taken at the top)
+        runtime.installTable("white").catch(() => {});
+        return readEgress(d.port);
       case "live":
         anchor = d.clock;
         core = new LiveCore(runtime, deps);
@@ -293,7 +302,6 @@ const handle = async ({ data: d }) => {
         setInterval(flushSoon, 250);          // the process table lingers and prunes as time goes on
         await live;
         return reply(d.id, true);
-      case "clock": anchor = d.clock; return;
       case "loaded": return loader.loaded(d);
     }
     await live;                               // everything else waits for the engine
@@ -307,14 +315,16 @@ const handle = async ({ data: d }) => {
         return reply(d.id, { job, t0: core.t0 });
       }
       case "stop": core.stop(); flush(); return reply(d.id, true);
+      case "silence": core.silence(d.fade, d.since); return reply(d.id, true);   // the page has emptied the engine's schedule
+      case "lost": core.engineLost(); return reply(d.id, true);
       case "stopJob": core.stopJob(d.job); return;
       case "stopGroup": core.stopGroup(d.group, d.fade); flush(); return;
+      case "stopRun": core.stopRun(d.job, d.fade); flush(); return;
       // flushSoon, not flush: a flush builds the whole process table, and doing that for every message a
       // controller sends would put the worker behind its own inbox — messages queue up unseen and the sounds keep
       // coming seconds after the knob stops. The table is a view; it goes out with the next frame.
       case "cue": core.cue(d.address, d.args); flushSoon(); return;
       case "groupUnder": core.groupUnder(d.group, d.parent); return;
-      case "stopSubtree": core.stopSubtree(d.uid, d.fade); flush(); return;
       case "linkBpm": core.setLinkBpm(d.bpm); return;
       case "timeWarp": core.setTimeWarp(d.ms); return;
       case "hold": core.hold(d.seconds); return;
@@ -325,6 +335,9 @@ const handle = async ({ data: d }) => {
   }
 };
 
+egressFrames = handleEgress;
+for (const [port, messages] of heldFrames.splice(0)) handleEgress(port, messages);   // what the engine said meanwhile
+if (egressSeen) runtime.installTable("white").catch(() => {});   // the engine is booting: :white on its way ("live" awaits it)
 self.onmessage = handle;
 for (const e of early.splice(0)) handle(e);   // what came while the runtime was loading, in the order it came
 postMessage({ type: "ready", version: runtime.version, samples: runtime.samples });

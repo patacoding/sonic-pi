@@ -42,6 +42,11 @@ const escapeHTML = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "
 const optDocHTML = (s) => escapeHTML(s ?? "").replace(/`([^`]+)`/g, "<code>$1</code>");
 /** Native lists synths and FX by name: :dark_ambience is Dark Ambience. */
 export const titleCase = (key) => key.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+// A synth's or FX's name as shown, the same everywhere it is named (the list, the card's title, its module): its own
+// title, as native's docs have it (SC-808 Closed Hi-Hat), unless that runs words together, when its key is spelt out
+// instead. The list once made its names from the keys alone, and read "Sc808 Closed Hihat" beside a card saying
+// "SC-808 Closed Hi-Hat" (a reader's report, 2026-09-28).
+export const displayName = (p) => (/[a-z][A-Z]/.test(p.title) ? titleCase(p.key) : p.title);
 
 const svgIcon = (name) => icon({ play: "player-play", stop: "player-stop" }[name] ?? name, "");   // the one registry (icons.js)
 
@@ -125,7 +130,7 @@ const panelLabel = (name) => {
 /** TutDial::valueText: whole numbers on an integer step, else two places, trimmed. */
 export const dialText = (value, step) => (step >= 1 ? String(Math.round(value)) : String(Number(value.toFixed(2))));
 
-function dial(opt, onChange) {
+function dial(opt, onChange, { off = null } = {}) {   // off(): switched off (switchedDial): it says so, and is changed only when on
   let lo = opt.min, hi = opt.max;
   const step = Math.min(1, gridFor(lo, hi));
   if (opt.min_excl) lo += step;
@@ -172,17 +177,20 @@ function dial(opt, onChange) {
   label.setAttribute("aria-hidden", "true");   // the slider is named by aria-label already
   root.append(svg, val, label);
 
+  const isOff = () => !!off?.();
+  const changedNow = () => (off ? !isOff() : follows ? !paired : Math.abs(value - def) > step / 2);
   const paint = () => {
     const frac = (value - lo) / (hi - lo || 1);
     const angle = 135 + frac * 270;
-    fill.setAttribute("d", frac > 0.001 ? arc(135, angle) : "");
+    fill.setAttribute("d", frac > 0.001 && !isOff() ? arc(135, angle) : "");
     const a = (angle * Math.PI) / 180;
     pointer.setAttribute("cx", 24 + 18 * Math.cos(a));
     pointer.setAttribute("cy", 24 + 18 * Math.sin(a));
-    val.textContent = dialText(value, step);
+    val.textContent = isOff() ? "off" : dialText(value, step);
     root.setAttribute("aria-valuenow", String(value));
-    root.setAttribute("aria-valuetext", paired ? `${dialText(value, step)}, tracking ${follows}` : dialText(value, step));
-    root.classList.toggle("changed", follows ? !paired : Math.abs(value - def) > step / 2);
+    root.setAttribute("aria-valuetext", isOff() ? "off" : paired ? `${dialText(value, step)}, tracking ${follows}` : dialText(value, step));
+    root.classList.toggle("changed", changedNow());
+    root.classList.toggle("off", isOff());
     root.classList.toggle("paired", paired);
   };
   const set = (v, notify = true) => {
@@ -218,8 +226,9 @@ function dial(opt, onChange) {
     root,
     name: opt.name,
     get value() { return value; },
-    get changed() { return follows ? !paired : Math.abs(value - def) > step / 2; },
+    get changed() { return changedNow(); },
     text: () => dialText(value, step),
+    repaint: paint,
     reset: () => { if (follows) { paired = true; if (partner) set(partner.value, false); paint(); } else set(def, false); },
     set,
     follows,
@@ -227,6 +236,38 @@ function dial(opt, onChange) {
     pair(d) { partner = d; if (paired) { value = Math.min(hi, Math.max(lo, d.value)); paint(); } },
     /** Its partner has moved: paired, it moves with it. */
     follow() { if (paired && partner) set(partner.value, false); },
+  };
+}
+
+// An opt whose 0 is the synth's off, not a value to turn to (the data's "off": fx_bitcrusher's cutoff, whose filter
+// works only while cutoff > 0): its dial, with a switch on its corner. Off, the dial says so and the program leaves the
+// opt out, the synth's own default; on, the program says the dial's value. Turning the dial turns it on, from the top
+// of its range, the nearest to off. The switch is the dial's sibling, not inside it: two controls to a screen reader.
+function switchedDial(opt, onChange) {
+  let on = false;
+  const knob = dial({ ...opt, default: opt.max }, () => { if (!on) { on = true; paint(); } onChange(); }, { off: () => !on });
+  const sw = el("button", "switch pg-toggle dial-switch");
+  sw.type = "button";
+  sw.setAttribute("role", "switch");
+  sw.setAttribute("aria-label", `${opt.name} on`);
+  sw.title = `${opt.name}: on or off (off is the synth's own default)`;
+  sw.appendChild(el("span", "track")).setAttribute("aria-hidden", "true");
+  const root = el("div", "dial-switched");
+  root.append(knob.root, sw);
+  const paint = () => { sw.classList.toggle("on", on); sw.setAttribute("aria-checked", String(on)); knob.repaint(); };
+  sw.addEventListener("click", () => { on = !on; paint(); onChange(); });
+  paint();
+  return {
+    root,
+    name: opt.name,
+    get value() { return on ? knob.value : opt.off; },
+    get changed() { return on; },
+    text: () => (on ? knob.text() : String(opt.off)),   // off: 0, the synth's own off, should anything send it
+    reset: () => { on = false; knob.reset(); paint(); },
+    set: (v, notify = true) => { on = v !== opt.off; if (on) knob.set(v, false); paint(); if (notify) onChange(); },
+    follows: null,
+    pair() {},
+    follow() {},
   };
 }
 
@@ -355,7 +396,7 @@ export function createInstrument(p, isFx, hooks, deck, { fit = false, basic = tr
   // synth itself — its knobs and keys — the card's panel, the code they make the card's code, and the card's foot
   // (the words, Play and Stop with their rings, the strip of its sounds). `face` is the panel.
   const face = el("div", `pg-face${isFx ? " pg-fx" : ""}`);   // an FX's rack is a grid (style.css): few modules, no keys under them
-  const name = /[a-z][A-Z]/.test(p.title) ? titleCase(p.key) : p.title;
+  const name = displayName(p);
   const numeric = p.opts.map((o) => ranged(o, p.opts)).filter((o) => typeof o.min === "number" && typeof o.max === "number" && o.max > o.min && !o.name.endsWith("_slide") && !o.options);
   let shown = numeric;
   if (isFx) shown = [...numeric.filter((o) => o.name !== "mix" && o.name !== "amp"), ...numeric.filter((o) => o.name === "mix" || o.name === "amp")];
@@ -384,7 +425,7 @@ export function createInstrument(p, isFx, hooks, deck, { fit = false, basic = tr
       row.style.setProperty("--cols", opts.length <= 3 ? opts.length : Math.ceil(opts.length / 2));   // at most two rows: the faceplate stays short
       row.style.setProperty("--n", opts.length);   // all in one row, where a layout wants it (the home page's)
       for (const o of opts) {
-        const d = dial(o, update);
+        const d = o.off != null ? switchedDial(o, update) : dial(o, update);
         dials.push(d);
         row.appendChild(d.root);
       }
@@ -471,7 +512,10 @@ export function createInstrument(p, isFx, hooks, deck, { fit = false, basic = tr
   coreRegion.setAttribute("role", "group"); coreRegion.setAttribute("aria-label", "The basics");
   coreRegion.appendChild(el("span", "pg-module-name", isFx ? "Mix" : "Env"));   // a synth's core is its envelope; an FX's is how much of it is heard
   spareRegion.setAttribute("role", "group"); spareRegion.setAttribute("aria-label", `${isFx ? "The FX's" : "The synth's"} own`);
-  spareRegion.appendChild(el("span", "pg-module-name", titleCase(p.key)));
+  // named for its role, as the other modules are (Env, Out, In): the synth's own dials. The synth's name is the card's
+  // title; on the module it was one word too many, and a long one (SC-808 Closed Hi-Hat) either wrapped over the
+  // dials or, kept to a line, made the module a wide empty box
+  spareRegion.appendChild(el("span", "pg-module-name", isFx ? "FX" : "Synth"));
   basicLine.append(coreRegion, spareRegion);
   // note, amp and pan: every synth's, so every synth has them in the same place — beside Play and Stop, over the keys,
   // in Basic and All alike; the panel above is what differs from synth to synth. An FX's Out is the same idea: how
@@ -704,18 +748,26 @@ export function createInstrument(p, isFx, hooks, deck, { fit = false, basic = tr
     card.el.classList.toggle("edited", dials.some((d) => d.changed));   // the card's Reset shows
     if (isFx && demo.job != null) steerDemo();
   }
-  // The FX demo playing: a dial turned reaches the running FX at once (control, its slidable opts); one that cannot
-  // slide (a choice, a buffer size) starts the demo again with it. Throttled, so a drag is a stream, not a flood.
-  let steerTimer = null, steerRestart = false;
+  // The FX demo playing: a dial turned reaches the running FX at once (control, its slidable opts), throttled, so a
+  // drag is a stream, not a flood. One that cannot slide (a choice, a buffer size) starts the demo again with it, once,
+  // when it has come to rest: a drag through its values is one restart, not one a step, each cut off by the next.
+  let steerTimer = null, restartTimer = null;
+  const SETTLE = 300;   // ms a dial that cannot slide is left alone before the demo starts again with it
   const slides = new Set(p.opts.filter((o) => o.slidable).map((o) => o.name));
   const sent = new Map();
+  const moved = () => dials.some((d) => !slides.has(d.name) && sent.has(d.name) && sent.get(d.name) !== d.text());   // from what the demo started with
   function steerDemo() {
-    for (const d of dials) if (!slides.has(d.name) && sent.has(d.name) && sent.get(d.name) !== d.text()) steerRestart = true;
+    if (moved()) {
+      clearTimeout(restartTimer);
+      restartTimer = setTimeout(() => {
+        restartTimer = null;
+        if (demo.job != null && moved()) { demo.onStop?.(); setTimeout(() => demo.onRun?.(), 320); }   // a fresh FX with the new setting, once the old one has faded
+      }, SETTLE);
+    }
     if (steerTimer) return;
     steerTimer = setTimeout(() => {
       steerTimer = null;
-      if (demo.job == null) return;
-      if (steerRestart) { steerRestart = false; demo.onStop?.(); setTimeout(() => demo.onRun?.(), 320); return; }   // a fresh FX with the new setting, once the old one has faded
+      if (demo.job == null || restartTimer) return;   // a restart on its way takes every setting with it
       const args = dials.filter((d) => slides.has(d.name)).map((d) => `${d.name}: ${d.text()}`).join(", ");
       if (args) hooks.run(`use_real_time\nuse_debug false\ncontrol get(:docs_fx), ${args}`, { quiet: true });
     }, 40);
@@ -866,7 +918,7 @@ export function createDocs(root, ref, hooks) {
   }
 
   // ── Snippets: the code card (ui/card.js), named for the heading above it, numbered within its section ──
-  const deck = createDeck({ play: (code, opts) => hooks.play?.(code, opts) ?? hooks.run(code), stopGroup: hooks.stopGroup, group: hooks.group, scopeFrame: hooks.scopeFrame }, root);
+  const deck = createDeck({ play: (code, opts) => hooks.play?.(code, opts) ?? hooks.run(code), stopRun: hooks.stopRun, scopeFrame: hooks.scopeFrame }, root);
   const counts = new Map();
   function snippet(page, code, { runnable = true } = {}) {
     let h = page.lastElementChild;
@@ -882,7 +934,7 @@ export function createDocs(root, ref, hooks) {
     switch (section) {
       case "synths": case "fx": {
         // a program's own synths (load_synthdef, their metadata: synth-meta.js) first, under their own heading
-        const all = ref[section].pages.map((p) => ({ key: p.key, title: p.user ? p.title : titleCase(p.key), user: !!p.user })).sort((a, b) => a.key.localeCompare(b.key));
+        const all = ref[section].pages.map((p) => ({ key: p.key, title: p.user ? p.title : displayName(p), user: !!p.user })).sort((a, b) => a.key.localeCompare(b.key));
         const mine = all.filter((i) => i.user);
         return mine.length ? [{ group: "Your synths" }, ...mine, { group: "Sonic Pi's" }, ...all.filter((i) => !i.user)] : all;
       }
@@ -966,11 +1018,20 @@ export function createDocs(root, ref, hooks) {
     const grid = el("div", "sample-grid");
     for (const s of g.samples) {
       const row = el("div", "sample-row");
-      const play = button("sp-mini-btn sp-mini-icon", "", () => hooks.playSample(s));
+      // its button says it is loading until the sample is in (a first play fetches it): a wait worth showing only (style.css)
+      const preview = () => {
+        if (play.classList.contains("loading")) return;
+        play.classList.add("loading");
+        play.setAttribute("aria-busy", "true");
+        Promise.resolve(hooks.playSample(s)).finally(() => { play.classList.remove("loading"); play.removeAttribute("aria-busy"); });
+      };
+      const play = button("sp-mini-btn sp-mini-icon", "", preview);
       play.innerHTML = icon("player-play");
       play.title = `sample :${s}`;
       const code = renderCode(`sample :${s}`);
       row.append(play, code, button("sp-mini-btn", "Insert", () => hooks.insert(`sample :${s}`)));
+      // the whole row plays it, a bigger target than its button: all but Insert, and a selection being made in it
+      row.addEventListener("click", (e) => { if (!e.target.closest("button") && !String(getSelection()).trim()) preview(); });
       grid.appendChild(row);
     }
     page.appendChild(grid);
@@ -1049,7 +1110,7 @@ export function createDocs(root, ref, hooks) {
     flash: (job, line) => deck.flash(job, line),
     release: (job) => deck.release(job),
     get playing() { return deck.playing; },
-    groups: (live) => deck.groups(live),
+    runs: (live) => deck.runs(live),
     owns: (job) => deck.owns(job),
     record: (r) => deck.record(r),
     get starting() { return deck.starting; },

@@ -12,8 +12,8 @@
    quickly (Safari's double-tap zoom, over Play pressed again and again). Pinching still zooms. */
 button, a, [role="button"], .hg-button, label, summary { touch-action: manipulation; }
 /* the chips' one size: the docs pane's tabs, the bar's, the cards' (the big site buttons and mini buttons size themselves) */
-.seg button, .ic-tab { padding: 4px 12px; font: 600 var(--t-ui) var(--prose-font); line-height: normal; white-space: nowrap; }
-.sp-mini-btn { padding: 3px 10px; font: 600 var(--t-tiny) var(--prose-font); line-height: normal; white-space: nowrap; }   /* the same chip, small: the docs pane's play, insert and copy */
+.seg button, .ic-tab { padding: 4px 12px; font: 600 var(--t-ui) var(--prose-font); white-space: nowrap; }   /* font: its line-height normal too */
+.sp-mini-btn { padding: 3px 10px; font: 600 var(--t-tiny) var(--prose-font); white-space: nowrap; }   /* the same chip, small: the docs pane's play, insert and copy */
 .seg button, .ic-tab, .sp-mini-btn, .site-body .button {
   border: 2px solid var(--Button); border-radius: var(--r-m); background: none; color: var(--WindowForeground);
   font-weight: 600; text-decoration: none; cursor: pointer; box-shadow: none; text-shadow: none;
@@ -44,6 +44,10 @@ button, a, [role="button"], .hg-button, label, summary { touch-action: manipulat
 
 /* said to a screen reader, seen by no one */
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+/* a message said goes quiet after 10s (announce.js QUIET_AFTER): hidden from the reader by its own animation, which
+   changes nothing in the page, and taken out when the next is said */
+.sr-news > * { animation: sr-said 0s linear 10s forwards; }
+@keyframes sr-said { to { visibility: hidden; } }
 /* the first thing a keyboard reaches: past the bar to the page, shown only while it has the focus */
 .skip-link { position: fixed; top: 6px; left: 6px; z-index: 1000; padding: 8px 14px; border-radius: var(--r-m); background: var(--HighlightedBackground); color: var(--accentContrastText); font: 600 var(--t-ui) var(--prose-font); text-decoration: none; transform: translateY(-200%); }
 .skip-link:focus { transform: none; outline: 2px solid var(--Foreground); outline-offset: 2px; }
@@ -84,7 +88,7 @@ button, a, [role="button"], .hg-button, label, summary { touch-action: manipulat
 ::-webkit-scrollbar { width: 10px; height: 10px; background: transparent; }
 ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
 ::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
-::-webkit-scrollbar-thumb { background: var(--ScrollBar); background-clip: padding-box; border: 0 solid transparent; border-radius: 0; }
+::-webkit-scrollbar-thumb { background: none; background-color: var(--ScrollBar); background-clip: padding-box; border: 0 solid transparent; border-radius: 0; }
 ::-webkit-scrollbar-thumb:vertical { min-height: 24px; border-right-width: 2px; }
 ::-webkit-scrollbar-thumb:horizontal { min-width: 24px; border-bottom-width: 2px; }
 ::-webkit-scrollbar-thumb:hover { background-color: var(--ScrollBarHover); }

@@ -5,7 +5,7 @@
 //
 // The web build has no OSC in or out. MIDI comes in through Web MIDI and
 // shows as cues. Time is one global timeline every thread shares.
-import { SUPERSONIC_VERSION, supersonicVersion, PROCESS_FIELDS, engineWasm, workerSettled } from "./runtime.js";
+import { SUPERSONIC_BASE, SUPERSONIC_VERSION, supersonicVersion, PROCESS_FIELDS, engineWasm, workerSettled } from "./runtime.js";
 // the engine's side (sonic_pi.js, and with it SuperSonic): loaded with the runtime (startRuntime), so a page only read
 // never fetches it; `sp` is the module once it has arrived, for what runs only with an engine (oscSchedule)
 let sp = null;
@@ -28,15 +28,18 @@ import { pageFromMeta, pageFromSynthdef } from "./synth-meta.js";
 import { createQuickstart } from "./quickstart.js";
 import { createInsight, threadLabel } from "./insight.js";
 import { createFlightRecorder } from "./flight.js";
+import { createAudioTrail, trailText } from "./audio-trail.js";
 import { createLogs } from "./logs.js";
 import { createShortcuts, DEF, MODES, parseChord } from "./shortcuts.js";
 import { createShortcutEditor } from "./shortcuts-ui.js";
 import { createPageBar } from "./ui/pagebar.js";
 import { installTooltips } from "./tooltip.js";
-import { encodeCode, encodeDigits, decodeCode } from "./share.js";
+import { encodeCode, encodeDigits, decodeCode, loadShareCodec } from "./share.js";
 import { createShareMenu } from "./share-menu.js";
 import { createInfo } from "./info.js";
 import { announce, Announcement, setSpeakTransport } from "./announce.js";
+import { origin, deepActive, shadowPane, eachShadowRoot } from "./shadow.js";
+import { createLoadingStop } from "./loading-stop.js";
 import { icon } from "./icons.js";
 import { explainError, makeKnown } from "./friendly.js";
 
@@ -49,6 +52,7 @@ const store = {
 for (const t of [window, document.body]) t.addEventListener("scroll", () => { if (document.scrollingElement.scrollTop || document.body.scrollTop) { document.scrollingElement.scrollTop = 0; document.body.scrollTop = 0; } }, { passive: true });
 // native's tooltips, in place of the browser's, for every control with a title (tooltip.js)
 const tips = installTooltips(document.body);
+eachShadowRoot((root) => tips.watch(root));   // and in the editor's and the panes' shadow roots (shadow.js)
 // native's keyboard shortcuts, in the keymap the player picked (shortcuts.js; the keys, at the end)
 const keys = createShortcuts({ store });
 const json = async (path) => {
@@ -65,10 +69,26 @@ const el = (tag, cls, text) => {
 
 // ── Logs (native's Logs tab): each source says what it did from the moment the page loads ──
 
-const logs = createLogs($("logs-pane"), ["GUI", "Runtime", "Host", "SuperSonic"]);
+const logs = createLogs(shadowPane($("logs-pane")), ["GUI", "Runtime", "Host", "SuperSonic"]);   // in its shadow root (shadow.js)
+// What happened to the audio (audio-trail.js), kept on every page; and what the page before this one kept, when its
+// audio would not come back and Restart Sonic Pi reloaded it: its trail and its logs' last lines, shown here
+const audioTrail = createAudioTrail();
+const beforeRestart = audioTrail.taken();
+if (beforeRestart) {
+  for (const [name, lines] of Object.entries(beforeRestart.logs ?? {})) {
+    logs.add(name, `── before the restart (kept ${beforeRestart.kept}) ──`);
+    for (const line of lines) logs.add(name, `  ${line}`);
+    logs.add(name, "── this page ──");
+  }
+  logs.add("Host", `── the audio's trail before the restart: ${JSON.stringify(beforeRestart.state ?? {})} ──`);
+  for (const line of beforeRestart.trail ?? []) logs.add("Host", `  ${trailText(line)}`);
+}
 const describe = (v) => {   // a value as a line of log: a string as is, an error with its stack, anything else as JSON
   if (typeof v === "string") return v;
-  if (v instanceof Error) return v.stack || `${v.name}: ${v.message}`;
+  if (v instanceof Error) {   // its name and message, then its stack: WebKit's stack leaves the message out
+    const stack = v.stack ?? "";
+    return v.message && stack.includes(v.message) ? stack : `${v.name}: ${v.message}${stack ? `\n${stack}` : ""}`;
+  }
   try { return JSON.stringify(v); } catch { return String(v); }
 };
 const bytes = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.round(n / 1024)} KB`);
@@ -138,7 +158,7 @@ const versions = { runtime: null };
 // the foot, as native's status bar says it ("Sonic Pi v5.0 on Mac"): the version and where it runs, the rest in About
 const paintVersions = () => { $("info-versions").textContent = "Sonic Pi v5.0 on Web"; };
 paintVersions();
-supersonicVersion().then(paintVersions);   // the local build's version.json
+supersonicVersion().then(paintVersions, () => {});   // the local build's version.json (unreadable: the engine's boot says so)
 
 // ── Sound: the runtime loads now, the engine boots on the first gesture ───
 
@@ -195,11 +215,18 @@ const scope = new Scope($("scope-canvas"), { mode: window.matchMedia("(max-width
 // what SuperSonic says, from before it boots
 function listenEngine(engine) {
   const on = (event, fn) => engine.on?.(event, fn);
+  logOsc(engine);   // the Debug pane's OSC logs, from the boot on (oscLogs)
   on("debug", (m) => logs.add("SuperSonic", String(m?.text ?? "").replace(/\n$/, "")));
   on("error", (e) => logs.add("SuperSonic", `error: ${describe(e)}`));
   on("shutdown", () => logs.add("SuperSonic", "shutting down"));
   on("reload:start", () => logs.add("SuperSonic", "reloading"));
-  on("reload:complete", (d) => logs.add("SuperSonic", `reloaded${d?.success === false ? ": failed" : ""}`));
+  on("reload:complete", (d) => logs.add("SuperSonic", `reloaded${d?.success === false ? `: failed${d?.error ? ` (${describe(d.error)})` : ""}` : ""}`));
+  on("audiocontext:statechange", (d) => audioTrail.note("context", { state: d?.state }));
+  on("statechange", (d) => audioTrail.note("engine", { state: d?.state, previous: d?.previous, reason: d?.reason, ...(d?.error ? { error: describe(d.error) } : {}) }));
+  on("reload:start", () => { audioTrail.note("reload", { context: engine.audioContext?.state ?? null, ours: engine.audioContext === audioContext }); watchReload(engine); });
+  on("reload:complete", (d) => audioTrail.note("reloaded", { success: d?.success !== false, ...(d?.error ? { error: describe(d.error) } : {}), context: engine.audioContext?.state ?? null }));
+  on("resumed", () => audioTrail.note("resumed"));
+  on("error", (e) => audioTrail.note("error", { error: describe(e) }));
   on("ready", (d) => logs.add("Host", `SuperSonic ready: ${describe(d?.bootStats ?? {})}`));
   on("audiocontext:statechange", (d) => logs.add("Host", `audio context ${d?.state}`));
   on("audiocontext:interrupted", () => logs.add("Host", "audio context interrupted"));
@@ -215,8 +242,8 @@ function listenEngine(engine) {
   on("resumed", audioBack);
   on("reload:start", audioReloading);
   on("reload:complete", (d) => { if (d?.success !== false) audioReloaded(); else audioBroken(); });
-  on("loading:start", (d) => logs.add("Host", `loading ${d?.type} ${d?.name}`));
-  on("loading:complete", (d) => logs.add("Host", `loaded ${d?.type} ${d?.name}${d?.size ? ` (${bytes(d.size)})` : ""}`));
+  on("loading:start", (d) => { logs.add("Host", `loading ${d?.type} ${d?.name}`); if (d?.type !== "wasm") loadingStop?.begin(`${d?.type}:${d?.name}`, loadWeight(d)); });
+  on("loading:complete", (d) => { logs.add("Host", `loaded ${d?.type} ${d?.name}${d?.size ? ` (${bytes(d.size)})` : ""}`); loadingStop?.end(`${d?.type}:${d?.name}`); });
   on("buffer:pool:grown", (d) => logs.add("Host", `buffer pool grew to ${bytes(d?.totalCapacity ?? 0)}`));
 }
 
@@ -225,7 +252,7 @@ function listenEngine(engine) {
 // a card over everything, and that tap is the recovery: SuperSonic's recover(), inside it — a resume if the worklet
 // still answers, else a reload. One way back, asked for plainly: a tap or key meant for the code is never taken as a
 // resume. What the engine itself does on the page's lifecycle is Clockwork's (pageLifecycle, bootEngine).
-const RESUME_LABEL = globalThis.matchMedia?.("(pointer: coarse)").matches ? "Tap to resume" : "Resume sound";
+const RESUME_LABEL = globalThis.matchMedia?.("(pointer: coarse)").matches ? "Tap to resume" : "Resume audio";
 $("resume-go").textContent = RESUME_LABEL;
 const resumeCard = {
   why: "",
@@ -234,14 +261,14 @@ const resumeCard = {
     this.why = why;
     this.broken = broken;
     $("resume-why").textContent = why;
-    $("resume-title").textContent = broken ? "Sound stopped" : "Sound paused";
+    $("resume-title").textContent = broken ? "Audio stopped" : "Audio paused";
     $("resume-go").textContent = broken ? "Restart Sonic Pi" : RESUME_LABEL;
     $("resume-go").disabled = false;
     if ($("resume-overlay").hidden) {
       $("resume-overlay").hidden = false;
       $("resume-go").focus({ preventScroll: true });
-      setEngineStatus("sound paused: tap to resume", true);
-      logs.add("Host", `sound paused (${why}): asking for a tap`);
+      setEngineStatus("audio paused: tap to resume", true);
+      logs.add("Host", `audio paused (${why}): asking for a tap`);
     }
   },
   hide() {
@@ -252,46 +279,99 @@ const resumeCard = {
   get shown() { return !$("resume-overlay").hidden; },
 };
 $("resume-go").addEventListener("click", async () => {
-  if (resumeCard.broken) { location.reload(); return; }   // the buffers are kept (the editor's store): the page comes back as it was
+  if (resumeCard.broken) { keepAudioTrail("restart"); location.reload(); return; }   // the buffers are kept (the editor's store): the page comes back as it was
   if (!engineRef) return resumeCard.hide();
   const go = $("resume-go");
   go.disabled = true;
   go.textContent = "Resuming…";
-  const ok = await engineRef.recover().catch((e) => { logs.add("Host", `recovery failed: ${describe(e)}`); return false; });
-  logs.add("Host", `resume on a tap: ${ok ? "sound back" : "failed"}`);
+  const t0 = performance.now();
+  audioTrail.note("tap", audioState());
+  recovering = true;   // the card stays until the recovery has finished, whatever the context says on the way (audioBack)
+  const ok = await engineRef.recover().catch((e) => { logs.add("Host", `recovery failed: ${describe(e)}`); audioTrail.note("recover threw", { error: describe(e) }); return false; })
+    .finally(() => { recovering = false; });
+  audioTrail.note("tapped", { ok, ms: Math.round(performance.now() - t0), ...audioState() });
+  logs.add("Host", `resume on a tap: ${ok ? "sound back" : "failed"} (${Math.round(performance.now() - t0)} ms; ${JSON.stringify(audioState())})`);
   if (ok && engineRef.audioContext?.state === "running") audioBack();
   else if (engineRef.getEngineState?.() === "error" || engineRef.audioContext?.state === "closed") audioBroken();
-  else resumeCard.show("The sound did not come back yet. Try again.");
+  else resumeCard.show("The audio did not come back yet. Try again.");
 });
+// A recovery under way (the tap on the card): the card stays up, saying Resuming…, until it has finished. The context
+// can say it is running long before the audio is (iOS, after an interruption: running, and nothing rendering), and
+// a card put away then has the player pressing Run into an engine still being rebuilt, or one that never comes back.
+let recovering = false;
 function audioLost(how) {
   if (!engineRef) return;
-  resumeCard.show(how === "interrupted" ? "Another app or a call took the sound."
-    : how === "stopped" ? "The browser stopped Sonic Pi's sound."
-    : "The browser paused Sonic Pi's sound.");
+  audioTrail.note("lost", { how, ...audioState() });
+  if (recovering) return;   // the tap's own answer says what comes next
+  resumeCard.show(how === "interrupted" ? "Another app or a call took the audio."
+    : how === "stopped" ? "The browser stopped Sonic Pi's audio."
+    : "The browser paused Sonic Pi's audio.");
 }
 // A reload that failed (Clockwork took down what it built): nothing left to resume. Starting the page again is the
 // way back, and says so rather than offering a tap that cannot work.
 function audioBroken() {
-  resumeCard.show("The browser's audio could not be restarted. Your code is kept.", { broken: true });
+  audioTrail.note("broken", audioState());
+  resumeCard.show("Audio systems restarted.", { broken: true });
+  keepAudioTrail("broken");   // Restart Sonic Pi reloads the page: what led here goes with it, to the page after
+}
+// A reload the tap's recovery asked for: the quick resume failed, so our context is past saving, and the engine moves
+// to one Clockwork's recover() made in the tap. Ours is closed, as the engine's own would be: iOS, after an
+// interruption, lets no new context render while the dead one is still open (a phone's flight reports, 2026-09-28:
+// with ours left open the new one never started; closed, the audio was back a second after the tap). Clockwork leaves a
+// context the host made to the host. And the reload is watched for the trail: the context it leaves and the one it
+// moves to, each's state and clock, every half second until it ends.
+function watchReload(engine) {
+  const old = engine.audioContext, t0 = performance.now();
+  if (recovering && old && old === audioContext) {
+    audioTrail.note("closing ours", { state: old.state, clock: Math.round(old.currentTime * 1000) / 1000 });
+    old.close().then(() => audioTrail.note("closed ours"), (e) => audioTrail.note("closing ours failed", { error: describe(e) }));
+    audioContext = null;
+  }
+  const look = () => {
+    const now = engine.audioContext, t = (c) => (c ? Math.round(c.currentTime * 1000) / 1000 : null);
+    audioTrail.note("reloading", { ms: Math.round(performance.now() - t0), engine: engine.getEngineState?.() ?? null, moved: !!now && now !== old,
+      now: now?.state ?? null, nowTime: t(now), old: old?.state ?? null, oldTime: t(old), processed: engine.getMetricsArray?.()?.[0] ?? null });
+    if (engine.getEngineState?.() === "restarting" && performance.now() - t0 < 20000) setTimeout(look, 500);
+  };
+  setTimeout(look, 250);
+}
+// The audio as it stands, for the trail: the context's state and clock, the engine's state, and its audio thread's
+// process count (moving on, it is running)
+function audioState() {
+  const ac = engineRef?.audioContext;
+  return {
+    context: ac?.state ?? null,
+    contextTime: ac ? Math.round(ac.currentTime * 1000) / 1000 : null,
+    engine: engineRef?.getEngineState?.() ?? null,
+    processed: engineRef?.getMetricsArray?.()?.[0] ?? null,
+    visible: document.visibilityState,
+  };
+}
+// What the page after this one takes (audio-trail.js): the trail, the logs' last lines, and where the audio stands.
+// Kept again as the page goes (pagehide), with the last lines, under the reason it was first kept for
+let keptFor = null;
+function keepAudioTrail(why) {
+  keptFor ??= why;
+  why = keptFor;
+  audioTrail.keep({ why, state: { ...audioState(), userAgent: navigator.userAgent }, logs: Object.fromEntries(["Host", "SuperSonic", "Runtime", "GUI"].map((n) => [n, logs.recent(n, 150)])) });
 }
 function audioBack() {
+  if (recovering) return;   // the context running is not yet the audio back: the tap's recovery says when it is
   resumeCard.hide();
-  if (replayAfterReload.length) replayLost();   // a reload that came back suspended, now resumed
+  if (restartToSay) sayRestarted();   // a reload that came back suspended, now resumed
 }
 // The engine is reloading: everything that was playing went with the old
 // worklet, and the runtime must not keep scheduling into the one being built
-// (each sound would be refused, its groups gone), so a Stop now — which also
-// has the runtime make its studio again on the next Run.
+// (each sound would be refused, its groups gone), so a Stop now, and the runtime
+// told that its studio went too: the next Run makes it again. Nothing is played again
+// by itself once the audio is back: a Run starts the code from its beginning, not
+// where it was, and that is the player's to ask for; the page says so (sayRestarted).
 let audioRestarted = false;
-let replayAfterReload = [];   // the buffers' runs that were sounding when the engine went: played again once it is back
+let restartToSay = false;   // the engine was rebuilt: once the audio is back, the page says to press Run
 function audioReloading() {
-  replayAfterReload = [];
-  for (let n = 0; n < NUM_BUFFERS; n++) {
-    if (!liveGroups.includes(BUFFER_GROUP + n)) continue;
-    const last = [...programs.values()].reverse().find((p) => p.buffer === n);
-    if (last) replayAfterReload.push(last);
-  }
+  restartToSay = true;
   stop();
+  session?.engineLost();
   setEngineStatus("audio restarting…", true);
 }
 // The engine reloaded. Its own state came back through restoreClientState
@@ -302,33 +382,38 @@ function audioReloaded() {
   scope.attach(engineRef);
   attachNavScope(engineRef);   // the reload made a new audio context: the bar's scope and the stop's rings tap it
   audioIn.reconnect();          // and live_audio's input goes into the new engine
+  if (recovering) return;   // a reload the tap's recovery asked for: its answer puts the card away, or not
   // a context made without a gesture (iOS) starts suspended and says nothing: the card asks for the tap
   if (engineRef.audioContext?.state !== "running") { audioLost("suspended"); return; }
   resumeCard.hide();
-  replayLost();
+  sayRestarted();
 }
-// What was playing from the buffers, played again: the music carries on rather than the page asking for Run
-function replayLost() {
-  const again = replayAfterReload;
-  replayAfterReload = [];
-  if (!again.length) { audioRestarted = true; setEngineStatus("ready"); toast("the browser restarted the audio: press Run", true); return; }   // the status just says ready: the toast says what happened
-  for (const p of again) play(p.code, { buffer: p.buffer });
-  setEngineStatus("running");
-  toast("the browser restarted the audio: playing again");
-  logs.add("Host", `audio restarted: ${again.length} buffer${again.length > 1 ? "s" : ""} playing again`);
+// The audio back after the engine was rebuilt: the status just says ready, the toast says what happened
+function sayRestarted() {
+  restartToSay = false;
+  audioRestarted = true;
+  setEngineStatus("ready");
+  toast("Welcome back!", true);
+  logs.add("Host", "audio restarted: press Run to play again");
 }
 // Back to the tab: if the context says running but the audio thread has stopped counting (the worklet gone, with no
 // state change to tell of it), the card asks for the tap that recovers it. Nothing is started here: without a tap it
 // would be refused, or build a context born suspended.
 document.addEventListener("visibilitychange", async () => {
+  audioTrail.note(document.hidden ? "hidden" : "shown", engineRef ? audioState() : {});
   if (document.hidden || !engineRef || resumeCard.shown) return;
   if (engineRef.audioContext && engineRef.audioContext.state !== "running") { audioLost(engineRef.audioContext.state); return; }
-  if (!(await audioThreadAlive())) { logs.add("Host", "back to the tab: the audio thread has stopped"); audioLost("stopped"); }
+  const alive = await audioThreadAlive();
+  audioTrail.note("thread check", { alive, ...audioState() });
+  if (!alive) { logs.add("Host", "back to the tab: the audio thread has stopped"); audioLost("stopped"); }
 });
 // Back from the browser's back/forward cache: the engine was shut down when the page went (Clockwork's pagehide, so
 // nothing plays on with no page), and this page's session is built on it. The page starts again: the buffers are
 // kept, and the next tap boots the sound as a first visit's does.
+// the page going (a reload by hand, the tab closed) while a card says the audio has gone: what led there goes too
+window.addEventListener("pagehide", () => { audioTrail.note("pagehide"); if (resumeCard.shown) keepAudioTrail("pagehide"); });
 window.addEventListener("pageshow", (e) => {
+  if (e.persisted) audioTrail.note("pageshow", { persisted: true });
   if (e.persisted && engineRef?.getEngineState?.() === "stopped") location.reload();
 });
 /** Whether the engine's audio thread is running: its process count (Clockwork's metrics, slot 0) moving on. */
@@ -405,6 +490,12 @@ for (const type of ["pointerup", "touchend", "click", "keydown"]) addEventListen
   if (booting && !engineRef && audioContext && audioContext.state !== "running") audioContext.resume().catch(() => {});
 }, { capture: true, passive: true });
 
+// The bar's stop while a run waits on what it needs (loading-stop.js): the engine and the runtime (a weight of 3 each,
+// their megabytes), each synth (small) and each sample (by its size, where SuperSonic knows it). Made with the stop's
+// rings, below; a Stop pressed while it loads calls off the run it was loading for (play: stops)
+let loadingStop = null, stops = 0;
+const loadWeight = (d) => (d?.type === "sample" ? (d.size ? Math.min(3, Math.max(0.4, d.size / 400000)) : 1) : 0.3);
+
 // A tap that heads for the code (Launch Sonic Pi, the Code tab) starts the engine while it is a tap: a browser only
 // lets audio start inside a gesture, and by the first Run it has booted, so that Run sounds at once
 function warmEngine() { if (!session) ensureSession().catch(() => {}); }
@@ -413,6 +504,8 @@ async function ensureSession() {
   audioInGesture();   // now, in the press, before anything is awaited
   booting ??= (async () => {
     scopeBox.classList.add("booting");
+    loadingStop?.begin("engine", 3);
+    loadingStop?.begin("runtime", 3);
     setEngineStatus("booting SuperSonic...");
     status("Starting the audio engine…");   // native's splash says "Sonic Pi is starting": the first Run's wait is not silence
     // The runtime and the engine start side by side: over a slow link each is seconds of downloads and round trips,
@@ -421,7 +514,7 @@ async function ensureSession() {
     const wasmBytes = engineWasm();
     const w = startWorker();
     const runtimeP = startRuntime();
-    runtimeP.catch(() => {});   // awaited below, once the engine is up
+    runtimeP.then(() => loadingStop?.end("runtime"), () => {});   // awaited below, once the engine is up
     const m = await needEngineModule();
     const worker = w && (await w.alive) ? w.worker : null;
     const bytes = await wasmBytes;
@@ -441,6 +534,7 @@ async function ensureSession() {
       // glitches on a loaded machine
       ...(lowLatency.on ? { audioContextOptions: { latencyHint: 0 } } : {}),
     }, { beforeInit: listenEngine, runtime: worker ? { worker } : null });
+    loadingStop?.end("engine");
     const runtime = await runtimeP;
     // the worker's runtime could not load and the page's runs instead: the engine's egress went to a worker with no
     // runtime behind it, so what the engine says back (MIDI in, a controller) does not reach it. Rare; said, not hidden
@@ -482,6 +576,7 @@ async function ensureSession() {
     return await booting;
   } catch (e) {
     booting = null;
+    loadingStop?.cancel();
     setEngineStatus("Error - SuperSonic failed to boot", true);
     showError({ class: "BootError", message: String(e.message ?? e) });
     return null;
@@ -494,14 +589,12 @@ async function ensureSession() {
 let startingBuffer = null; // the buffer of a run whose head is running now
 let lastRun = null;        // { buffer, code, prefix } of the last run started
 // Groups (Scheduler#stop_group): a run belongs to one, and a group stops as one, with every group under it. A
-// buffer's runs are its own group under the buffers'; a card's runs are the card's (ui/deck.js asks for a fresh
-// one) under the cards'.
+// buffer's runs are its own group under the buffers', there for the session. The cards' runs are all in the one
+// group, the cards': a card has none of its own, and stops by its runs (ui/deck.js, Scheduler#stop_run).
 const BUFFERS_GROUP = 999, BUFFER_GROUP = 1000;   // buffer n's group is 1000 + n, under 999
-const CARDS_GROUP = 2000;                          // the cards count up from 2001, under 2000
-let cardGroups = CARDS_GROUP;
+const CARDS_GROUP = 2000;                          // every card's runs
 const groupsDeclared = new Set();   // told to this session (a new session starts over)
 const declareGroup = (s, group, parent) => { if (!groupsDeclared.has(group)) { groupsDeclared.add(group); s.groupUnder(group, parent); } };
-const nextCardGroup = () => ++cardGroups;
 // native's "Enable external synths and FX" (Studio preferences): every run starts use_external_synths true, on the
 // program's first line, so its line numbers stay its own
 const externalSynths = { on: store.get("sp-external-synths", false) };
@@ -515,12 +608,14 @@ const unknownOpts = { warn: store.get("sp-warn-unknown-opts", true) };
 // buffer, which is the cure for a machine that crackles under a heavy patch — and nothing at all in Safari, which
 // gives its smallest buffer either way.
 const lowLatency = { on: store.get("sp-low-latency", true) };   // read at the engine's boot
-async function play(code, { buffer = null, scopeSlot = null, group = buffer != null ? BUFFER_GROUP + buffer : 0 } = {}) {
+async function play(code, { buffer = null, scopeSlot = null, group = buffer != null ? BUFFER_GROUP + buffer : scopeSlot != null ? CARDS_GROUP : 0 } = {}) {   // a card's run is the one with a scope slot of its own
+  const asked = stops;
+  loadingStop?.expect();   // this run waits for its first sound: what loads under it holds the comet till then
   const s = await ensureSession();
-  if (!s) return null;
+  if (!s || stops !== asked) return null;   // Stop, pressed while it was starting, calls the run off
   try {
     startingBuffer = buffer;
-    if (buffer != null) declareGroup(s, group, BUFFERS_GROUP); else if (group > CARDS_GROUP) declareGroup(s, group, CARDS_GROUP);
+    if (buffer != null) declareGroup(s, group, BUFFERS_GROUP);
     // native's cards: the program inside a scope_out of its own, so the card's rings draw its own sound. A program
     // that opens with use_real_time (a live synth's key) keeps it ahead of the wrap: the scope_out made on the
     // sched-ahead clock (0.5s) would hold the note's sound back that long. The lines only swap places, so a line of the
@@ -609,7 +704,8 @@ const hooks = {
   },
   playChord: (notes) => play(`${realTime}play [${notes.join(", ")}], release: 1`),
   playScale: (notes) => play(`${realTime}[${notes.join(", ")}].each do |n|\n  play n, release: 0.2\n  sleep 0.15\nend`),
-  playSample: (name) => play(`${realTime}sample :${name}`),
+  // resolved once the sample is in, for the button that plays it to stop saying it is loading (docs.js renderSamples)
+  playSample: async (name) => { const job = await play(`${realTime}sample :${name}`); if (job != null) await session?.bridge?.sampleReady?.(name); return job; },
 };
 
 // ── Editor and buffers ────────────────────────────────────────────────────
@@ -679,6 +775,8 @@ async function run() {
 }
 
 function stop() {
+  stops++;   // a run still waiting for the engine to start does not start (play)
+  loadingStop?.cancel();
   insight.stopped(session?.clockNow() ?? null);
   session?.stop();
   loopScopes.clear();
@@ -686,7 +784,7 @@ function stop() {
   paintWaits([]);
   lastJobs = "";
   docs?.jobs([]);
-  for (const d of cardDecks()) d.groups([]);
+  for (const d of cardDecks()) d.runs([]);
   logInfo("Stopping all runs");
   logs.add("Runtime", "stopped all runs");
   announce("Stopped", false, Announcement.Transport);
@@ -733,10 +831,13 @@ const MAX_LOG = 4000;        // lines a pane remembers: nearly free, as only WIN
 const WINDOW = 150;          // lines in the document at once: a tall pane shows ~40
 
 // An entry is a line's data and how to build it; its node exists only while the line is in the window.
-const panes = new Map();     // box → { rows, first, pending, following, built }
+// The window is drawn in the box's shadow root (shadow.js: lines arriving as a program plays are out of sight of a
+// page-wide watcher's), and the box itself scrolls. It says when it has nothing to show (data-empty); an empty
+// pane stays blank.
+const panes = new Map();     // box → { rows, first, pending, following, built, inner }
 const paneOf = (box) => {
   let pane = panes.get(box);
-  if (!pane) panes.set(box, (pane = { rows: [], first: 0, pending: [], following: true, built: new Set() }));
+  if (!pane) panes.set(box, (pane = { rows: [], first: 0, pending: [], following: true, built: new Set(), inner: shadowPane(box) }));
   return pane;
 };
 let painting = false;
@@ -747,13 +848,14 @@ function drawPane(box, pane) {
   const first = pane.following ? Math.max(0, rows.length - WINDOW) : Math.min(pane.first, Math.max(0, rows.length - WINDOW));
   pane.first = first;
   const want = rows.slice(first, first + WINDOW);
-  const have = box.children;
+  box.toggleAttribute("data-empty", !rows.length);   // only as it changes: the same state is no change to the page
+  const have = pane.inner.children;
   let same = have.length === want.length;
   for (let i = 0; same && i < want.length; i++) same = have[i] === want[i].node;
   if (same) return;
   const batch = document.createDocumentFragment();
   for (const e of want) batch.appendChild(e.node ??= e.make());
-  box.replaceChildren(batch);
+  pane.inner.replaceChildren(batch);
   // a line that has left the window gives its node back; the buffer keeps only what the line says
   const keep = new Set(want);
   for (const e of pane.built) if (!keep.has(e)) e.node = null;
@@ -791,6 +893,7 @@ function append(box, entry) {
 // while the lines go on arriving underneath.
 const USER_SCROLL_MS = 1000;
 for (const box of [logBox, cueBox]) {
+  paneOf(box);   // its shadow root, from the start
   let userAt = -Infinity;
   const byUser = () => { userAt = performance.now(); };
   for (const ev of ["wheel", "touchmove", "pointerdown"]) box.addEventListener(ev, byUser, { passive: true });
@@ -811,7 +914,7 @@ for (const box of [logBox, cueBox]) {
 }
 
 // Clearing a pane drops its buffer too, or what it was keeping would come back on the next line.
-const forgetPending = (box) => { const p = panes.get(box); if (p) { p.rows.length = 0; p.pending.length = 0; p.first = 0; p.following = true; p.built.clear(); } };
+const clearPane = (box) => { const p = paneOf(box); p.rows.length = 0; p.pending.length = 0; p.first = 0; p.following = true; p.built.clear(); drawPane(box, p); };
 
 // Native's times: to four places, trimmed, a whole second as 270.0
 const fmtTime = (t) => { const x = Math.round(t * 10000) / 10000; return Number.isInteger(x) ? x.toFixed(1) : String(x); };
@@ -893,8 +996,8 @@ function addCue(path, data, t = null) {
   } });
 }
 
-$("log-clear").addEventListener("click", () => { forgetPending(logBox); logBox.textContent = ""; breakLog(); });
-$("cue-clear").addEventListener("click", () => { forgetPending(cueBox); cueBox.textContent = ""; });
+$("log-clear").addEventListener("click", () => { clearPane(logBox); breakLog(); });
+$("cue-clear").addEventListener("click", () => clearPane(cueBox));
 
 let errorLine = null;
 let shownError = null;   // what the card says (friendly.js), for Jump, Fix it and Copy
@@ -959,7 +1062,7 @@ function showError(r, { warning = false } = {}) {
   const e = explainError({ syntax, cls: r.class, message, line: atLine ?? 0, col: atCol, code: code ?? "", thread: r.name, fault: r.fault }, known);
   const line = code != null && e.line ? e.line : atLine;
   const where = [buffer != null ? `buffer ${buffer}` : null, line ? `line ${line}` : null].filter(Boolean).join(", ");
-  const title = warning ? "Heads up" : syntax ? "Syntax Error" : "Runtime Error";
+  const title = r.title ?? (warning ? "Heads up" : syntax ? "Syntax Error" : "Runtime Error");   // a link's own: Link Error (loadFromHash)
   shownError = { ...e, buffer, line, where, title, code, thread: r.name, warning };
 
   const card = $("error-pane");
@@ -1033,7 +1136,7 @@ $("err-fix").addEventListener("click", () => {
   if (!f || shownError.buffer !== editor.active || editor.lineText(f.line) !== shownError.code?.split("\n")[f.line - 1]) return paintFix();
   editor.applyFix(f);
   clearError();
-  toast(`Fixed line ${f.line}: Run to hear it`);
+  toast(`Fixed line ${f.line}`);
 });
 $("err-more").addEventListener("click", () => {
   const d = $("err-details");
@@ -1049,21 +1152,22 @@ $("err-copy").addEventListener("click", () => {
 });
 
 let lastJobs = "";
+let soundAt = -Infinity;   // the last sound sent (onRecord): a run's first note sounds before the status says it has a job
 let liveJobs = 0;   // for the leave prompt: a reload mid-performance asks first (Safari keeps Cmd+R for itself: a page cannot take it)
-let liveGroups = [];   // the runtime's live groups, as the last status said (a reload plays the buffers' again)
 function showJobs(s) {
   liveJobs = s.jobs.length;
-  liveGroups = s.groups;
   // sounding: a thread of any run still going, or a group still live — which counts a card's one-shot while its note
   // rings out and a reverb's tail, where no thread is left (the runtime's word, in the status)
-  const sounding = liveJobs > 0 || s.groups.length > 0;
-  if (document.body.classList.toggle("sounding", sounding) !== stopRings.live) stopRings.set(sounding);   // the bar's quiet stop shows, its rings on the mix
+  const sounding = liveJobs > 0 || s.groups.length > 0 || performance.now() - soundAt < 1000;
+  document.body.classList.toggle("sounding", sounding);   // the bar's quiet stop shows, its rings on the mix
+  const rings = sounding && !loadingStop?.showing;          // once the load's comet is off it (the first sound: onRecord)
+  if (rings !== stopRings.live) stopRings.set(rings);
   let pruned = false;
   for (const [node, sc] of loopScopes) if (!s.jobs.includes(sc.job)) { loopScopes.delete(node); pruned = true; }
   if (pruned) paintLoopScopes();
   paintWaits(s.threads || []);
   docs?.jobs(s.jobs);
-  for (const d of cardDecks()) d.groups(s.groups);   // a card's group gone quiet: the runtime says
+  for (const d of cardDecks()) d.runs(s.runs);   // a card's runs gone quiet: the runtime says
   insight.status(s);
   const key = JSON.stringify([s.jobs, s.named]);
   if (key === lastJobs) return;
@@ -1081,6 +1185,9 @@ const flight = createFlightRecorder({
   session: () => session,
   programs: () => [...programs.values()],
   versions: () => ({ language: "Sonic Pi v5.0.0", runtime: versions.runtime, supersonic: SUPERSONIC_VERSION }),
+  // what happened to the audio (audio-trail.js); what a run is still waiting to load, and the Host log's last lines (the
+  // loads asked and answered): a Run that made no sound on a phone (2026-09-28) was one held by its gate
+  extra: () => ({ audioTrail: audioTrail.lines, pendingLoads: session?.bridge?.pending?.() ?? null, hostLog: logs.recent("Host", 80), ...(beforeRestart ? { beforeRestart } : {}) }),
 });
 // off unless Preferences says otherwise: while it records, the page samples its clocks ten times a second
 if (store.get("sp-flight", false)) flight.start();
@@ -1103,7 +1210,7 @@ function readProcesses() {
     for (let f = 0; f < width; f++) row[PROCESS_FIELDS[f]] = table[i + f];
     if (row.kind === 9) {          // a group: one of the page's own, named for what it holds
       row.id = ""; row.name = "";
-      row.label = row.group === BUFFERS_GROUP ? "buffers" : row.group === CARDS_GROUP ? "cards" : row.group > CARDS_GROUP ? `card ${row.group - CARDS_GROUP}` : row.group >= BUFFER_GROUP ? `buffer ${row.group - BUFFER_GROUP}` : `group ${row.group}`;
+      row.label = row.group === BUFFERS_GROUP ? "buffers" : row.group === CARDS_GROUP ? "cards" : row.group >= BUFFER_GROUP ? `buffer ${row.group - BUFFER_GROUP}` : `group ${row.group}`;
     } else if (row.kind >= 6) {           // an fx or a sound, named by the record that started its synth
       const n = session.nodeName(row.node);
       row.id = "";
@@ -1122,9 +1229,8 @@ function readProcesses() {
 // the flight recorder's marks (glitches, late bundles, stalls) are the host's news
 flight.on((e) => { if (e.type === "mark") logs.add("Host", `${e.mark.kind}: ${e.mark.detail}`); });
 
-const insight = createInsight($("insight-pane"), {
+const insight = createInsight(shadowPane($("insight-pane")), {   // in its shadow root (shadow.js)
   processes: readProcesses,
-  stop: (uid) => session?.stopSubtree(uid, 0.25),   // the threads view: a node and everything under it, faded (Scheduler#stop_subtree)
   synthDefaults: (synth) => synthOpts.get(synth.replace(/^sonic-pi-/, "")) ?? null,
   now: () => session?.clockNow() ?? null,
   jump: (line, job) => {
@@ -1140,7 +1246,12 @@ const FLASHES = new Set(["synth", "control", "kill", "midi", "output", "cue"]);
 const cardDecks = () => [docs, quickstart, infoApi].filter(Boolean);
 
 function onRecord(r, at, stale = false) {
-  if (r.kind === "synth") navScope.wake?.();   // the bar's scope, resting in silence, draws the sound
+  if (r.kind === "synth") {
+    navScope.wake?.();   // the bar's scope, resting in silence, draws the sound
+    soundAt = performance.now();
+    if (!document.body.classList.contains("sounding")) refreshJobs();   // the first sound lights the stop now, not at the next status
+    loadingStop?.sounding();   // and its comet gives way to its rings
+  }
   flight.record(r);
   insight.record(r);
   if (stale) return;   // the past, after the page was held: kept above, painted nowhere (sonic_pi.js deliver)
@@ -1232,8 +1343,7 @@ const clipboard = async (text) => { try { await navigator.clipboard.writeText(te
 const paneHooks = {
   run: (code) => play(code),
   stop: (job) => session?.stopJob(job),   // the docs pane's sample buttons: one job
-  stopGroup: (group, fade) => session?.stopGroup(group, fade),
-  group: nextCardGroup,
+  stopRun: (job, fade) => session?.stopRun(job, fade),
   insert: (code) => { editor.insertAtCursor(code); status("Inserted at the cursor"); },
   copy: clipboard,
   playSample: hooks.playSample,
@@ -1310,13 +1420,16 @@ function setPanel(next) {
   showDebug(next === "debug");
 }
 // Debug, as native's: the engine's live metrics, SuperSonic's own <clockwork-metrics> reading its shared memory, a
-// few times a second and only while the pane shows. The element comes with the engine (supersonic/), and wants the
+// few times a second and only while the pane shows. The element comes with the engine (engine/), and wants the
 // engine to read: until it runs, the pane says how to start it. Under them native's two OSC logs: what was sent in,
 // every sender's (SuperSonic's out:osc, from its watcher on the ingress ring: the runtime's worker's sends too),
 // written out here with the page's own decoder, since out:text leaves bundles out and everything the runtime sends
-// is one; and what came back to this page (in:text). Both cost something only while listened to, so the logs start
-// when the pane is first opened, and keep on after. The node tree native has there is the Threads pane's.
-const oscLogs = createLogs($("debug-pane").querySelector(".debug-logs"), ["To SuperSonic", "From SuperSonic"]);
+// is one; and what came back to this page (in, written out the same way). Both listen from the engine's boot
+// (listenEngine), so what happened before the pane was opened is there to read when it is: a refusal from scsynth
+// (/fail "/s_new", "out of real time memory") is heard as a sound missing, and the pane is opened after. Hidden, the
+// logs keep the last 5000 entries a side and draw nothing (logs.js). The node tree native has there is the Threads
+// pane's.
+const oscLogs = createLogs(shadowPane($("debug-pane").querySelector(".debug-logs")), ["To SuperSonic", "From SuperSonic"], { shown: false });
 let oscLogged = null;   // the engine the logs listen to
 async function logOsc(engine) {
   if (!engine || oscLogged === engine) return;
@@ -1327,7 +1440,7 @@ async function logOsc(engine) {
     try { oscLogs.add("To SuperSonic", oscText(decode(d.oscData), d.timestamp)); }
     catch (e) { oscLogs.add("To SuperSonic", `<${d.oscData?.length ?? "?"} bytes: ${describe(e)}>`); }
   });
-  engine.on?.("in:text", (m) => { if (oscLogged === engine) oscLogs.add("From SuperSonic", m?.text ?? ""); });
+  engine.on?.("in", (m) => { if (oscLogged === engine) oscLogs.add("From SuperSonic", Array.isArray(m) ? oscText(m) : String(m)); });
 }
 // a message as SuperSonic writes one (/s_new "sonic-pi-beep", 1001, …; a blob by its size); a bundle its messages,
 // one a line, the first marked with how far ahead of its sending it is to sound (none: immediately)
@@ -1351,10 +1464,9 @@ let debugOn = false, debugLoaded = null;
 function showDebug(on) {
   debugOn = on;
   const el = $("debug-pane").querySelector("clockwork-metrics");
-  if (!on) return el.disconnect?.();
-  logOsc(engineRef);
-  requestAnimationFrame(() => oscLogs.shown());   // the tails that follow the end go there
-  debugLoaded ??= import(new URL("supersonic/metrics_component.js", location.href).href).catch((e) => { logs.add("Host", `the metrics did not load: ${describe(e)}`); });
+  if (!on) { oscLogs.hidden(); return el.disconnect?.(); }
+  requestAnimationFrame(() => { if (debugOn) oscLogs.shown(); });   // what waited while the pane was hidden, and the tails that follow the end go there
+  debugLoaded ??= import(`${SUPERSONIC_BASE}metrics_component.js`).catch((e) => { logs.add("Host", `the metrics did not load: ${describe(e)}`); });
   debugLoaded.then(() => {
     if (!debugOn || !engineRef) return;
     el.hidden = false;
@@ -1384,7 +1496,7 @@ function showHelpHint() {
   const btn = $("btn-help"), glyph = btn.querySelector(".tb-glyph");
   const el = document.createElement("div");
   el.id = "help-hint";
-  el.innerHTML = `<div class="hh-note" role="note"><p><strong>Welcome to the Sonic Pi code editor!</strong> Toggle the documentation by clicking this glyph.</p><button type="button" class="sp-mini-btn primary">Got it</button></div>`;
+  el.innerHTML = `<div class="hh-note" role="note"><p><strong>Welcome to Sonic Pi!</strong><br>Toggle the documentation by clicking this glyph.</p><button type="button" class="sp-mini-btn primary">Got it</button></div>`;
   btn.style.setProperty("--echo", glyph.style.getPropertyValue("--icon"));
   btn.classList.add("hinting");
   document.body.appendChild(el);
@@ -1484,6 +1596,50 @@ dragDivider($("drawer-divider"), (m) => {
   store.set("sp-sizes", sizes);
   quickstart?.render();
 }, (target) => { if ($("divider-grip").contains(target)) toggleBottom(); else if ($("divider-full").contains(target)) growBottom(); });
+// The sidebar's splitters, as native's: the scope's height, and the log's share of the room the log and the cues have,
+// remembered. Dragged, or from the keyboard, its arrows a step at a time (each a separator a screen reader can move).
+const sidebar = $("sidebar"), scopeDivider = $("scope-divider"), logDivider = $("log-divider");
+const laidOut = (id) => $(id).offsetHeight > 0;
+// the scope as tall as leaves the panes under it their heads: the metronome's whole height, the log's and cues' least
+const scopeMax = () => sidebar.clientHeight - ($("scope-section").offsetHeight - scopeBox.offsetHeight) - $("link-section").offsetHeight
+  - (laidOut("log-section") ? 30 : 0) - (laidOut("cue-section") ? 30 : 0) - 2;
+function setScopeHeight(px) {
+  const max = Math.max(40, scopeMax());
+  sizes.scope = Math.round(Math.max(40, Math.min(max, px)));
+  scopeBox.classList.remove("half");   // a height of its own, not the tap's half (the tap halves it again)
+  scopeBox.setAttribute("aria-pressed", "false");
+  sidebar.style.setProperty("--scope-height", `${sizes.scope}px`);
+  scopeDivider.setAttribute("aria-valuemin", "40");
+  scopeDivider.setAttribute("aria-valuemax", String(Math.round(max)));
+  scopeDivider.setAttribute("aria-valuenow", String(sizes.scope));
+  scopeDivider.setAttribute("aria-valuetext", `Scope ${sizes.scope} pixels high`);
+}
+function setLogShare(f) {
+  sizes.logShare = Math.round(Math.max(0.05, Math.min(0.95, f)) * 100) / 100;
+  sidebar.style.setProperty("--log-share", String(sizes.logShare));
+  sidebar.style.setProperty("--cue-share", String(1 - sizes.logShare));
+  logDivider.setAttribute("aria-valuemin", "0");
+  logDivider.setAttribute("aria-valuemax", "100");
+  logDivider.setAttribute("aria-valuenow", String(Math.round(sizes.logShare * 100)));
+  logDivider.setAttribute("aria-valuetext", `Log ${Math.round(sizes.logShare * 100)}%, cues ${Math.round((1 - sizes.logShare) * 100)}%`);
+}
+if (sizes.scope) sidebar.style.setProperty("--scope-height", `${sizes.scope}px`);
+if (sizes.logShare) setLogShare(sizes.logShare);
+const logShareAt = (y) => { const a = $("log-section").getBoundingClientRect(), b = $("cue-section").getBoundingClientRect(); return (y - a.top) / Math.max(1, b.bottom - a.top); };
+dragDivider(scopeDivider, (m) => setScopeHeight(m.clientY - scopeBox.getBoundingClientRect().top), () => store.set("sp-sizes", sizes));
+dragDivider(logDivider, (m) => setLogShare(logShareAt(m.clientY)), () => store.set("sp-sizes", sizes));
+for (const [divider, nudge] of [
+  [scopeDivider, (d) => setScopeHeight(scopeBox.offsetHeight + d * 10)],
+  [logDivider, (d) => setLogShare(logShareAt($("log-divider").getBoundingClientRect().top) + d * 0.05)],
+]) {
+  divider.addEventListener("keydown", (e) => {
+    const d = { ArrowUp: -1, ArrowDown: 1 }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    nudge(d);
+    store.set("sp-sizes", sizes);
+  });
+}
 // The help pane's − and +, as native's ZoomBar: the open pane's text a step
 // smaller or larger, 1.1× a step from −4 to +8 (dpi.h FontZoomFactor), each
 // panel one zoom for all its tabs, remembered.
@@ -1662,7 +1818,7 @@ document.body.classList.toggle("standalone", standalone);
 if (standalone || isIPhone) $("btn-zen").hidden = true;
 const fullscreenElement = () => document.fullscreenElement || document.webkitFullscreenElement;
 $("btn-zen").addEventListener("click", () => {
-  if (isIPad && !standalone) { editor.aside(); $("install-overlay").hidden = false; return; }
+  if (isIPad && !standalone) { editor.aside(); showDialog("install-overlay", true); return; }
   if (fullscreenElement()) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
   else {
     const root = document.documentElement;
@@ -1677,7 +1833,7 @@ const paintFullscreen = () => {
 };
 document.addEventListener("fullscreenchange", paintFullscreen);
 document.addEventListener("webkitfullscreenchange", paintFullscreen);
-$("install-close").addEventListener("click", () => { $("install-overlay").hidden = true; });
+$("install-close").addEventListener("click", () => showDialog("install-overlay", false));
 
 
 // Load, as native's, and its Load Set too: a buffer's code into a free buffer, a set (.sonicpi) as a set of its own
@@ -1690,7 +1846,7 @@ $("load-file").addEventListener("change", async () => {
   const base = file.name.replace(/\.(rb|txt|sonicpi)$/i, "");
   arrive(await file.text(), base, file.name, base);
 });
-$("install-overlay").addEventListener("click", (e) => { if (e.target === $("install-overlay")) $("install-overlay").hidden = true; });
+$("install-overlay").addEventListener("click", (e) => { if (e.target === $("install-overlay")) showDialog("install-overlay", false); });
 
 // ── The on-screen keyboard ────────────────────────────────────────────────
 // On an iPad or a phone the keyboard covers the page without resizing it:
@@ -1717,7 +1873,7 @@ const vv = window.visualViewport;
 if (vv) {
   const fitKeyboard = () => {
     const covered = window.innerHeight - vv.height;
-    const typing = !!document.activeElement?.closest?.(".cm-editor") || (!!editedCard && covered > 120);   // a caret tap's moment away from the card's code is still typing
+    const typing = !!deepActive()?.closest?.(".cm-editor") || (!!editedCard && covered > 120);   // a caret tap's moment away from the card's code is still typing
     document.documentElement.style.setProperty("--app-height", `${Math.round(vv.height)}px`);
     document.body.classList.toggle("keyboard-open", covered > 120 && typing);
     if (vv.offsetTop > 0) window.scrollTo(0, 0);
@@ -1740,7 +1896,8 @@ let toastTimer = null;
 // said as it is shown (politely; assertive for a failure), or, with null, only shown: something else has said it
 function toast(text, assertive = false, ms = 2000) {
   if (assertive !== null) status(text, assertive);
-  // in the status bar, as native's, for two seconds; where there is none (a phone, focus mode) it floats
+  ms = Math.max(ms, 1200 + String(text).length * 55);   // time to read it: about 18 characters a second
+  // in the status bar, as native's, for two seconds or its reading time; where there is none (a phone, focus mode) it floats
   if ($("statusbar").offsetParent !== null) {
     $("status-engine").textContent = text;
     $("status-engine").classList.remove("err");
@@ -1753,30 +1910,27 @@ function toast(text, assertive = false, ms = 2000) {
   t.style.setProperty("--toast-top", `${Math.round($("toolbar").getBoundingClientRect().bottom) + 8}px`);
   t.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (t.hidden = true), 1800);
+  toastTimer = setTimeout(() => (t.hidden = true), ms);
 }
 
 // ── Code arriving (workspace.js) ────────────────────────────────────────
 // From a link, a file or a card, it never goes over code that is there: a buffer's code takes a free buffer (or a set
-// of its own when every buffer has code), a set goes on top as a set of its own. Each says where it went, and what
-// it left alone.
+// of its own when every buffer has code), a set goes on top as a set of its own. Where it went is shown, not said: the
+// buffer or set opens under the caret (a toast saying so hid the code it opened, on a phone especially).
 function arrive(text, name, from, bufferName = "") {
   if (isSet(text)) {
     const r = workspace.openSet(text, { fallbackName: name || "Shared Set" });
     if (!r.ok) { toast(`${from} could not be opened: ${r.error}`, true, 8000); logs.add("Host", `${from} could not be opened: ${r.error}`); return false; }
-    toast(`opened the set "${r.name}"${r.description ? `: ${r.description.length > 90 ? r.description.slice(0, 89) + "…" : r.description}` : ""} · your other sets are under Sets`, false, r.description ? 6000 : 4000);
     return true;
   }
-  const was = workspace.active, r = workspace.openProgram(text, { name: name || "Shared Code", bufferName });
-  if (r.set) toast(`opened in a new set, "${r.set}": every buffer had code · your other sets are under Sets`, false, 5000);
-  else toast(r.buffer === was ? `opened in buffer ${r.buffer}` : `opened in buffer ${r.buffer} · buffer ${was} is as you left it`, false, 4000);
+  workspace.openProgram(text, { name: name || "Shared Code", bufferName });
   return true;
 }
 
 // Share or save (share-menu.js): the buffer showing or the whole set, as a link, a QR code or a file
 const linkTo = (code) => new URL(`${infoApi?.code.file ?? "code.html"}#code=${code}`, location.href).href;
 createShareMenu({
-  button: $("btn-share"), menu: $("share-menu"), clipboard,
+  button: $("btn-share"), menu: $("link-menu"), clipboard, ready: loadShareCodec,
   scopes: {
     buffer: {
       icon: "file-code", fileKind: ".txt",
@@ -1838,7 +1992,7 @@ const SPREAD_MAX = 48;
   const phoneWidth = matchMedia("(max-width: 760px)");
   phoneWidth.addEventListener("change", () => spread());
   const spread = () => {
-    const words = [...row.querySelectorAll(".ic-tab:not(.ic-tab-home)")];
+    const words = [...row.querySelectorAll(".ic-tab:not(.ic-tab-home, .ic-tab-code)")];   // a phone's: Code is a wide screen's word
     for (const w of words) w.style.marginLeft = w.style.marginRight = "";
     row.classList.remove("spread");
     if (!words.length || !phoneWidth.matches || getComputedStyle(row).flexGrow === "0" || !row.clientWidth) return;   // a wide screen: the words after the wordmark, left-aligned
@@ -1852,7 +2006,22 @@ const SPREAD_MAX = 48;
     words.forEach((w, i) => { w.style.marginLeft = `${i === 0 ? left : gap}px`; });
     words.at(-1).style.marginRight = `${Math.max(0, left - past)}px`;
   };
-  if (row) { new ResizeObserver(() => requestAnimationFrame(spread)).observe(row); document.fonts?.ready.then(spread); }
+  // Code as a word, a wide screen's: shown while the row has room for it, and put away when it has not (the bar's code
+  // icon is the way in either way). Measured with it in, so a window grown wide enough has it back. The bar is watched
+  // as well as the row: where the row takes only its words' room (the editor's, its scope after them), a wider
+  // window leaves the row as it was.
+  const fitCode = () => {
+    const code = row.querySelector(".ic-tab-code");
+    if (!code) return;
+    code.classList.remove("cramped");
+    if (!phoneWidth.matches && row.scrollWidth > row.clientWidth + 1) code.classList.add("cramped");
+  };
+  if (row) {
+    const fit = new ResizeObserver(() => requestAnimationFrame(() => { fitCode(); spread(); }));
+    fit.observe(row);
+    fit.observe(siteNav);
+    document.fonts?.ready.then(() => { fitCode(); spread(); });
+  }
 }
 let info = null, infoApi = null;   // the promise of the page made live, and what it resolved to
 function showSiteNav(on) {
@@ -1897,8 +2066,7 @@ function ensureInfo() {
     pick: pickTab,
     log: (text) => logs.add("Host", text),   // a page's first visit, timed (info.js)
     play: (code, opts) => play(code, opts),
-    stopGroup: (group, fade) => session?.stopGroup(group, fade),
-  group: nextCardGroup,
+    stopRun: (job, fade) => session?.stopRun(job, fade),
     scopeFrame,
     loopScopes: () => loopScopePrefs,   // the site's cards' loop scopes, as the preferences say
     now: () => session?.clockNow() ?? null,
@@ -1910,7 +2078,7 @@ function ensureInfo() {
     // QWERTY keys the instrument's while focus is in it
     instrument: (host, key, scroller) => {
       // the deck at once (the page keeps it); the instrument once the synth's page has arrived (the editor's data)
-      const deck = createDeck({ play: (code, opts) => play(code, opts), stopGroup: (group, fade) => session?.stopGroup(group, fade), group: nextCardGroup, scopeFrame }, scroller);
+      const deck = createDeck({ play: (code, opts) => play(code, opts), stopRun: (job, fade) => session?.stopRun(job, fade), scopeFrame }, scroller);
       // the synth's page of the reference: the page's own copy (scripts/build-site.mjs synth-page), else the reference's
       const own = host.querySelector("script.synth-page");
       const page = own ? Promise.resolve(JSON.parse(own.textContent)) : needReference().then(() => synths.pages.find((x) => x.key === key));
@@ -2036,8 +2204,15 @@ const stopRings = (() => {
       taps = { l: tap(0), r: tap(1), bufL: new Float32Array(1024), bufR: new Float32Array(1024), out: new Float32Array(2048) };
     },
     set(on) { live = on; if (on) rings.play(read); else rings.stop(); },
+    repaint: () => rings.repaint(),
   };
 })();
+loadingStop = createLoadingStop({
+  box: document.querySelector("#site-nav .sn-stop"), canvas: document.querySelector("#site-nav .sn-stop-rings"),
+  playing: () => stopRings.live,
+  // the load over: the rings take the canvas if anything sounds, else the stop is drawn at rest again
+  after: () => { const on = document.body.classList.contains("sounding"); if (on !== stopRings.live) stopRings.set(on); else if (!on) stopRings.repaint(); },
+});
 function attachNavScope(engine) {
   const ac = engine.audioContext ?? engine.node?.context;
   if (!ac || !engine.node || navScope.analyser?.context === ac) return;   // tapped already, unless a reload made the context new
@@ -2054,7 +2229,7 @@ function attachNavScope(engine) {
     const c = navScope.canvas, buf = navScope.buf;
     navScope.analyser.getFloatTimeDomainData(buf);
     const frame = { frames: buf.length, channels: 1, interleaved: buf, writePosition: ++navScope.cursor };
-    if (navScope.state.feed(frame, false) || !c.dataset.painted) { drawLoopScope(c, navScope.state); c.dataset.painted = "1"; }
+    if (navScope.state.feed(frame, false) || !c.dataset.painted) { drawLoopScope(c, navScope.state); c.dataset.painted ||= "1"; }   // said once: a write is a change to the page, even of the same value
     let loud = false;
     for (let i = 0; i < buf.length; i += 8) if (Math.abs(buf[i]) > 1e-4) { loud = true; break; }
     quiet = loud ? 0 : quiet + 1;
@@ -2065,9 +2240,15 @@ function attachNavScope(engine) {
 phoneMedia.addEventListener("change", () => { if (!phoneMedia.matches && document.body.dataset.drawer === "output") openDrawer(""); });
 // Info, as native's λ: a dialog about this Sonic Pi. The site is the bar's (sonic-pi.net, or the dialog's link).
 let aboutFrom = null;   // what had focus when the dialog opened: it gets it back on closing
+// A dialog up or down (about, install): <body> says whether one is (dialog-open), and so the editor's popups, in its
+// shadow root, stay under it (style.css)
+function showDialog(id, on) {
+  $(id).hidden = !on;
+  document.body.classList.toggle("dialog-open", !$("about-overlay").hidden || !$("install-overlay").hidden);
+}
 function showAbout(on) {
   const was = !$("about-overlay").hidden;
-  $("about-overlay").hidden = !on;
+  showDialog("about-overlay", on);
   $("btn-info").classList.toggle("on", on);
   if (!on) {
     if (was) editorReachable(true);
@@ -2076,7 +2257,7 @@ function showAbout(on) {
     aboutFrom = null;
     return;
   }
-  if (!was) aboutFrom = document.activeElement;
+  if (!was) aboutFrom = deepActive();   // the editor's content, in its shadow root, not its mount
   editorReachable(false);   // a modal dialog: Tab and a screen reader's cursor stay in it (aria-modal, index.html)
   editor.aside();   // its completion would float over the dialog
   $("about-v-sound").textContent = `SuperSonic ${SUPERSONIC_VERSION}`;
@@ -2175,13 +2356,13 @@ function loadFromHash() {
   // a link's code is the point: no pane beside it (the cards are for a fresh, empty opening)
   openDrawer("");
   editorFillsPhone();
-  try {
-    arrive(decodeCode(m[1]), "", "the link");
-  } catch (e) {
-    toast(`that link's code could not be read: ${describe(e)}`);
-    logs.add("Host", `the link's code could not be read: ${describe(e)}`);
-  }
   history.replaceState(null, "", location.pathname + location.search);
+  // one that can't be read says so on the error card, as a program's error does, until it's put away: what happened
+  // to it and what to do (friendly.js explainLink), not a line gone before it could be read
+  loadShareCodec().then(() => arrive(decodeCode(m[1]), "", "the link")).catch((e) => {
+    showError({ class: "LinkError", title: "Link Error", message: e?.message ?? String(e) });
+    logs.add("Host", `the link's code could not be read: ${describe(e)}`);
+  });
 }
 loadFromHash();
 window.addEventListener("hashchange", loadFromHash);
@@ -2243,7 +2424,7 @@ async function enableMidi() {
   if (midi) { store.set("sp-midi", true); midiPorts_(true); buildPrefs(); return midi; }
   if (!navigator.requestMIDIAccess) { toast("this browser has no Web MIDI"); return null; }
   if (!engineRef) await ensureSession().catch(() => {});      // MIDI hangs off the engine's front
-  if (!engineRef) { toast("MIDI needs the engine"); return null; }
+  if (!engineRef) { toast("MIDI error - audio engine isn't available"); return null; }
   try {
     // sysex is not asked for: it is what raises the browser's permission prompt, and nothing here reads or sends it
     midi = await engineRef.enableMidi({ requestAccess: () => navigator.requestMIDIAccess() });
@@ -2322,8 +2503,7 @@ function recordingUnavailable() {
 }
 async function toggleRecording() {
   if (recording) return stopRecording();
-  const why = recordingUnavailable();
-  if (why) return toast(why);
+  if (recordingUnavailable()) return toast("Recording error");   // the reason is the button's tooltip
   const s = await ensureSession();
   if (!s || !engineRef) return;
   try { engineRef.startCapture(); } catch (e) { return toast(`Recording: ${describe(e)}`, true); }   // assertive, as native's
@@ -2430,7 +2610,14 @@ const themeButton = siteNav.querySelector(".sn-theme"), themeMenu = $("theme-men
 function buildThemeMenu() {
   const st = theme.settings();
   themeMenu.textContent = "";
-  themeMenu.append(el("h2", "tm-title", "Colour theme"));
+  // its head: the title, and a close as the Share menu's (share-menu.js): the X at the top right closes it, and the
+  // focus goes back to the palette, as Escape's does
+  const top = el("div", "tm-top"), shut = el("button", "zoom-btn tm-close");
+  shut.type = "button"; shut.title = "Close"; shut.setAttribute("aria-label", "Close");
+  shut.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M10 10l4 4m0 -4l-4 4"/></svg>';
+  shut.addEventListener("click", () => { showThemeMenu(false); themeButton.focus(); });
+  top.append(el("h2", "tm-title", "Colour theme"), shut);
+  themeMenu.append(top);
   const grid = el("div", "scheme-grid");
   for (const s of theme.schemes()) {
     const b = el("button", `scheme-btn${s.id === st.scheme ? " active" : ""}`);
@@ -2618,9 +2805,10 @@ function buildPrefs() {
 // focused; a text field or a button keeps the keys it types or presses with;
 // a key on two commands runs neither, as in Qt, and says so.
 
-// native's commands the web build cannot do, so their keys say why
+// native's commands the web build cannot do: their keys are left to the browser (there is nothing to do, and nothing
+// worth a toast), and Preferences says why against each
 const UNAVAILABLE = {
-  Link: "Joining a Link network is native-only; the tempo and time warp work",
+  Link: "Link is a native-app only feature",
 };
 
 // the log, the cues and the toolbar's buttons, shown or hidden as native's View menu has them
@@ -2848,24 +3036,25 @@ document.addEventListener("keydown", (e) => {
   if (infoOpen()) return;     // the Info card is up: its cards have their own keys
   const hit = keys.match(e);
   if (!hit) return;
-  const target = e.target instanceof Element ? e.target : null;
+  const began = origin(e);   // inside the editor's shadow root, not its mount (shadow.js)
+  const target = began instanceof Element ? began : null;
   const kind = entryKind(target);
   const inSearch = !!target?.closest(".cm-search");
   if (kind && takesKey(kind, hit.chord, inSearch)) return;
   if (hit.ids.length > 1) {
     e.preventDefault();
-    if (!e.repeat) toast(`${keys.format(hit.chord)} is on ${hit.ids.length} commands, so none runs: see Preferences, Shortcuts`);
+    if (!e.repeat) toast(`${keys.format(hit.chord)} is already assigned to ${hit.ids.length} commands`);
     return;
   }
   const [id] = hit.ids;
   const editing = DEF.get(id).group === "Code";
   if (editing && !target?.closest(".cm-content") && !(inSearch && id.startsWith("Find"))) return;
   if (PLATFORM_KEYS[id] && keys.resolve(PLATFORM_KEYS[id]) === hit.chord) return;
+  if (UNAVAILABLE[id]) return;   // not the web's: the key stays the browser's
   e.preventDefault();
   e.stopPropagation();
   if (e.repeat && !editing && !REPEATS.has(id)) return;
-  if (UNAVAILABLE[id]) toast(UNAVAILABLE[id]);
-  else if (editing) editor.command(id, { inSearch });
+  if (editing) editor.command(id, { inSearch });
   else COMMANDS[id]?.();
 }, true);
 
