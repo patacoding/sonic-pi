@@ -1,44 +1,42 @@
-// ── Nothing of ours is on the page ──────────────────────────────────────────────────────────────────────────
+// Our layer's entry. index.html loads this file (one of the two lines that are the whole intrusion) and nothing
+// else of ours is on the page unless it is wired here, deliberately and one piece at a time.
 //
-// By request: every piece of graphics UI is out of the audio interface -- no canvas, no buttons, no panes, no
-// settings, no styles, not even a file fetched beyond this one. What is left in the page is the app's own
-// interface, untouched.
-//
-// The whole layer is kept in ./graphics/ (every file moved, nothing rewritten: graphics/gfx-layer.js is the
-// entry it always was). The page loads this file and nothing comes of it -- and the app's own record hook calls
-// window.sonicPiGfx?.record(…), which is a no-op when the object is not there, so the app runs exactly as it
-// shipped.
-//
-// Putting it back is deliberately a piece at a time: turn this on and the gate imports the layer, which is where
-// every part of it lives; or import one module from ./graphics/ directly to bring back only that part. The
-// build copies ./graphics/ into the artifact when this is true (tools/build-for-cdn.sh).
-export const GFX_ENABLED = false;   // the whole layer stays off
-export const EDITOR_TAB = true;     // ...except the editor, which is back on its own
+//   GFX_ENABLED  the whole original layer (graphics/gfx-layer.js) -- OFF, kept, one line away
+//   EDITOR_TAB   the pieces we are building now:
+//                  level 0  the render canvas, its own layer, three display states, one button
+//                  level 1  the Shadertoy page: documents, passes, channels, the values the music sends
+export const GFX_ENABLED = false;
+export const EDITOR_TAB = true;
 
 if (GFX_ENABLED) await import("./graphics/gfx-layer.js");
 
 if (EDITOR_TAB && !GFX_ENABLED) {
+  // ── level 0: the canvas, with its button (preview / fullscreen / hidden) ─────────────────────────────────
   let canvasView = null;
   try {
     const { createCanvasView } = await import("./gfx-canvas-view.js");
     canvasView = createCanvasView({ onSay: (t) => console.info(`Shadertoy — ${t}`) });
-  } catch (e) {
-    // loud, because a canvas that never appears is otherwise indistinguishable from one that draws nothing
+    window.sonicPiCanvas = canvasView;          // published before anything is compiled: a compile that throws
+  } catch (e) {                                 // must not take the object with it
     console.error(`Shadertoy — the canvas could not be created: ${e?.stack ?? e}`);
   }
-  // published BEFORE anything is compiled: a startup compile that throws must not take the object with it, or
-  // the picture is there and nothing can reach it (measured: window.sonicPiCanvas was undefined while every
-  // module had loaded fine)
-  if (canvasView) window.sonicPiCanvas = canvasView;
+
+  // ── level 1: the Shadertoy page, with its button (audio <-> shadertoy) ───────────────────────────────────
   try {
-    const { createEditorTab } = await import("./gfx-editor-tab.js");
-    createEditorTab({ log: (t) => console.info(`Shadertoy — ${t}`), canvasView });
-    // the startup document comes from the ORIGINAL model, not from a shape of my own (gfx-document.js)
+    const { createShadertoyPage } = await import("./gfx-shadertoy-page.js");
+    const page = createShadertoyPage();
+    window.sonicPiGfx = Object.assign(window.sonicPiGfx ?? {}, { page });
+    // the first document comes from the ORIGINAL model, and goes to the canvas so the preview is not black
     const { emptyDocument } = await import("./graphics/gfx-document.js");
-    const doc = emptyDocument("Alpha");
-    canvasView?.setPasses({ Common: doc.common, ...doc.passes }, doc.channels);
+    // a starter Image, so the editor is not empty and the preview draws something recognisable
+    const STARTER = `void mainImage(out vec4 c, in vec2 p) {
+    vec2 uv = p / iResolution.xy;
+    c = vec4(uv.x, uv.y, 0.5 + 0.5 * sin(iTime), 1.0);
+}
+`;
+    const doc = emptyDocument("Alpha", STARTER);
+    canvasView?.setPasses?.({ Common: doc.common, ...doc.passes }, doc.channels);
   } catch (e) {
-    console.error(`Shadertoy — the editor or the startup compile failed: ${e?.message ?? e}`);
-    try { canvasView.setPasses({ Image: "void mainImage(out vec4 c, in vec2 p) { c = vec4(p.x / iResolution.x, p.y / iResolution.y, 0.5, 1.0); }" }, []); } catch {}
+    console.error(`Shadertoy — the page could not be created: ${e?.stack ?? e}`);
   }
 }
