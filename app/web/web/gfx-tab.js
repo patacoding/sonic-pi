@@ -36,6 +36,12 @@ const STYLE = `
   /* On the audio page our editor must not be there at all -- not hidden by a stylesheet, not sitting in the
      app's drawer waiting to be opened, not even a rail button for it. Its elements are DETACHED (kept alive in
      JS, adopted by the tab) and the rest of our UI is off. Only the two buttons and the status line stay. */
+  /* Belt and braces: the editor is DETACHED by script while the tab is closed, and even if that ever fails --
+     a stale bundle, a changed order, a script error -- the stylesheet still refuses to show it. The audio page
+     must not be able to carry it under any circumstances. */
+  body:not([data-gfx-tab="open"]) #gfx-shader-pane { display: none !important; }
+  body:not([data-gfx-tab="open"]) #gfx-tab { display: none !important; }
+
   body[data-gfx-tab="closed"] #gfx-ext,
   body[data-gfx-tab="closed"] #gfx-ext-btn,
   body[data-gfx-tab="closed"] #gfx-hud,
