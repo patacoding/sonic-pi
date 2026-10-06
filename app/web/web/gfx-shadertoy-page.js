@@ -14,6 +14,42 @@ import { parseDirective } from "./graphics/gfx-directive.js";
 const TABS = [SHARED, ...PASS_ORDER];        // Common, Buffer A..D, Image  (Shadertoy's rows)
 const KINDS = ["none", "buffer", "image", "audio"];
 const KEY = "sp-gfx-sets";                   // the key the ORIGINAL pane reads and writes
+
+/** Built-in defaults, one per pass: Shadertoy's own pages are never blank and neither is this one. */
+const DEFAULTS = {
+  [SHARED]: `// Common: what every pass can call (no mainImage here).
+vec3 palette(float t) {
+    return 0.5 + 0.5 * cos(6.28318 * (t + vec3(0.0, 0.33, 0.67)));
+}
+`,
+  "Buffer A": `// Buffer A: drawn once per frame, read by Image through an iChannel.
+void mainImage(out vec4 c, in vec2 p) {
+    vec2 uv = p / iResolution.xy;
+    float w = 0.5 + 0.5 * sin(iTime + uv.x * 6.28318);
+    c = vec4(palette(w), 1.0);
+}
+`,
+  "Buffer B": `void mainImage(out vec4 c, in vec2 p) {
+    c = vec4(p / iResolution.xy, 0.5, 1.0);
+}
+`,
+  "Buffer C": `void mainImage(out vec4 c, in vec2 p) {
+    c = vec4(0.0, 0.0, 0.0, 1.0);
+}
+`,
+  "Buffer D": `void mainImage(out vec4 c, in vec2 p) {
+    c = vec4(0.0, 0.0, 0.0, 1.0);
+}
+`,
+  Image: `// Image: what the screen shows. iChannel0 is wired to Buffer A by default.
+void mainImage(out vec4 c, in vec2 p) {
+    vec2 uv = p / iResolution.xy;
+    vec3 col = texture(iChannel0, uv).rgb;
+    col *= 0.6 + 0.4 * sin(iTime);
+    c = vec4(col, 1.0);
+}
+`,
+};
 const STYLE = `
   #gfx-st { position: fixed; inset: 0; z-index: 99; display: none; flex-direction: column;
     background: var(--WindowBackground); color: var(--WindowForeground);
@@ -76,7 +112,11 @@ export function createShadertoyPage() {
       const set = raw ? (raw.documents ? deserializeSet(raw) : raw) : null;
       if (set?.documents?.length) return set;
     } catch {}
-    return { documents: [emptyDocument("Alpha")], current: 0, name: "My Set" };
+    const d = emptyDocument("Alpha", DEFAULTS.Image);
+    d.common = DEFAULTS[SHARED];
+    for (const pass of PASS_ORDER) d.passes[pass] = DEFAULTS[pass] ?? "";
+    d.channels[0] = { kind: "buffer", pass: "Buffer A" };        // the wiring the default Image expects
+    return { documents: [d], current: 0, name: "My Set" };
   };
   const set = load();
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(serializeSet(set))); } catch {} };
@@ -175,15 +215,32 @@ export function createShadertoyPage() {
         box.appendChild(sel);
       } else if (ch.kind === "image") {
         const f = document.createElement("input");
-        f.type = "file"; f.accept = "image/*";
-        f.title = ch.name ? `${ch.name} (the picture is asked for again, not stored)` : "choose a picture";
-        f.addEventListener("change", async () => {
+        f.type = "file"; f.accept = "image/*"; f.dataset.pick = String(i);
+        f.title = ch.name ? `choose ${ch.name} again` : "choose a picture";
+        f.addEventListener("change", () => {
           const file = f.files?.[0];
           if (!file) return;
-          ch.name = file.name; save(); paintChannels();
-          say(`iChannel${i} ← ${file.name}. The picture is not kept in storage: this page asks for it again when it loads.`);
+          const rd = new FileReader();
+          rd.onload = () => {
+            ch.name = file.name; ch.data = String(rd.result);       // in memory: storage keeps CODE only
+            save(); paintChannels();
+            say(`iChannel${i} ← ${file.name} (${Math.round(String(ch.data).length / 1024)} KB, in memory — a reload asks for it again)`);
+          };
+          rd.onerror = () => say(`could not read ${file.name}`, true);
+          rd.readAsDataURL(file);
         });
         box.appendChild(f);
+        if (ch.data) {
+          const img = document.createElement("img");                 // the picture itself, small: proof it took
+          img.src = ch.data; img.alt = ch.name ?? "channel picture";
+          img.title = ch.name ?? "";
+          img.style.cssText = "width:28px;height:28px;object-fit:cover;border:1px solid var(--WindowBorder);border-radius:4px";
+          box.appendChild(img);
+        } else if (ch.name) {
+          const need = document.createElement("span");
+          need.className = "n"; need.textContent = `${ch.name} (choose it again)`;
+          box.appendChild(need);
+        }
       } else if (ch.kind === "audio") {
         const sel = document.createElement("select");
         for (const band of ["fft", "wave", "scope"]) { const o = document.createElement("option"); o.value = band; o.textContent = band; o.selected = ch.band === band; sel.appendChild(o); }
@@ -212,7 +269,11 @@ export function createShadertoyPage() {
   });
 
   el.querySelector("#gfx-st-add").addEventListener("click", () => {
-    set.documents.push(emptyDocument(uniqueName(set.documents.map((d) => d.name ?? ""), "Shader")));
+    const made = emptyDocument(uniqueName(set.documents.map((d) => d.name ?? ""), "Shader"), DEFAULTS.Image);
+    made.common = DEFAULTS[SHARED];
+    for (const pass of PASS_ORDER) made.passes[pass] = DEFAULTS[pass] ?? "";
+    made.channels[0] = { kind: "buffer", pass: "Buffer A" };
+    set.documents.push(made);
     set.current = set.documents.length - 1; save(); paintAll();
   });
   el.querySelector("#gfx-st-rename").addEventListener("click", () => {
