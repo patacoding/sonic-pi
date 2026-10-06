@@ -369,6 +369,7 @@ function install() {
   window.sonicPiSynth = synthHost;
 
   const sections = () => [
+    // a section of ours that is switched off returns null (see OWN_SYNTH in synth-host.js)
     synthHost.host.panelSection(),
     synthHost.host.synthdefSection(),
     {
@@ -462,7 +463,7 @@ function install() {
         { kind: "note", text: "The rest of the desktop graphics feature lands in this panel, one section each." },
       ],
     },
-  ];
+  ].filter(Boolean);
 
   const ui = createPanel({
     title: "Extensions",

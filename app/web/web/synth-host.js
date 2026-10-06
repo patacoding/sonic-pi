@@ -54,6 +54,14 @@ export async function runWhenReady(session, code, { tries = 120, wait = 500, onW
   throw last ?? new Error("the runtime never became ready");
 }
 
+/**
+ * OUR OWN SYNTHESISER (the AudioWorklet DSP, its editor UI, its `puts :synth, :note` directives and the
+ * measuring tap) is KEPT but NOT ENABLED: its code stays in the tree, one switch brings it back, and nothing
+ * of it is built into the flow while this is false. The SynthDef service and its editor pane are a different
+ * feature (they drive SuperCollider's own engine) and stay on.
+ */
+export const OWN_SYNTH = false;
+
 export function createSynthHost({ say = null, problem = null, section = null } = {}) {
   const text = (t) => (say ? say(`Synth — ${t}`) : console.info(`Synth — ${t}`));
   const warn = (t) => (problem ? problem(t) : console.warn(t));
@@ -121,6 +129,7 @@ export function createSynthHost({ say = null, problem = null, section = null } =
         return;
       }
       if (d.command === "off") { synth.noteOff(d.note, { when: delay() }); if (d.verbose) text(`off ${d.note}`); return; }
+      if (!OWN_SYNTH) return;                 // :synth, :note/off/cutoff/... belong to the synth that is off
       if (d.command === "alloff") { synth.allNotesOff({ when: delay() }); if (d.verbose) text("all notes off"); return; }
       if (d.command === "use") {
         // the music names a synthdef; the URL is resolved HERE, from the page's own setting
@@ -180,6 +189,7 @@ export function createSynthHost({ say = null, problem = null, section = null } =
    * rule is satisfied.
    */
   function panelSection() {
+    if (!OWN_SYNTH) return null;          // kept, not enabled: see OWN_SYNTH above
     return {
       title: "Synth",
       items: [
