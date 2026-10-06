@@ -201,6 +201,7 @@ export function createEditorTab({ canvasView = null, log = null } = {}) {
             : k === "image" ? { kind: "image", name: ch.name ?? "" }
               : { kind: "none" };
         save(); paintChannels();
+        canvasView?.setPasses?.(doc().passes, doc().channels);
       });
       box.append(n, kind);
       if (ch.kind === "buffer") {
@@ -268,9 +269,9 @@ export function createEditorTab({ canvasView = null, log = null } = {}) {
   function compile() {
     const problems = checkOne(state.pass);
     // the Image pass is what draws: hand it (and Common) to the canvas, and report what actually happened
-    if (!problems && state.pass !== "Common" && canvasView) {
-      const ok = canvasView.setCode({ image: doc().passes.Image ?? "", common: doc().passes.Common ?? "" });
-      log?.(ok ? "compiled into the canvas" : `canvas said: ${canvasView.lastError?.()}`);
+    if (!problems && canvasView) {
+      const res = canvasView.setPasses(doc().passes, doc().channels);
+      log?.(res.failed.length ? `canvas: ${res.failed.join("; ")}` : `canvas compiled: ${res.ok.join(", ")}`);
     }
     const used = doc().channels.map((c, i) => (c.kind === "buffer" ? `iChannel${i}→${c.buffer}` : c.kind === "none" ? null : `iChannel${i}→${c.kind}`)).filter(Boolean);
     say(problems ? problems

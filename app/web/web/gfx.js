@@ -25,7 +25,9 @@ if (EDITOR_TAB && !GFX_ENABLED) {
   // compile once at start, so the preview is not a black square: the saved set if there is one, the starter if
   // there is not (measured: with nothing saved this used to hand the canvas an empty Image and refuse it)
   const sets = (() => { try { return JSON.parse(localStorage.getItem("sp-shadertoy-sets") ?? "null"); } catch { return null; } })();
-  const passes = sets?.docs?.[sets.doc ?? 0]?.passes ?? defaultPasses();
-  canvasView.setCode({ image: passes.Image ?? "", common: passes.Common ?? "" });
+  const set0 = sets?.docs?.[sets.doc ?? 0];
+  const passes = set0?.passes ?? defaultPasses();
+  canvasView.setPasses(passes, set0?.channels ?? []);
+  window.sonicPiCanvas = canvasView;
   window.sonicPiCanvas = canvasView;
 }
