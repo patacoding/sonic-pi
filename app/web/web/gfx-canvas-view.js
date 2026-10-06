@@ -19,7 +19,7 @@ export const PASS_ORDER = ["Buffer A", "Buffer B", "Buffer C", "Buffer D", "Imag
 const VERT = `#version 300 es
 in vec2 a;
 void main() { gl_Position = vec4(a, 0.0, 1.0); }`;
-const HEADER = (extra = "") => `#version 300 es
+const HEADER = () => `#version 300 es
 precision highp float;
 precision highp int;
 uniform vec3 iResolution;
@@ -32,7 +32,6 @@ uniform sampler2D iChannel0;
 uniform sampler2D iChannel1;
 uniform sampler2D iChannel2;
 uniform sampler2D iChannel3;
-${extra}
 out vec4 sp_out;
 `;
 const BODY = `
@@ -71,7 +70,11 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
   const t0 = performance.now();
   let frames = 0, raf = 0, prev = performance.now(), lastError = null;
   let passes = {}, channels = [];
-  const extra = new Map();                 // name -> { vec: 1..4, value: number[] }, as the music set it
+  const values = new Map();                // name -> { value: number[] }, exactly as the music sent it
+  /** Shadertoy's own uniforms: the host provides them, they are not the music's to set. */
+  const SHADERTOY_UNIFORMS = new Set(["iResolution", "iTime", "iTimeDelta", "iFrame", "iMouse", "iAudioLevel",
+    "iChannel0", "iChannel1", "iChannel2", "iChannel3", "iFrameRate", "iSampleRate", "iDate", "iChannelTime",
+    "iChannelResolution"]);
   const programs = new Map(), targets = new Map(), imageCache = new Map();
   let blackTex = null, audioTex = null, analyser = null, wave = null, spectrum = null, level = 0;
 
@@ -84,9 +87,8 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
     return sh;
   };
   function build(pass) {
-    const decl = [...extra.entries()].map(([n, u]) => `uniform ${u.vec === 1 ? "float" : `vec${u.vec}`} ${n};`).join("\n");
     const vs = shader(gl.VERTEX_SHADER, VERT);
-    const fs = shader(gl.FRAGMENT_SHADER, `${HEADER(decl)}\n${passes.Common ?? ""}\n${passes[pass] ?? ""}\n${BODY}`);
+    const fs = shader(gl.FRAGMENT_SHADER, `${HEADER()}\n${passes.Common ?? ""}\n${passes[pass] ?? ""}\n${BODY}`);
     const prog = gl.createProgram();
     gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
     if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) ?? "link failed");
@@ -101,7 +103,18 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
       res: gl.getUniformLocation(prog, "iResolution"), time: gl.getUniformLocation(prog, "iTime"),
       delta: gl.getUniformLocation(prog, "iTimeDelta"), frame: gl.getUniformLocation(prog, "iFrame"),
       mouse: gl.getUniformLocation(prog, "iMouse"), level: gl.getUniformLocation(prog, "iAudioLevel"),
-      extra: new Map([...extra.keys()].map((n) => [n, gl.getUniformLocation(prog, n)])),
+      // what the shader itself declares -- nothing else is known, and nothing is invented
+      declared: (() => {
+        const out = new Map();
+        const count = gl.getProgramParameter(prog, gl.ACTIVE_UNIFORMS);
+        for (let i = 0; i < count; i++) {
+          const info = gl.getActiveUniform(prog, i);
+          if (!info) continue;
+          const name = info.name.replace(/\[0\]$/, "");
+          out.set(name, { loc: gl.getUniformLocation(prog, name), size: info.size, type: info.type });
+        }
+        return out;
+      })(),
     } });
   }
   function targetFor(pass, w, h) {
@@ -205,13 +218,16 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
       gl.uniform1i(u.frame, frames);
       gl.uniform4f(u.mouse, 0, 0, 0, 0);
       gl.uniform1f(u.level, level);
-      for (const [name, loc] of u.extra) {
-        if (!loc) continue;
-        const v = extra.get(name)?.value ?? [0];
-        if (v.length === 1) gl.uniform1f(loc, v[0]);
-        else if (v.length === 2) gl.uniform2f(loc, v[0], v[1]);
-        else if (v.length === 3) gl.uniform3f(loc, v[0], v[1], v[2]);
-        else gl.uniform4f(loc, v[0], v[1], v[2], v[3]);
+      // "sent to every pass that declares it -- and to none that does not" (the old layer's own words)
+      for (const [name, d] of u.declared) {
+        if (SHADERTOY_UNIFORMS.has(name)) continue;         // the host's own, set above
+        const set = values.get(name);
+        if (!set || !d.loc) continue;
+        const v = set.value;
+        if (v.length === 1) gl.uniform1f(d.loc, v[0]);
+        else if (v.length === 2) gl.uniform2f(d.loc, v[0], v[1]);
+        else if (v.length === 3) gl.uniform3f(d.loc, v[0], v[1], v[2]);
+        else gl.uniform4f(d.loc, v[0], v[1], v[2], v[3]);
       }
       for (const i of [0, 1, 2, 3]) bindChannel(i);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -239,33 +255,30 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
   }
 
   /**
-   * A uniform from the music: 1 to 4 numbers, as the directive parser allows (`:gfx, :uGain, 0.5`).
-   * Everything that declares uniforms is rebuilt, since the declaration has to match the value's width.
+   * A value from the music: `:gfx, :name, 1` .. `:gfx, :name, 1, 2, 3, 4`.
+   *
+   * The shader declares its own uniforms -- any names the player likes -- and a value goes to every pass that
+   * declares that name and to no pass that does not. If NO pass declares it, that is an error worth saying out
+   * loud (the old layer's own wording: `no pass declares "name"`), because otherwise a typo in a live loop is
+   * indistinguishable from a shader that ignores it.
    */
   function setVariable(name, value) {
     const n = String(name).replace(/[^A-Za-z0-9_]/g, "");
     if (!n) return false;
-    const values = (Array.isArray(value) ? value : [value]).map(Number).filter((v) => Number.isFinite(v));
-    if (!values.length || values.length > 4) return false;
-    extra.set(n, { vec: values.length, value: values });
-    programs.clear();
-    for (const pass of PASS_ORDER) if ((passes[pass] ?? "").trim()) { try { build(pass); } catch (e) { lastError = String(e.message ?? e); } }
-    if ([...programs.keys()].length) ensureLoop();
+    const v = (Array.isArray(value) ? value : [value]).map(Number).filter((x) => Number.isFinite(x));
+    if (!v.length || v.length > 4) return false;
+    values.set(n, { value: v });
+    const declaredBy = [...programs.entries()].filter(([, p]) => p.u.declared.has(n)).map(([pass]) => pass);
+    if (!declaredBy.length && programs.size) {
+      lastError = `no pass declares "${n}"`;
+      onSay?.(`${lastError} — the value is kept, and will be used by any pass that does after a compile`);
+      console.info(`Shadertoy — ${lastError}`);
+      return false;
+    }
+    lastError = null;
     return true;
   }
 
-  /**
-   * The app hands records to whoever is at window.sonicPiGfx: this is the audio side's way in.
-   *
-   * Tolerant on purpose, and LOUD about what it sees. The first version matched one exact spelling
-   * (`:gfx, :set, :name, 0.5`) and said nothing when it did not match, so "the variables do not sync" and "the
-   * directive never arrived" looked identical -- which is the worst way for a feature to fail. Now every record
-   * that mentions the sigil is reported, and the name/value is read however it is written:
-   *
-   *   puts :gfx, :set, :vol, 0.5        puts :gfx, :uniform, :vol, 0.5
-   *   puts :gfx, :vol, 0.5              puts :gfx, :set, :vol, 0.5, :set, :pitch, 3
-   *   puts "vol=0.5"                    (as part of a :gfx line)
-   */
   const seen = [];
   /** The same path as a record, for anyone calling it directly (a probe, the console). */
   function applyDirectives(text) {
@@ -325,7 +338,8 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
 
   return { canvas, button: btn, setPasses, setVariable, record, applyDirectives, seen: () => [...seen],
     audio: () => ({ attached: !!analyser, level: Number(level.toFixed(4)), samples: !!audioTex }),
-    variables: () => Object.fromEntries(extra),
+    variables: () => Object.fromEntries([...values].map(([n, v]) => [n, v.value])),
+    declared: () => [...new Set([...programs.values()].flatMap((p) => [...p.u.declared.keys()]))].filter((n) => !SHADERTOY_UNIFORMS.has(n)),
     state: () => state, set, next: () => set(ORDER[(ORDER.indexOf(state) + 1) % ORDER.length]),
     lastError: () => lastError, compiled: () => [...programs.keys()] };
 }
