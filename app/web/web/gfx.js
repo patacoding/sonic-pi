@@ -817,6 +817,10 @@ function install() {
   function record(r, appLog) {
     if (appLog) {
       log = appLog;
+      // published, so a probe (or a person in the console) can SEE whether the app has handed its Log over:
+      // it arrives only with the first record, and "our news went nowhere" is otherwise indistinguishable
+      // from "our news was never said".
+      api.logReady = true;
       while (unsaid.length) log(unsaid.shift());    // what was said while there was no Log, in order
     }
     // `puts :synth, …` is the synthesizer's language, not ours (synth-directive.js)
