@@ -96,11 +96,7 @@ const STYLE = `
   #gfx-st-side section { border: 1px solid var(--WindowBorder); border-radius: 8px; padding: 8px;
     background: color-mix(in srgb, var(--WindowBackground) 72%, transparent); }
   #gfx-st-side h4 { margin: 0 0 6px; font: 600 12px/1 system-ui, sans-serif; opacity: .8; }
-  #gfx-st-previews { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
-  #gfx-st-previews figure { margin: 0; text-align: center; }
-  #gfx-st-previews img { width: 84px; height: 84px; object-fit: cover; display: block; border: 1px solid var(--WindowBorder); border-radius: 6px; }
-  #gfx-st-previews figcaption { font: 10px ui-monospace, monospace; opacity: .6; margin-top: 3px; max-width: 84px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #gfx-st-vars { font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; min-height: 3em; }
+#gfx-st-vars { font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; min-height: 3em; }
   #gfx-st-status { white-space: pre-wrap; }
   #gfx-st-perf { font-variant-numeric: tabular-nums; }
 `;
@@ -158,7 +154,7 @@ export function createShadertoyPage() {
       <button id="gfx-st-close">Back to audio</button></div>
     <div id="gfx-st-row" class="passes"></div>
     <div id="gfx-st-main"><textarea id="gfx-st-code" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
-      <div id="gfx-st-side"><section><h4>iChannels</h4><div id="gfx-st-chans"></div><div id="gfx-st-previews"></div></section>
+      <div id="gfx-st-side"><section><h4>iChannels</h4><div id="gfx-st-chans"></div></section>
         <section><h4>from the music</h4><div id="gfx-st-vars">(nothing yet)</div></section></div></div>
 `;
   document.body.appendChild(el);
@@ -251,7 +247,7 @@ export function createShadertoyPage() {
           const rd = new FileReader();
           rd.onload = () => {
             ch.name = file.name; ch.data = String(rd.result);        // memory: storage keeps the CODE only
-            save(); paintChannels(); paintPreviews(); push();
+            save(); paintChannels(); push();
             say(`iChannel${i} <- ${file.name} (${Math.round(String(ch.data).length / 1024)} KB) - the canvas has it now; a reload asks for it again`);
           };
           rd.onerror = () => say(`could not read ${file.name}`, true);
@@ -267,22 +263,6 @@ export function createShadertoyPage() {
       chansEl.appendChild(box);
     });
   }
-  /** Every picture wired to a channel, shown at a size you can actually look at. */
-  function paintPreviews() {
-    const box = el.querySelector("#gfx-st-previews");
-    box.textContent = "";
-    (doc().channels ?? []).forEach((ch, i) => {
-      if (ch.kind !== "image" || !ch.data) return;
-      const fig = document.createElement("figure");
-      const img = document.createElement("img");
-      img.src = ch.data; img.alt = ch.name ?? `iChannel${i}`; img.title = ch.name ?? "";
-      const cap = document.createElement("figcaption");
-      cap.textContent = `iChannel${i}`;
-      fig.append(img, cap);
-      box.appendChild(fig);
-    });
-  }
-
   const values = new Map();
   const paintVars = () => {
     varsEl.textContent = values.size
@@ -295,7 +275,7 @@ export function createShadertoyPage() {
     return globalThis.sonicPiCanvas?.setPasses?.({ Common: d.common ?? "", ...d.passes }, d.channels);
   }
 
-  function paintAll() { paintPasses(); paintChannels(); paintPreviews(); paintVars(); codeEl.value = tab === SHARED ? (doc().common ?? "") : (doc().passes?.[tab] ?? ""); }
+  function paintAll() { paintPasses(); paintChannels(); paintVars(); codeEl.value = tab === SHARED ? (doc().common ?? "") : (doc().passes?.[tab] ?? ""); }
 
   codeEl.addEventListener("input", () => { remember(); saveSoon(); });
   codeEl.addEventListener("keydown", (e) => {
