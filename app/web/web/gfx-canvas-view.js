@@ -54,12 +54,16 @@ const STYLE = `
     border: 1px solid var(--WindowBorder); border-radius: 8px; box-shadow: 0 6px 24px rgb(0 0 0 / 35%); }
   body[data-gfx-canvas="fullscreen"] #gfx-canvas { inset: 0; width: 100vw; height: 100vh; border: 0; border-radius: 0; }
   body[data-gfx-canvas="hidden"] #gfx-canvas { display: none !important; }
-  #gfx-canvas-btn { position: fixed; right: 0; top: calc(50% + 58px); transform: translateY(-50%); z-index: 101;
-    writing-mode: vertical-rl; padding: 10px 6px; cursor: pointer; font: 12px/1 system-ui, sans-serif;
-    letter-spacing: .04em; color: var(--WindowForeground); border: 1px solid var(--WindowBorder); border-right: 0;
-    border-radius: 8px 0 0 8px; background: color-mix(in srgb, var(--WindowBackground) 92%, transparent); }
+  /* the same pair of buttons as the page's (gfx-shadertoy-page.js defines the shared box): this one sits
+     directly below it, and only its state colour differs */
+  #gfx-canvas-btn { position: fixed; right: 0; top: calc(50% + 0.2em); z-index: 101; writing-mode: vertical-rl;
+    height: 5.4em; overflow: hidden; padding: 10px 6px; cursor: pointer; font: 12px/1.1 system-ui, sans-serif;
+    letter-spacing: .04em; text-align: center; color: var(--WindowForeground);
+    border: 1px solid var(--WindowBorder); border-right: 0; border-radius: 8px 0 0 8px;
+    background: color-mix(in srgb, var(--WindowBackground) 92%, transparent); }
   #gfx-canvas-btn:hover { background: color-mix(in srgb, var(--WindowBackground) 78%, transparent); }
-  #gfx-canvas-btn[data-state="fullscreen"] { border-color: #f80; }
+  #gfx-canvas-btn[data-state="fullscreen"] { border-color: #f80; color: #f80; }
+  #gfx-canvas-btn[data-state="hidden"] { opacity: .6; }
 `;
 
 export function createCanvasView({ store = globalThis.localStorage ?? null, onSay = null } = {}) {

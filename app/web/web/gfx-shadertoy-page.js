@@ -55,11 +55,16 @@ const STYLE = `
     background: var(--WindowBackground); color: var(--WindowForeground);
     font: 13px/1.45 system-ui, sans-serif; }
   body[data-gfx-st="open"] #gfx-st { display: flex; }
-  #gfx-st-btn { position: fixed; right: 0; top: 50%; transform: translateY(-50%); z-index: 101;
-    writing-mode: vertical-rl; padding: 12px 6px; cursor: pointer; font: 12px/1 system-ui, sans-serif;
-    letter-spacing: .04em; color: var(--WindowForeground); border: 1px solid var(--WindowBorder); border-right: 0;
-    border-radius: 8px 0 0 8px; background: color-mix(in srgb, var(--WindowBackground) 92%, transparent); }
-  #gfx-st-btn:hover { background: color-mix(in srgb, var(--WindowBackground) 78%, transparent); }
+  /* the right-edge buttons (this one and the canvas's) are one pair: same box, same type, same behaviour --
+     only their colour of state differs. Defined identically in both files so neither can drift. */
+  #gfx-st-btn, #gfx-canvas-btn { position: fixed; right: 0; z-index: 101; writing-mode: vertical-rl;
+    height: 5.4em; overflow: hidden; padding: 10px 6px; cursor: pointer; font: 12px/1.1 system-ui, sans-serif;
+    letter-spacing: .04em; text-align: center; color: var(--WindowForeground);
+    border: 1px solid var(--WindowBorder); border-right: 0; border-radius: 8px 0 0 8px;
+    background: color-mix(in srgb, var(--WindowBackground) 92%, transparent); }
+  #gfx-st-btn:hover, #gfx-canvas-btn:hover { background: color-mix(in srgb, var(--WindowBackground) 78%, transparent); }
+  #gfx-st-btn { top: calc(50% - 5.4em); }
+  #gfx-st-btn[aria-pressed="true"] { border-color: #d53; color: #d53; }
   #gfx-st-head { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 6px 10px;
     border-bottom: 1px solid var(--WindowBorder); }
   #gfx-st-head .title { font-weight: 600; }
@@ -151,7 +156,7 @@ export function createShadertoyPage() {
       <button id="gfx-st-export">Export</button>
       <button id="gfx-st-import">Import</button>
       <input id="gfx-st-file" type="file" accept=".json,application/json" hidden>
-      <button id="gfx-st-close">Back to audio</button></div>
+      </div>
     <div id="gfx-st-row" class="passes"></div>
     <div id="gfx-st-main"><textarea id="gfx-st-code" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
       <div id="gfx-st-side"><section><h4>iChannels</h4><div id="gfx-st-chans"></div></section>
@@ -332,7 +337,6 @@ export function createShadertoyPage() {
       say(`imported ${set.documents.length} document(s) from ${f.name}`);
     } catch (e) { say(`that file did not read as a set: ${e?.message ?? e}`, true); }
   });
-  el.querySelector("#gfx-st-close").addEventListener("click", () => setOpen(false));
 
   // ── the audio side's way in: the same records the old layer took, the same syntax ────────────────────────
   function record(r) {
@@ -366,6 +370,9 @@ export function createShadertoyPage() {
     if (!next) remember();
     open = next;
     document.body.dataset.gfxSt = open ? "open" : "closed";
+    btn.textContent = open ? "Audio" : "Shadertoy";          // what clicking does, not what is on screen
+    btn.setAttribute("aria-pressed", String(open));
+    btn.title = open ? "back to the audio page (Ctrl/Cmd+Alt+S, or Escape)" : "the shader editor (Ctrl/Cmd+Alt+S)";
     if (open) { paintAll(); setTimeout(() => codeEl.focus(), 0); }
     return true;
   }
