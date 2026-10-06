@@ -193,7 +193,46 @@ function install() {
   // One of those lines is also the probe's proof that the detached starter reached its end -- so losing
   // it hid a real bug. What is said while there is no Log is held here and said the moment there is one.
   const unsaid = [];
-  const say = (text) => { if (log) log(text); else if (unsaid.length < 60) unsaid.push(text); };
+  // Our own visible channel for what we have to say.
+  //
+  // The app's Log used to be the place, and after the upstream sync it no longer is: its lines are built lazily
+  // (`logInfo` -> `append(logBox, { make })`, main.js:972) and text handed to that function appears in NO element
+  // -- measured with a marker string, Log pane open and closed, waited for. The layer's news ("the shader
+  // linked", a rejected directive, a report) was therefore invisible to the player, which is worse than noisy.
+  // So we say it ourselves, in a slim bar, and keep handing it to the app's log as well for when that works.
+  const sayBar = () => {
+    let el = document.getElementById("gfx-say");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "gfx-say";
+      el.setAttribute("role", "status");
+      document.body.appendChild(el);
+      const style = document.createElement("style");
+      style.id = "gfx-say-style";
+      style.textContent = `#gfx-say { position: fixed; left: 8px; right: 8px; bottom: 8px; z-index: 97;
+        font: 12px/1.45 ui-monospace, monospace; color: var(--WindowForeground); background: color-mix(in srgb, var(--WindowBackground) 88%, transparent);
+        border: 1px solid var(--WindowBorder); border-radius: 6px; padding: 6px 8px; max-height: 22vh; overflow: auto;
+        white-space: pre-wrap; pointer-events: none; }
+        #gfx-say:empty { display: none; }
+        #gfx-say b { font-weight: 600; opacity: .8; }`;
+      document.head.appendChild(style);
+    }
+    return el;
+  };
+  const say = (text) => {
+    if (log) log(text); else if (unsaid.length < 60) unsaid.push(text);
+    try {
+      const bar = sayBar();
+      const line = document.createElement("div");
+      line.innerHTML = "<b>Graphics</b> ";
+      line.appendChild(document.createTextNode(String(text)));
+      bar.appendChild(line);
+      while (bar.children.length > 8) bar.removeChild(bar.firstChild);     // the last few, then out of the way
+      clearTimeout(say._t);
+      say._t = setTimeout(() => { bar.textContent = ""; }, 20000);
+      window.sonicPiGfx && (window.sonicPiGfx.lastSaid = String(text));
+    } catch { /* a bar is not worth breaking the layer for */ }
+  };
 
   // ── the numbers: fps, frame time, GPU time, memory ────────────────────────────────────────────────
   //
@@ -821,7 +860,9 @@ function install() {
       // it arrives only with the first record, and "our news went nowhere" is otherwise indistinguishable
       // from "our news was never said".
       if (window.sonicPiGfx) window.sonicPiGfx.logReady = true;   // the published object (gfx.js:856)
-      while (unsaid.length) log(unsaid.shift());    // what was said while there was no Log, in order
+      while (unsaid.length) say(unsaid.shift());    // what was said while there was no Log, in order
+      // (through say, not log: the same lines must reach OUR bar too, or the news a player missed
+      //  stays invisible -- which is the bug this whole path exists to fix)
     }
     // `puts :synth, …` is the synthesizer's language, not ours (synth-directive.js)
     if (synthHost.host.handleRecord(r)) return;
