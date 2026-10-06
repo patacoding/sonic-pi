@@ -115,7 +115,7 @@ export function createEditorTab({ canvasView = null, log = null } = {}) {
       <button id="gfx-ed-compile" type="button">Compile</button>
       <button id="gfx-ed-compile-all" type="button">Compile all passes</button>
       <button id="gfx-ed-close" type="button">Back to audio</button></div>
-    <div id="gfx-ed-docs"><span class="tag">set</span></div>
+    <div id="gfx-ed-docs"></div>
     <div id="gfx-ed-passes"><span class="tag">pass</span></div>
     <div id="gfx-ed-chans"><span class="tag">channels</span></div>
     <div id="gfx-ed-main"><textarea id="gfx-ed-code" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
@@ -131,27 +131,27 @@ export function createEditorTab({ canvasView = null, log = null } = {}) {
 
   function paintDocs() {
     docsEl.textContent = "";
-    docsEl.appendChild(Object.assign(document.createElement("span"), { className: "tag", textContent: "set" }));
-    state.docs.forEach((d, i) => {
+    state.docs.forEach((dd, i) => {
       const b = document.createElement("button");
-      b.type = "button"; b.textContent = d.name; b.className = i === state.doc ? "on" : "";
+      b.type = "button"; b.textContent = dd.name; b.className = i === state.doc ? "on" : "";
+      b.title = "switch to this document — double-click to rename it";
       b.addEventListener("click", () => { state.doc = i; save(); paintAll(); });
+      b.addEventListener("dblclick", () => {                       // rename where the name is, not in a second box
+        const next = prompt("document name", dd.name);
+        if (next?.trim()) { dd.name = next.trim(); save(); paintAll(); }
+      });
       docsEl.appendChild(b);
     });
-    const name = document.createElement("input");
-    name.value = doc().name;
-    name.title = "this set's name";
-    name.addEventListener("change", () => { doc().name = name.value.trim() || doc().name; save(); paintDocs(); });
     const add = document.createElement("button");
-    add.type = "button"; add.textContent = "+"; add.title = "another set";
-    add.addEventListener("click", () => { state.docs.push(blankDoc(`Set ${state.docs.length + 1}`)); state.doc = state.docs.length - 1; save(); paintAll(); });
+    add.type = "button"; add.textContent = "+"; add.title = "another document";
+    add.addEventListener("click", () => { state.docs.push(blankDoc(`Shader ${state.docs.length + 1}`)); state.doc = state.docs.length - 1; save(); paintAll(); });
     const del = document.createElement("button");
-    del.type = "button"; del.textContent = "−"; del.title = "remove this set";
+    del.type = "button"; del.textContent = "−"; del.title = "remove this document";
     del.addEventListener("click", () => {
-      if (state.docs.length < 2) return say("the last set stays: there has to be something to edit", true);
+      if (state.docs.length < 2) return say("the last document stays: there has to be something to edit", true);
       state.docs.splice(state.doc, 1); state.doc = Math.max(0, state.doc - 1); save(); paintAll();
     });
-    docsEl.append(name, add, del);
+    docsEl.append(add, del);
   }
 
   function paintPasses() {
