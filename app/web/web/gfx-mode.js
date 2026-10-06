@@ -79,22 +79,15 @@ const STYLE = `
 `;
 
 export function createModeSwitch({ store = globalThis.localStorage ?? null, onChange = null } = {}) {
-  // Which mode a FRESH page starts in.
+  // A page ALWAYS starts in Sonic Pi. Graphics is entered by the switch or by Ctrl/Cmd+Alt+G, in the page you
+  // are looking at, and NOTHING carries it across a reload.
   //
-  // Remembering the last choice was a mistake: switching to Graphics once and reloading left Sonic Pi's whole
-  // interface hidden -- toolbar, editor, status bar, drawer, rail -- which reads as "the audio UI is broken"
-  // rather than "you are in the other mode". Measured, and reported as exactly that.
-  //
-  // So the audio side is the home, and graphics is asked for explicitly: by the switch (which writes #graphics
-  // into the URL, so a reload comes back the way you left it) or by arriving with that hash.
-  const WANT = () => {
-    const h = String(globalThis.location?.hash ?? "");
-    if (/graphics/i.test(h)) return GRAPHICS;
-    if (/sonicpi/i.test(h)) return SONIC_PI;
-    try { const v = store?.getItem(MODE_KEY); if (v === GRAPHICS) return GRAPHICS; } catch {}
-    return SONIC_PI;
-  };
-  const read = () => WANT();
+  // Two attempts got this wrong, both mine: remembering the mode in localStorage (a reload came back with Sonic
+  // Pi's whole interface hidden -- toolbar, editor, status bar, drawer, rail -- which reads as "the audio UI is
+  // broken"), and then writing it into the URL hash (which did the same to anyone whose address bar kept it).
+  // A mode that hides the app's own interface must never be restored by anything but the person in front of it,
+  // in the session where they asked for it.
+  const read = () => SONIC_PI;
   let mode = read();
 
   if (!document.getElementById("gfx-mode-style")) {
@@ -134,10 +127,6 @@ export function createModeSwitch({ store = globalThis.localStorage ?? null, onCh
     const changed = next !== mode;
     mode = next;
     try { store?.setItem(MODE_KEY, mode); } catch {}
-    try {                                     // in the URL, so a reload is explicit rather than remembered by accident
-      const h = String(globalThis.location.hash ?? "").replace(/#(graphics|sonicpi)/i, "");
-      globalThis.history?.replaceState?.(null, "", `${h}#${mode}`);
-    } catch {}
     paint();
     if (changed) onChange?.(mode);
     return true;
