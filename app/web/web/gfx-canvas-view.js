@@ -8,7 +8,7 @@
 //             `audio` 512x2 of the engine's signal (row 0 spectrum, row 1 waveform), `none` a black pixel.
 //   * VARIABLES from the audio side: `puts :gfx, :set, :name, 0.5` in the music sets a uniform the shaders can
 //             declare (`uniform float name;`), and iAudioLevel follows the output's RMS with nothing asked for.
-import { parseDirective } from "./graphics/gfx-directive.js";
+import { parseDirective, fits } from "./graphics/gfx-directive.js";
 
 export const PREVIEW = "preview";
 export const FULL = "fullscreen";
@@ -70,7 +70,14 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
   const t0 = performance.now();
   let frames = 0, raf = 0, prev = performance.now(), lastError = null;
   let passes = {}, channels = [];
-  const values = new Map();                // name -> { value: number[] }, exactly as the music sent it
+  const values = new Map();                // name -> { value: number[], shape }, exactly as the music sent it, for
+                                           // a program compiled later (the old layer's `remembered`)
+  const GLSL_TYPE = () => ({
+    [gl.FLOAT]: "float", [gl.INT]: "int", [gl.BOOL]: "bool",
+    [gl.FLOAT_VEC2]: "vec2", [gl.FLOAT_VEC3]: "vec3", [gl.FLOAT_VEC4]: "vec4",
+    [gl.INT_VEC2]: "vec2", [gl.INT_VEC3]: "vec3", [gl.INT_VEC4]: "vec4",
+    [gl.BOOL_VEC2]: "vec2", [gl.BOOL_VEC3]: "vec3", [gl.BOOL_VEC4]: "vec4",
+  });
   /** Shadertoy's own uniforms: the host provides them, they are not the music's to set. */
   const SHADERTOY_UNIFORMS = new Set(["iResolution", "iTime", "iTimeDelta", "iFrame", "iMouse", "iAudioLevel",
     "iChannel0", "iChannel1", "iChannel2", "iChannel3", "iFrameRate", "iSampleRate", "iDate", "iChannelTime",
@@ -262,21 +269,44 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
    * loud (the old layer's own wording: `no pass declares "name"`), because otherwise a typo in a live loop is
    * indistinguishable from a shader that ignores it.
    */
-  function setVariable(name, value) {
+  function setVariable(name, value, shape = null) {
     const n = String(name).replace(/[^A-Za-z0-9_]/g, "");
     if (!n) return false;
     const v = (Array.isArray(value) ? value : [value]).map(Number).filter((x) => Number.isFinite(x));
-    if (!v.length || v.length > 4) return false;
-    values.set(n, { value: v });
-    const declaredBy = [...programs.entries()].filter(([, p]) => p.u.declared.has(n)).map(([pass]) => pass);
-    if (!declaredBy.length && programs.size) {
-      lastError = `no pass declares "${n}"`;
-      onSay?.(`${lastError} — the value is kept, and will be used by any pass that does after a compile`);
-      console.info(`Shadertoy — ${lastError}`);
+    if (!v.length || v.length > 4) {
+      lastError = `${n}: ${v.length} values, but a uniform takes at most 4`;
+      onSay?.(lastError, true); console.info(`Shadertoy — ${lastError}`);
       return false;
     }
-    lastError = null;
-    return true;
+    const want = shape ?? (v.length === 1 ? "float" : `vec${v.length}`);
+    if (SHADERTOY_UNIFORMS.has(n)) {                   // the frame's own values are not a program's to set
+      lastError = `"${n}" is one of the frame's own values, not one a program sets`;
+      onSay?.(lastError, true); console.info(`Shadertoy — ${lastError}`);
+      return false;
+    }
+
+    const took = [], refused = [];
+    for (const [pass, p] of programs) {
+      const d = p.u.declared.get(n);
+      if (!d) continue;                                // "sent to every pass that declares it -- and to none that does not"
+      const glType = GLSL_TYPE()[d.type];
+      // a vec2 wants exactly 2, a vec3 exactly 3, a vec4 exactly 4; float/int/bool accept each other
+      if (!fits(glType, want)) { refused.push(`${pass}: ${n} is ${glType}, given ${want}`); continue; }
+      took.push(pass);
+    }
+    if (took.length) {
+      // remembered only when it was TAKEN, as the old layer does (`if (took) remembered.set(...)`): a value that
+      // fits nothing must not replace a good one a pass is still using
+      values.set(n, { value: v, shape: want });
+      lastError = refused.length ? `"${n}" was set, but not everywhere: ${refused.join("; ")}` : null;
+      if (refused.length) { onSay?.(lastError, true); console.info(`Shadertoy — ${lastError}`); }
+      return true;
+    }
+    if (refused.length) { lastError = refused[0]; onSay?.(lastError, true); console.info(`Shadertoy — ${lastError}`); return false; }
+    lastError = `no pass declares "${n}"`;
+    onSay?.(`${lastError} — the value is kept, and will be used by any pass that does after a compile`);
+    console.info(`Shadertoy — ${lastError}`);
+    return false;
   }
 
   const seen = [];
@@ -284,7 +314,7 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
   function applyDirectives(text) {
     const d = parseDirective(String(text));
     if (!d.ok || d.command) return [];
-    return setVariable(d.name, d.values) ? [[d.name, d.values]] : [];
+    return setVariable(d.name, d.values, d.shape) ? [[d.name, d.values]] : [];
   }
 
   function record(r) {
@@ -304,7 +334,7 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
       if (seen.length > 6) seen.shift();
       return false;
     }
-    const ok = setVariable(d.name, d.values);
+    const ok = setVariable(d.name, d.values, d.shape);
     seen.push({ text: String(text).slice(0, 120), name: d.name, values: d.values, ok });
     if (seen.length > 6) seen.shift();
     if (d.verbose || !ok) {                        // :gfxv says each one, and a failure always does
