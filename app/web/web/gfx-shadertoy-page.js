@@ -131,13 +131,12 @@ export function createShadertoyPage() {
   el.innerHTML = `<div id="gfx-st-head"><span class="title">Shadertoy</span>
       <span class="tag" id="gfx-st-hint">documents · passes · channels — no canvas in this piece</span>
       <span class="spacer"></span>
-      <button id="gfx-st-add">+ document</button>
-      <button id="gfx-st-rename">rename</button>
+      <button id="gfx-st-compile">Compile</button>
+      <button id="gfx-st-compile-all">Compile all</button>
       <button id="gfx-st-export">Export</button>
       <button id="gfx-st-import">Import</button>
       <input id="gfx-st-file" type="file" accept=".json,application/json" hidden>
       <button id="gfx-st-close">Back to audio</button></div>
-    <div id="gfx-st-row" class="docs"></div>
     <div id="gfx-st-row" class="passes"></div>
     <div id="gfx-st-main"><textarea id="gfx-st-code" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
       <div id="gfx-st-side"><section><h4>iChannels</h4><div id="gfx-st-chans"></div></section>
@@ -145,32 +144,13 @@ export function createShadertoyPage() {
     <div id="gfx-st-say"></div>`;
   document.body.appendChild(el);
 
-  const rows = el.querySelectorAll("#gfx-st-row");
-  const docsRow = rows[0], passesRow = rows[1];
+  const passesRow = el.querySelector("#gfx-st-row.passes");
   const codeEl = el.querySelector("#gfx-st-code");
   const chansEl = el.querySelector("#gfx-st-chans");
   const varsEl = el.querySelector("#gfx-st-vars");
   const sayEl = el.querySelector("#gfx-st-say");
   const say = (t, bad = false) => { sayEl.textContent = t ?? ""; sayEl.classList.toggle("bad", !!bad); };
 
-  function paintDocs() {
-    docsRow.textContent = "";
-    docsRow.appendChild(Object.assign(document.createElement("span"), { className: "tag", textContent: "documents" }));
-    set.documents.forEach((d, i) => {
-      const b = document.createElement("button");
-      b.type = "button"; b.textContent = d.name ?? `Document ${i + 1}`; b.className = i === set.current ? "on" : "";
-      b.addEventListener("click", () => { set.current = i; save(); paintAll(); });
-      docsRow.appendChild(b);
-    });
-    const del = document.createElement("button");
-    del.type = "button"; del.textContent = "−";
-    del.title = "remove this document";
-    del.addEventListener("click", () => {
-      if (set.documents.length < 2) return say("the last document stays: there has to be something to edit", true);
-      set.documents.splice(set.current, 1); set.current = Math.max(0, set.current - 1); save(); paintAll();
-    });
-    docsRow.appendChild(del);
-  }
   function paintPasses() {
     passesRow.textContent = "";
     passesRow.appendChild(Object.assign(document.createElement("span"), { className: "tag", textContent: "pass" }));
@@ -256,10 +236,11 @@ export function createShadertoyPage() {
       ? [...values].map(([n, v]) => `${n} = ${v.value.join(", ")}  (${v.vec === 1 ? "float" : `vec${v.vec}`})`).join("\n")
       : "(nothing yet — put a live_loop in the music)";
   };
-  function paintAll() { paintDocs(); paintPasses(); paintChannels(); paintVars(); codeEl.value = tab === SHARED ? (doc().common ?? "") : (doc().passes?.[tab] ?? ""); }
+  function paintAll() { paintPasses(); paintChannels(); paintVars(); codeEl.value = tab === SHARED ? (doc().common ?? "") : (doc().passes?.[tab] ?? ""); }
 
   codeEl.addEventListener("input", () => { remember(); });
   codeEl.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); return compile(tab); }
     if (e.key === "Tab") {
       e.preventDefault();
       const { selectionStart: a, selectionEnd: b, value } = codeEl;
@@ -268,18 +249,29 @@ export function createShadertoyPage() {
     }
   });
 
-  el.querySelector("#gfx-st-add").addEventListener("click", () => {
-    const made = emptyDocument(uniqueName(set.documents.map((d) => d.name ?? ""), "Shader"), DEFAULTS.Image);
-    made.common = DEFAULTS[SHARED];
-    for (const pass of PASS_ORDER) made.passes[pass] = DEFAULTS[pass] ?? "";
-    made.channels[0] = { kind: "buffer", pass: "Buffer A" };
-    set.documents.push(made);
-    set.current = set.documents.length - 1; save(); paintAll();
-  });
-  el.querySelector("#gfx-st-rename").addEventListener("click", () => {
-    const next = prompt("document name", doc().name ?? "");
-    if (next?.trim()) { doc().name = next.trim(); save(); paintAll(); }
-  });
+  /** Compile: what Shadertoy's button does -- check the passes, put them on the canvas, say what happened. */
+  function compile(which = null) {
+    remember();
+    const d = doc();
+    const passes = which ? [which] : PASS_ORDER;
+    const problems = [];
+    for (const pc of passes) {
+      const src = (pc === SHARED ? d.common : d.passes[pc]) ?? "";
+      if (!src.trim()) { if (pc === "Image") problems.push("Image is empty: the screen would draw nothing"); continue; }
+      const o = (src.match(/\{/g) ?? []).length, c = (src.match(/\}/g) ?? []).length;
+      if (o !== c) problems.push(`${pc}: braces do not balance (${o} { against ${c} })`);
+      if (pc !== SHARED && !/void\s+mainImage\s*\(/.test(src)) problems.push(`${pc}: no void mainImage(out vec4 c, in vec2 p)`);
+    }
+    if (problems.length) { say(problems.join("\n"), true); return false; }
+    const r = globalThis.sonicPiCanvas?.setPasses?.({ Common: d.common ?? "", ...d.passes }, d.channels)
+      ?? { ok: [], failed: ["there is no canvas to compile into"] };
+    say(r.failed.length ? `compiled ${r.ok.join(", ") || "nothing"}; not compiled: ${r.failed.join("; ")}`
+      : `compiled ${r.ok.length} pass(es): ${r.ok.join(", ")}`, r.failed.length > 0);
+    return r.failed.length === 0;
+  }
+  el.querySelector("#gfx-st-compile").addEventListener("click", () => compile(tab === SHARED ? SHARED : tab));
+  el.querySelector("#gfx-st-compile-all").addEventListener("click", () => compile(null));
+
   el.querySelector("#gfx-st-export").addEventListener("click", () => {
     const blob = new Blob([JSON.stringify(serializeSet(set), null, 1)], { type: "application/json" });
     const a = document.createElement("a");
