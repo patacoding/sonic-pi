@@ -22,16 +22,23 @@ void main() { gl_Position = vec4(a, 0.0, 1.0); }`;
 const HEADER = () => `#version 300 es
 precision highp float;
 precision highp int;
-uniform vec3 iResolution;
+// Shadertoy's own set, all of it, plus the one this host adds (iAudioLevel): a shader written for Shadertoy
+// compiles here as it is, and every one of these is filled with a real value each frame.
+uniform vec3  iResolution;
 uniform float iTime;
 uniform float iTimeDelta;
-uniform int iFrame;
-uniform vec4 iMouse;
-uniform float iAudioLevel;
+uniform float iFrameRate;
+uniform int   iFrame;
+uniform float iChannelTime[4];
+uniform vec3  iChannelResolution[4];
+uniform vec4  iMouse;
+uniform vec4  iDate;
+uniform float iSampleRate;
 uniform sampler2D iChannel0;
 uniform sampler2D iChannel1;
 uniform sampler2D iChannel2;
 uniform sampler2D iChannel3;
+uniform float iAudioLevel;
 out vec4 sp_out;
 `;
 const BODY = `
@@ -84,6 +91,10 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
     "iChannelResolution"]);
   const programs = new Map(), targets = new Map(), imageCache = new Map();
   let blackTex = null, audioTex = null, analyser = null, wave = null, spectrum = null, level = 0;
+  let rate = 0, sampleRate = 48000;
+  const channelTime = new Float32Array([0, 0, 0, 0]);
+  const channelResolution = new Float32Array(12);
+  const date = [1970, 0, 0, 0];
 
   const shader = (type, src) => {
     const sh = gl.createShader(type); gl.shaderSource(sh, src); gl.compileShader(sh);
@@ -110,6 +121,9 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
       res: gl.getUniformLocation(prog, "iResolution"), time: gl.getUniformLocation(prog, "iTime"),
       delta: gl.getUniformLocation(prog, "iTimeDelta"), frame: gl.getUniformLocation(prog, "iFrame"),
       mouse: gl.getUniformLocation(prog, "iMouse"), level: gl.getUniformLocation(prog, "iAudioLevel"),
+      rate: gl.getUniformLocation(prog, "iFrameRate"), date: gl.getUniformLocation(prog, "iDate"),
+      sampleRate: gl.getUniformLocation(prog, "iSampleRate"), chTime: gl.getUniformLocation(prog, "iChannelTime"),
+      chRes: gl.getUniformLocation(prog, "iChannelResolution"),
       // what the shader itself declares -- nothing else is known, and nothing is invented
       declared: (() => {
         const out = new Map();
@@ -212,7 +226,21 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
     raf = requestAnimationFrame(loop);
     if (document.body.dataset.gfxCanvas === HIDDEN) return;    // hidden is a display state; the loop runs on
     const now = performance.now();
+    const deltaMs = now - prev;
     updateAudio(); resize();
+    rate = deltaMs > 0 ? 1000 / deltaMs : 0;
+    sampleRate = globalThis.sonicPi?.engine?.audioContext?.sampleRate ?? sampleRate;
+    const nowDate = new Date();
+    date[0] = nowDate.getFullYear(); date[1] = nowDate.getMonth(); date[2] = nowDate.getDate();
+    date[3] = nowDate.getHours() * 3600 + nowDate.getMinutes() * 60 + nowDate.getSeconds();
+    for (let i = 0; i < 4; i++) {
+      const ch = channels[i] ?? { kind: "none" };
+      const t = ch.kind === "buffer" ? targets.get(ch.buffer) : null;
+      channelResolution[i * 3] = t ? t.w : ch.kind === "audio" ? 512 : 0;
+      channelResolution[i * 3 + 1] = t ? t.h : ch.kind === "audio" ? 2 : 0;
+      channelResolution[i * 3 + 2] = 1;
+      channelTime[i] = frames / 60;
+    }
     for (const pass of PASS_ORDER) {
       if (!(passes[pass] ?? "").trim() || !programs.has(pass)) continue;
       const { prog, u } = programs.get(pass);
@@ -225,6 +253,11 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
       gl.uniform1i(u.frame, frames);
       gl.uniform4f(u.mouse, 0, 0, 0, 0);
       gl.uniform1f(u.level, level);
+      gl.uniform1f(u.rate, rate);
+      gl.uniform1f(u.sampleRate, sampleRate);
+      gl.uniform4f(u.date, date[0], date[1], date[2], date[3]);
+      gl.uniform1fv(u.chTime, channelTime);
+      gl.uniform3fv(u.chRes, channelResolution);
       // "sent to every pass that declares it -- and to none that does not" (the old layer's own words)
       for (const [name, d] of u.declared) {
         if (SHADERTOY_UNIFORMS.has(name)) continue;         // the host's own, set above
