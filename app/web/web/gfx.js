@@ -9,6 +9,6 @@
 // Nothing upstream is involved either way: index.html loads this file (one of the two lines that are the whole
 // intrusion), and with the layer off `window.sonicPiGfx` simply never appears -- the app's record hook calls it
 // through `window.sonicPiGfx?.record(…)`, so it is a no-op and the app runs exactly as it shipped.
-export const GFX_ENABLED = false;
+export const GFX_ENABLED = true;
 
 if (GFX_ENABLED) await import("./gfx-layer.js");

@@ -6,15 +6,15 @@
 // beside the app's -- which means neither could be arranged without disturbing the other.
 //
 // This is the first step of pulling them apart: a global switch, at the top, that puts the page in one mode at
-// a time. `body[data-ui-mode="graphics"]` hides Sonic Pi's chrome and lets the picture be the whole window;
-// `body[data-ui-mode="sonicpi"]` hides every piece of our UI. The switch itself is always there -- it is the
+// a time. `body[data-ui-mode="shadertoy"]` hides Sonic Pi's chrome and lets the picture be the whole window;
+// `body[data-ui-mode="audio"]` hides every piece of our UI. The switch itself is always there -- it is the
 // way back -- and it stays out of the way in the opposite corner from the app's own controls.
 //
 // It is ours alone: no upstream file is touched to do any of this (the whole intrusion is still the two lines
 // that load our layer). Everything here is a `data-` attribute, a style block and a button.
 export const MODE_KEY = "sp-ui-mode";
-export const SONIC_PI = "sonicpi";
-export const GRAPHICS = "graphics";
+export const SONIC_PI = "audio";
+export const GRAPHICS = "shadertoy";
 
 /** Sonic Pi's own furniture: the parts that are not ours and that graphics mode puts away. */
 const APP_CHROME = [
@@ -49,33 +49,35 @@ const STYLE = `
   #gfx-canvas { z-index: 0; }
 
   /* graphics: the picture is the window, and none of Sonic Pi's furniture is in it */
-  body[data-ui-mode="graphics"] ${APP_CHROME.join(", body[data-ui-mode=\"graphics\"] ")} { display: none !important; }
-  body[data-ui-mode="graphics"] #gfx-canvas { inset: 0 !important; width: 100vw !important; height: 100vh !important; }
-  body[data-ui-mode="graphics"] #gfx-hud { display: block; }
+  body[data-ui-mode="shadertoy"] ${APP_CHROME.join(", body[data-ui-mode=\"shadertoy\"] ")} { display: none !important; }
+  body[data-ui-mode="shadertoy"] #gfx-canvas { inset: 0 !important; width: 100vw !important; height: 100vh !important; }
+  body[data-ui-mode="shadertoy"] #gfx-hud { display: block; }
 
   /* graphics: OUR layout -- the shader editor docks right, the settings panel left, the HUD in the corner.
      These are our own elements (gfx-editor.js makes #gfx-shader-pane, gfx-ui.js makes #gfx-ext and its button);
      in Sonic Pi mode the app's drawer owns them, here we place them ourselves, so the two halves do not have to
      agree about where our UI lives. */
-  body[data-ui-mode="graphics"] #gfx-shader-pane {
+  body[data-ui-mode="shadertoy"] #gfx-shader-pane {
     display: flex !important; position: fixed; top: 36px; right: 8px; bottom: 8px;
     width: min(46vw, 760px); z-index: 96; border: 1px solid var(--WindowBorder); border-radius: 8px;
     overflow: hidden;
     background: color-mix(in srgb, var(--WindowBackground) calc(var(--gfx-dock-alpha) * 100%), transparent);
     backdrop-filter: blur(2px);
   }
-  body[data-ui-mode="graphics"] #gfx-ext {
+  body[data-ui-mode="shadertoy"] #gfx-ext {
     display: flex !important; position: fixed; top: 36px; left: 8px; bottom: 44px;
     width: min(30vw, 420px); z-index: 96; border: 1px solid var(--WindowBorder); border-radius: 8px;
     overflow: auto;
     background: color-mix(in srgb, var(--WindowBackground) calc(var(--gfx-dock-alpha) * 100%), transparent);
     backdrop-filter: blur(2px);
   }
-  body[data-ui-mode="graphics"] #gfx-ext-btn { position: fixed; left: 8px; bottom: 8px; z-index: 97; display: block; }
-  body[data-ui-mode="graphics"] #gfx-hud { position: fixed; top: 40px; left: 50%; transform: translateX(-50%); }
+  body[data-ui-mode="shadertoy"] #gfx-ext-btn { position: fixed; left: 8px; bottom: 8px; z-index: 97; display: block; }
+  body[data-ui-mode="shadertoy"] #gfx-hud { position: fixed; top: 40px; left: 50%; transform: translateX(-50%); }
 
-  /* sonic pi: our canvas stays (it is the background), but every control of ours goes */
-  body[data-ui-mode="sonicpi"] ${OUR_UI.filter((s) => s !== "#gfx-install-error").join(", body[data-ui-mode=\"sonicpi\"] ")} { display: none !important; }
+  /* audio: the app's own page, with our canvas behind its translucent interface and NOT ONE of our controls on
+     it. This rule only ever names elements of OURS -- a mode that can hide the app's own interface is what broke
+     it twice, and nothing here may do that. */
+  body[data-ui-mode="audio"] ${OUR_UI.filter((x) => x !== "#gfx-install-error").join(", body[data-ui-mode=\"audio\"] ")} { display: none !important; }
 `;
 
 export function createModeSwitch({ store = globalThis.localStorage ?? null, onChange = null } = {}) {
@@ -104,8 +106,8 @@ export function createModeSwitch({ store = globalThis.localStorage ?? null, onCh
     el.setAttribute("role", "group");
     el.setAttribute("aria-label", "Which half of the page to work in");
     for (const [value, label, title] of [
-      [SONIC_PI, "Sonic Pi", "the language, the editor, the transport — our UI is out of the way"],
-      [GRAPHICS, "Graphics", "the picture and the shader — Sonic Pi's furniture is out of the way"],
+      [SONIC_PI, "Audio", "the app's own interface: the language, the editor, the transport"],
+      [GRAPHICS, "Shadertoy", "our editing page: the picture full-window with the shader editor over it"],
     ]) {
       const b = document.createElement("button");
       b.type = "button";
@@ -118,8 +120,27 @@ export function createModeSwitch({ store = globalThis.localStorage ?? null, onCh
     document.body.appendChild(el);
   }
 
+  /**
+   * Whose child the editor pane is, which is what decides whether it can be seen at all.
+   *
+   * The pane is built inside the app's drawer (`#drawer-panes`), and Shadertoy mode hides that drawer -- a
+   * hidden ancestor hides the pane with it, whatever CSS the pane itself has (measured: display flex, width 0).
+   * So the pane moves to <body> for that mode and back to the drawer afterwards: in Sonic Pi mode the app's
+   * drawer owns it, in our own page we do. Same element, same code, no upstream change.
+   */
+  function adopt(mode) {
+    try {
+      const pane = document.getElementById("gfx-shader-pane");
+      const home = document.getElementById("drawer-panes");
+      if (!pane) return;
+      if (mode === GRAPHICS) { if (pane.parentElement !== document.body) document.body.appendChild(pane); }
+      else if (home && pane.parentElement !== home) home.appendChild(pane);
+    } catch { /* not worth breaking a mode switch over */ }
+  }
+
   function paint() {
     document.body.dataset.uiMode = mode;
+    adopt(mode);
     for (const b of el.querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.mode === mode));
   }
   function set(next) {
