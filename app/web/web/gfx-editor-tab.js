@@ -26,6 +26,9 @@ const STARTER = {
   "Buffer D": "",
   Image: CORE("    vec3 col = palette(p.x + p.y);\n    c = vec4(col, 1.0);"),
 };
+/** The starting passes, for anyone with nothing saved yet (the canvas needs an Image to draw). */
+export const defaultPasses = () => ({ ...STARTER });
+
 const blankDoc = (name) => ({
   name,
   passes: Object.fromEntries(PASSES.map((p) => [p, STARTER[p] ?? ""])),
@@ -73,7 +76,7 @@ const STYLE = `
   #gfx-ed-say.bad { color: #f66; opacity: 1; }
 `;
 
-export function createEditorTab() {
+export function createEditorTab({ canvasView = null, log = null } = {}) {
   if (!document.getElementById("gfx-ed-style")) {
     const style = document.createElement("style");
     style.id = "gfx-ed-style";
@@ -264,6 +267,11 @@ export function createEditorTab() {
   }
   function compile() {
     const problems = checkOne(state.pass);
+    // the Image pass is what draws: hand it (and Common) to the canvas, and report what actually happened
+    if (!problems && state.pass !== "Common" && canvasView) {
+      const ok = canvasView.setCode({ image: doc().passes.Image ?? "", common: doc().passes.Common ?? "" });
+      log?.(ok ? "compiled into the canvas" : `canvas said: ${canvasView.lastError?.()}`);
+    }
     const used = doc().channels.map((c, i) => (c.kind === "buffer" ? `iChannel${i}→${c.buffer}` : c.kind === "none" ? null : `iChannel${i}→${c.kind}`)).filter(Boolean);
     say(problems ? problems
       : `${state.pass} looks like a shader. channels: ${used.length ? used.join(", ") : "none set"}. ` +
