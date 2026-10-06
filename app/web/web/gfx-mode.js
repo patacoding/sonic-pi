@@ -79,9 +79,22 @@ const STYLE = `
 `;
 
 export function createModeSwitch({ store = globalThis.localStorage ?? null, onChange = null } = {}) {
-  const read = () => {
-    try { const v = store?.getItem(MODE_KEY); return v === GRAPHICS || v === SONIC_PI ? v : SONIC_PI; } catch { return SONIC_PI; }
+  // Which mode a FRESH page starts in.
+  //
+  // Remembering the last choice was a mistake: switching to Graphics once and reloading left Sonic Pi's whole
+  // interface hidden -- toolbar, editor, status bar, drawer, rail -- which reads as "the audio UI is broken"
+  // rather than "you are in the other mode". Measured, and reported as exactly that.
+  //
+  // So the audio side is the home, and graphics is asked for explicitly: by the switch (which writes #graphics
+  // into the URL, so a reload comes back the way you left it) or by arriving with that hash.
+  const WANT = () => {
+    const h = String(globalThis.location?.hash ?? "");
+    if (/graphics/i.test(h)) return GRAPHICS;
+    if (/sonicpi/i.test(h)) return SONIC_PI;
+    try { const v = store?.getItem(MODE_KEY); if (v === GRAPHICS) return GRAPHICS; } catch {}
+    return SONIC_PI;
   };
+  const read = () => WANT();
   let mode = read();
 
   if (!document.getElementById("gfx-mode-style")) {
@@ -121,10 +134,22 @@ export function createModeSwitch({ store = globalThis.localStorage ?? null, onCh
     const changed = next !== mode;
     mode = next;
     try { store?.setItem(MODE_KEY, mode); } catch {}
+    try {                                     // in the URL, so a reload is explicit rather than remembered by accident
+      const h = String(globalThis.location.hash ?? "").replace(/#(graphics|sonicpi)/i, "");
+      globalThis.history?.replaceState?.(null, "", `${h}#${mode}`);
+    } catch {}
     paint();
     if (changed) onChange?.(mode);
     return true;
   }
+
+  // a shortcut, because reaching for the top of the page to get out of a mode is a poor way to work
+  document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.altKey && (e.key === "g" || e.key === "G")) {
+      e.preventDefault(); e.stopPropagation();
+      set(mode === GRAPHICS ? SONIC_PI : GRAPHICS);
+    }
+  }, true);
 
   paint();
   return { el, mode: () => mode, set, is: (m) => mode === m, toggle: () => set(mode === GRAPHICS ? SONIC_PI : GRAPHICS) };
