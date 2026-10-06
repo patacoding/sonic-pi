@@ -18,6 +18,8 @@ const SERVICE_DEFAULT = "http://127.0.0.1:8461";
 const DOCS_KEY = "sp-synthdef-docs";
 const ACTIVE_KEY = "sp-synthdef-active";
 const URL_KEY = "sp-synthdef-url";
+import { runWhenReady } from "./synth-host.js";
+
 const STYLE_ID = "gfx-synthdef-style";
 /** Bump when the pane changes shape: it is printed in the pane and in the Log, so a cached page is obvious. */
 export const PANE_VERSION = "synthdef-pane 2026-09-30g";
@@ -232,7 +234,8 @@ export function createSynthdefPane({
     try {
       const known = controls ?? state.defs.find((d) => d.name === name)?.controls ?? [];
       const line = `load_synthdef "${api(`/defs/${name}.scsyndef`)}"\nsleep 0.25\n` + (play ? auditionLine(name, known) : "");
-      await s.run(line, { group: 0 });   // the runtime's run takes an options object (group)
+      // the runtime may not be wired yet (see runWhenReady): wait for it, and SAY we are waiting
+      await runWhenReady(s, line, { onWait: () => setNote(`waiting for the runtime to come up, then loading ${name}…`) });
       setNote(`loaded ${name}${play ? " and played a note" : ""}: \`synth :${name}\` works in code run FROM NOW ON ` +
         "(run your music again -- code that already ran does not retroactively know the name)");
       remember(name);

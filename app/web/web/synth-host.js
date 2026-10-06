@@ -30,6 +30,30 @@ export { SYNTH_SIGIL, SYNTH_SIGIL_VERBOSE, isSynthOrder, SYNTH_COMMANDS };
  *   section?: (title: string) => object, // a panel section to fill, if the layer has a panel
  * }} opts
  */
+/**
+ * Run code through the app's session, WAITING for the runtime to be wired.
+ *
+ * The synced app boots the runtime in a worker and hands the engine's egress to it (`main.js:ensureSession`,
+ * `live-worker.js`): the session object exists before its channel does, so a run attempted in that window
+ * throws `channel?.now is not a function` (measured). Anything that runs code has to survive that window --
+ * the alternative is a feature that silently does nothing until the player happens to press Run first.
+ */
+export async function runWhenReady(session, code, { tries = 120, wait = 500, onWait = null } = {}) {
+  let last = null;
+  for (let i = 0; i < tries; i++) {
+    try { return await session.run(code, { group: 0 }); }
+    catch (e) {
+      last = e;
+      const m = String(e?.message ?? e);
+      // only the "not wired yet" family is worth waiting for; a real error is the caller's to show
+      if (!/channel\?\.now|is not a function|not available|not started|no session/i.test(m)) throw e;
+      if (i === 0) onWait?.();
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+  throw last ?? new Error("the runtime never became ready");
+}
+
 export function createSynthHost({ say = null, problem = null, section = null } = {}) {
   const text = (t) => (say ? say(`Synth — ${t}`) : console.info(`Synth — ${t}`));
   const warn = (t) => (problem ? problem(t) : console.warn(t));
@@ -59,7 +83,7 @@ export function createSynthHost({ say = null, problem = null, section = null } =
     }
     try {
       await synth.ensure();
-      await session.run("synth :sound_in_stereo, sustain: 3600, amp: 1\nsleep 3600\n", { group: 0 });
+      await runWhenReady(session, "synth :sound_in_stereo, sustain: 3600, amp: 1\nsleep 3600\n", { onWait: () => text("waiting for the runtime to come up…") });
       readerStarted = true;
       text("started `synth :sound_in_stereo` so the synth can be heard");
       editor.refresh();
