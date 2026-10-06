@@ -42,7 +42,7 @@ import { createShaderPane, resolveDocument } from "./gfx-editor.js";
 import { emptyDocument } from "./gfx-document.js";
 import { testCardDocument, TEST_CARD } from "./gfx-testcard.js";
 import { createSynthHost, isSynthOrder } from "./synth-host.js";
-import { createModeSwitch } from "./gfx-mode.js";
+import { createViewSwitch } from "./gfx-view.js";
 
 const STYLE_ID = "gfx-style";
 const ALPHA_KEY = "sp-gfx-ui-alpha";
@@ -895,11 +895,11 @@ function install() {
     if (attachAudio(engine)) clearInterval(watch);
   }, 500);
 
-  // the top-level switch between the two halves of the page (gfx-mode.js)
-  const modeSwitch = createModeSwitch({ onChange: (m) => say(`switched to ${m}`) });
+  // how the rendered picture is shown: preview / fullscreen / hidden (gfx-view.js)
+  const viewSwitch = createViewSwitch({ onChange: (v) => say(`graphics: ${v}`) });
 
   window.sonicPiGfx = {
-    modeSwitch,
+    viewSwitch,
     record,
     canvas: null,
     /**
