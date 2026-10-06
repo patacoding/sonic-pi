@@ -858,7 +858,7 @@ const FILE_VERSION = 2;
     loading = (async () => {
       let mod;
       try {
-        mod = await import("./gfx-editor/editor.js");
+        mod = await import("../gfx-editor/editor.js");
       } catch (e) {
         codeHost.textContent = "";
         codeHost.appendChild(note(`The editor is not built: web/gfx-editor/editor.js is missing. Build it with "node scripts/build-gfx-editor.mjs" in app/web (tools/serve-dev.sh does it too), then reload. (${e.message})`));

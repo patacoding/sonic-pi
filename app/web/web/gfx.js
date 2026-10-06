@@ -12,6 +12,12 @@
 // Putting it back is deliberately a piece at a time: turn this on and the gate imports the layer, which is where
 // every part of it lives; or import one module from ./graphics/ directly to bring back only that part. The
 // build copies ./graphics/ into the artifact when this is true (tools/build-for-cdn.sh).
-export const GFX_ENABLED = false;
+export const GFX_ENABLED = false;   // the whole layer stays off
+export const EDITOR_TAB = true;     // ...except the editor, which is back on its own
 
 if (GFX_ENABLED) await import("./graphics/gfx-layer.js");
+
+if (EDITOR_TAB && !GFX_ENABLED) {
+  const { createEditorTab } = await import("./gfx-editor-tab.js");
+  createEditorTab({ log: (t) => console.info(`Shadertoy — ${t}`) });
+}
