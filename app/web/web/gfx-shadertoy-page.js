@@ -13,7 +13,7 @@ import { parseDirective } from "./graphics/gfx-directive.js";
 
 const TABS = [SHARED, ...PASS_ORDER];        // Common, Buffer A..D, Image  (Shadertoy's rows)
 const KINDS = ["none", "buffer", "image", "audio"];
-const KEY = "sp-gfx-sets";                   // the key the ORIGINAL pane reads and writes
+const KEY = "sp-gfx-documents";                   // the ORIGINAL pane's own key: one storage, both editors
 
 /** Built-in defaults, one per pass: Shadertoy's own pages are never blank and neither is this one. */
 const DEFAULTS = {
@@ -116,9 +116,15 @@ export function createShadertoyPage() {
   // ── the model: the ORIGINAL documents, in the ORIGINAL key ──────────────────────────────────────────────
   const load = () => {
     try {
-      const raw = JSON.parse(localStorage.getItem(KEY) ?? "null");
-      const set = raw ? (raw.documents ? deserializeSet(raw) : raw) : null;
-      if (set?.documents?.length) return set;
+      const text = localStorage.getItem(KEY) ?? "";
+      if (text) {
+        let read = null;
+        try { read = deserializeSet(text); } catch {}                       // the current shape
+        if (!read?.documents?.length) {
+          try { read = deserialize(JSON.parse(text)); } catch {}           // older shapes the original reads too
+        }
+        if (read?.documents?.length) return read;
+      }
     } catch {}
     const d = emptyDocument("Alpha", DEFAULTS.Image);
     d.common = DEFAULTS[SHARED];
@@ -127,7 +133,11 @@ export function createShadertoyPage() {
     return { documents: [d], current: 0, name: "My Set" };
   };
   const set = load();
-  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(serializeSet(set))); } catch {} };
+  // serializeSet returns a STRING (graphics/gfx-document.js: JSON.stringify(normalizeSet(set))); wrapping it in
+  // another JSON.stringify is what stopped anything from ever coming back
+  const save = () => { try { localStorage.setItem(KEY, serializeSet(set)); } catch (e) { say(`could not save: ${e?.message ?? e}`, true); } };
+  let saveTimer = 0;
+  const saveSoon = () => { clearTimeout(saveTimer); saveTimer = setTimeout(save, 300); };
   const doc = () => set.documents[set.current] ?? set.documents[0];
   let tab = "Image";
 
@@ -180,7 +190,7 @@ export function createShadertoyPage() {
       b.title = t;
       b.className = t === tab ? "on" : "";
       b.dataset.tab = t;
-      b.addEventListener("click", () => { remember(); tab = t; paintAll(); codeEl.focus(); });
+      b.addEventListener("click", () => { remember(); save(); tab = t; paintAll(); codeEl.focus(); });
       passesRow.appendChild(b);
     }
   }
@@ -287,7 +297,7 @@ export function createShadertoyPage() {
 
   function paintAll() { paintPasses(); paintChannels(); paintPreviews(); paintVars(); codeEl.value = tab === SHARED ? (doc().common ?? "") : (doc().passes?.[tab] ?? ""); }
 
-  codeEl.addEventListener("input", () => { remember(); });
+  codeEl.addEventListener("input", () => { remember(); saveSoon(); });
   codeEl.addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); return compile(tab); }
     if (e.key === "Tab") {
