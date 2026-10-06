@@ -232,7 +232,7 @@ export function createSynthdefPane({
     try {
       const known = controls ?? state.defs.find((d) => d.name === name)?.controls ?? [];
       const line = `load_synthdef "${api(`/defs/${name}.scsyndef`)}"\nsleep 0.25\n` + (play ? auditionLine(name, known) : "");
-      await s.run(line);
+      await s.run(line, { group: 0 });   // the runtime's run takes an options object (group)
       setNote(`loaded ${name}${play ? " and played a note" : ""}: \`synth :${name}\` works in code run FROM NOW ON ` +
         "(run your music again -- code that already ran does not retroactively know the name)");
       remember(name);

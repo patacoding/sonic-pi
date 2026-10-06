@@ -59,7 +59,7 @@ export function createSynthHost({ say = null, problem = null, section = null } =
     }
     try {
       await synth.ensure();
-      await session.run("synth :sound_in_stereo, sustain: 3600, amp: 1\nsleep 3600\n");
+      await session.run("synth :sound_in_stereo, sustain: 3600, amp: 1\nsleep 3600\n", { group: 0 });
       readerStarted = true;
       text("started `synth :sound_in_stereo` so the synth can be heard");
       editor.refresh();
