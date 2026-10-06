@@ -92,6 +92,7 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
   const programs = new Map(), targets = new Map(), imageCache = new Map();
   let blackTex = null, audioTex = null, analyser = null, wave = null, spectrum = null, level = 0;
   let rate = 0, sampleRate = 48000;
+  const frameTimes = [];      // the last second or so, for a readout that does not flicker
   const channelTime = new Float32Array([0, 0, 0, 0]);
   const channelResolution = new Float32Array(12);
   const date = [1970, 0, 0, 0];
@@ -235,7 +236,8 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
     const now = performance.now();
     const deltaMs = now - prev;
     updateAudio(); resize();
-    rate = deltaMs > 0 ? 1000 / deltaMs : 0;
+    if (deltaMs > 0 && deltaMs < 1000) { frameTimes.push(deltaMs); if (frameTimes.length > 60) frameTimes.shift(); }
+    rate = frameTimes.length ? 1000 / (frameTimes.reduce((a, b) => a + b, 0) / frameTimes.length) : 0;
     sampleRate = globalThis.sonicPi?.engine?.audioContext?.sampleRate ?? sampleRate;
     const nowDate = new Date();
     date[0] = nowDate.getFullYear(); date[1] = nowDate.getMonth(); date[2] = nowDate.getDate();
@@ -408,6 +410,16 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
 
   return { canvas, button: btn, setPasses, setVariable, record, applyDirectives, seen: () => [...seen],
     audio: () => ({ attached: !!analyser, level: Number(level.toFixed(4)), samples: !!audioTex }),
+    /** What drawing costs, for the status line: frames per second, milliseconds a frame, and the GPU time when
+     *  the browser is willing to give one (it usually is not -- then it says null rather than inventing a
+     *  number, which is the only honest thing a readout can do). */
+    perf: () => ({
+      fps: Number(rate.toFixed(1)),
+      ms: rate > 0 ? Number((1000 / rate).toFixed(2)) : null,
+      frames,
+      gpuMs: null,
+      passed: [...programs.keys()].length,
+    }),
     get usable() { return [...new Set([...programs.values()].flatMap((p) => [...p.u.declared.keys()]))].filter((n) => !SHADERTOY_UNIFORMS.has(n)); },
     variables: () => Object.fromEntries([...values].map(([n, v]) => [n, v.value])),
     declared: () => [...new Set([...programs.values()].flatMap((p) => [...p.u.declared.keys()]))].filter((n) => !SHADERTOY_UNIFORMS.has(n)),

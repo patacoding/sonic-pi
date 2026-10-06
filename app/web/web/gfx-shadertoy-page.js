@@ -101,8 +101,8 @@ const STYLE = `
   #gfx-st-previews img { width: 84px; height: 84px; object-fit: cover; display: block; border: 1px solid var(--WindowBorder); border-radius: 6px; }
   #gfx-st-previews figcaption { font: 10px ui-monospace, monospace; opacity: .6; margin-top: 3px; max-width: 84px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #gfx-st-vars { font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; min-height: 3em; }
-  #gfx-st-say { flex: 0 0 auto; padding: 0 10px 8px; font: 12px/1.4 ui-monospace, monospace; opacity: .85; white-space: pre-wrap; }
-  #gfx-st-say.bad { color: #f66; opacity: 1; }
+  #gfx-st-status { white-space: pre-wrap; }
+  #gfx-st-perf { font-variant-numeric: tabular-nums; }
 `;
 
 export function createShadertoyPage() {
@@ -137,8 +137,9 @@ export function createShadertoyPage() {
   el.setAttribute("role", "dialog");
   el.setAttribute("aria-label", "Shadertoy");
   el.innerHTML = `<div id="gfx-st-head"><span class="title">Shadertoy</span>
-      <span class="tag" id="gfx-st-hint">documents · passes · channels — no canvas in this piece</span>
+      <span class="tag" id="gfx-st-status"></span>
       <span class="spacer"></span>
+      <span class="tag" id="gfx-st-perf">—</span>
       <button id="gfx-st-compile">Compile</button>
       <button id="gfx-st-compile-all">Compile all</button>
       <button id="gfx-st-export">Export</button>
@@ -149,15 +150,26 @@ export function createShadertoyPage() {
     <div id="gfx-st-main"><textarea id="gfx-st-code" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
       <div id="gfx-st-side"><section><h4>iChannels</h4><div id="gfx-st-chans"></div><div id="gfx-st-previews"></div></section>
         <section><h4>from the music</h4><div id="gfx-st-vars">(nothing yet)</div></section></div></div>
-    <div id="gfx-st-say"></div>`;
+`;
   document.body.appendChild(el);
 
   const passesRow = el.querySelector("#gfx-st-row.passes");
   const codeEl = el.querySelector("#gfx-st-code");
   const chansEl = el.querySelector("#gfx-st-chans");
   const varsEl = el.querySelector("#gfx-st-vars");
-  const sayEl = el.querySelector("#gfx-st-say");
-  const say = (t, bad = false) => { sayEl.textContent = t ?? ""; sayEl.classList.toggle("bad", !!bad); };
+  const statusEl = el.querySelector("#gfx-st-status");
+  const perfEl = el.querySelector("#gfx-st-perf");
+  // one place for what the page has to say, in the head: the "from the music" panel already shows the values,
+  // and a second copy of them at the bottom was pure noise
+  const say = (t, bad = false) => {
+    statusEl.textContent = String(t ?? "").replace(/\s+/g, " ").slice(0, 120);
+    statusEl.style.color = bad ? "#f66" : "";
+  };
+  // the render cost, as the original layer had it (and as honestly: a number, or a dash)
+  setInterval(() => {
+    const p = globalThis.sonicPiCanvas?.perf?.();
+    perfEl.textContent = p ? `${p.fps.toFixed(1)} fps · ${p.ms ?? "—"} ms · gpu ${p.gpuMs ?? "—"} · ${p.passed} pass(es)` : "no canvas";
+  }, 500);
 
   function paintPasses() {
     passesRow.textContent = "";
@@ -302,7 +314,7 @@ export function createShadertoyPage() {
     if (problems.length) { say(problems.join("\n"), true); return false; }
     const r = push() ?? { ok: [], failed: ["there is no canvas to compile into"] };
     say(r.failed.length ? `compiled ${r.ok.join(", ") || "nothing"}; not compiled: ${r.failed.join("; ")}`
-      : `compiled ${r.ok.length} pass(es): ${r.ok.join(", ")}`, r.failed.length > 0);
+      : `compiled ${r.ok.length} pass(es)`, r.failed.length > 0);
     return r.failed.length === 0;
   }
   el.querySelector("#gfx-st-compile").addEventListener("click", () => compile(tab === SHARED ? SHARED : tab));
@@ -345,8 +357,7 @@ export function createShadertoyPage() {
     // and on to the render loop -- without this the value only ever reached this panel, which is exactly how it
     // looked: the page showed "uGain = 0.5" while no shader ever saw it
     globalThis.sonicPiCanvas?.setVariable?.(d.name, d.values);
-    if (d.verbose) say(`from the music: ${d.name} = ${d.values.join(", ")}`);
-    return true;
+    return true;                                  // the panel above IS the report: saying it again was the duplicate
   }
   globalThis.sonicPiGfx = Object.assign(globalThis.sonicPiGfx ?? {}, { record });
 
