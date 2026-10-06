@@ -1,3 +1,4 @@
+import { tokenize, readWords, word, num, describe } from "./text-scan.js";
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // The `:gfx` directive: what one of the player's `puts` lines means.
 //
@@ -61,87 +62,6 @@ export const COMMANDS = new Set(["document"]);
 const SPACE = /[\s,\[\]{}]/;
 
 /** A quoted run starting at `i` (just past the opening quote): [text, next]. */
-function readQuoted(text, i) {
-  let out = "";
-  while (i < text.length) {
-    const c = text[i];
-    if (c === "\\") {
-      const e = text[i + 1];
-      out += { '"': '"', "\\": "\\", n: "\n", t: "\t", r: "\r", e: "\x1b" }[e] ?? e;
-      i += 2;
-      continue;
-    }
-    if (c === '"') return [out, i + 1];
-    out += c;
-    i++;
-  }
-  return [out, i];     // unterminated: take the rest rather than throw
-}
-
-/** One bare word as the literal it is, or `unknown`. */
-function classify(word) {
-  if (word === "true" || word === "false") return { kind: "bool", value: word === "true" };
-  if (word === "nil") return { kind: "nil", value: null };
-  if (/^[+-]?\d+$/.test(word)) return { kind: "int", value: Number(word) };
-  if (/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(word)) return { kind: "float", value: Number(word) };
-  return { kind: "unknown", value: word };
-}
-
-/** The tokens of the text `log_inspect` produced. */
-export function tokenize(text) {
-  const toks = [];
-  let i = 0;
-  while (i < text.length) {
-    const c = text[i];
-    if (/\s/.test(c)) { i++; continue; }
-    if (c === ":") {
-      if (text[i + 1] === '"') {
-        const [s, j] = readQuoted(text, i + 2);
-        toks.push({ kind: "symbol", value: s });
-        i = j;
-      } else {
-        let j = i + 1;
-        while (j < text.length && !SPACE.test(text[j])) j++;
-        toks.push({ kind: "symbol", value: text.slice(i + 1, j) });
-        i = j;
-      }
-      continue;
-    }
-    if (c === '"') {
-      const [s, j] = readQuoted(text, i + 1);
-      toks.push({ kind: "string", value: s });
-      i = j;
-      continue;
-    }
-    if (c === ",") { i++; continue; }
-    if (c === "[" || c === "{") { toks.push({ kind: "open", value: c }); i++; continue; }
-    if (c === "]" || c === "}") { toks.push({ kind: "close", value: c }); i++; continue; }
-    let j = i;
-    while (j < text.length && !SPACE.test(text[j])) j++;
-    toks.push(classify(text.slice(i, j)));
-    i = j;
-  }
-  return toks;
-}
-
-/** The words of the string form: plain text, so a name is any bare word. */
-export function readWords(s) {
-  const toks = [];
-  for (const w of s.trim().split(/\s+/)) {
-    if (!w) continue;
-    const t = classify(w);
-    toks.push(t.kind === "unknown" ? { kind: "symbol", value: w } : t);
-  }
-  return toks;
-}
-
-const num = (t) => t.kind === "int" || t.kind === "float";
-
-/**
- * The shape of a value list, which is what decides the GLSL type it can fit:
- * `float`, `int`, `bool`, `vec2`, `vec3`, `vec4`; `mixed` when they disagree.
- * Singletons keep their own kind so an `int` uniform can be told from a float.
- */
 export function shapeOf(values) {
   if (!values.length) return "empty";
   if (values.length === 1) {
@@ -153,15 +73,6 @@ export function shapeOf(values) {
   return `vec${values.length}`;
 }
 
-export const word = (t) => (t.kind === "symbol" || t.kind === "string" ? t.value : null);
-
-/**
- * Read one line of the log as a directive.
- *
- * Returns null when the line is not ours — most `puts` output is the player's
- * own and must pass through untouched. Otherwise `{ ok, verbose, name, values,
- * shape }` or `{ ok: false, error, raw }`.
- */
 export function parseDirective(text) {
   if (typeof text !== "string") return null;
   const raw = text;
@@ -208,24 +119,6 @@ export function parseDirective(text) {
   return { ok: true, verbose, raw, name, values: values.map((t) => t.value), shape };
 }
 
-function describe(t) {
-  switch (t.kind) {
-    case "unknown": return `'${t.value}'`;
-    case "nil": return "nil";
-    case "open": return "[";
-    case "close": return "]";
-    default: return `${t.kind} ${t.value}`;
-  }
-}
-
-/**
- * Does a value list fit the type the shader declared? `glType` is what
- * `glGetActiveUniform` reported, as the name the canvas layer uses.
- *
- * An int fits a `float` (GLSL widens it) and a float with no fraction fits an
- * `int`; anything else is a mismatch the player is told about, because
- * silently truncating a vec3 into a float is the kind of help nobody wants.
- */
 export function fits(glType, shape) {
   const scalar = { float: ["float", "int", "bool"], int: ["int", "float", "bool"], bool: ["bool", "int", "float"] };
   if (glType in scalar) return scalar[glType].includes(shape);
@@ -235,3 +128,5 @@ export function fits(glType, shape) {
 
 /** The whole-vector kinds, in the order `values` holds them. */
 export const VEC_SIZE = { vec2: 2, vec3: 3, vec4: 4 };
+
+export { tokenize, readWords, word, num, describe };

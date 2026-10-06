@@ -15,7 +15,7 @@
 //
 // Returns `null` for anything that is not a `:synth` line (the player's own output, or a `:gfx` line), and
 // otherwise `{ ok, verbose, raw, name, command, … }` or `{ ok: false, verbose, raw, error }`.
-import { tokenize, readWords, word } from "./gfx-directive.js";
+import { tokenize, readWords, word, describe } from "./text-scan.js";
 
 export const SYNTH_SIGIL = ":synth";
 export const SYNTH_SIGIL_VERBOSE = ":synthv";
