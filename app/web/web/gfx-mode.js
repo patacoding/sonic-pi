@@ -23,7 +23,7 @@ const APP_CHROME = [
 ];
 
 /** Ours: everything graphics mode shows and Sonic Pi mode puts away. */
-const OUR_UI = ["#gfx-hud", "#gfx-shader-pane", "#gfx-panel", "#gfx-testcard", "#gfx-say", "#gfx-install-error"];
+const OUR_UI = ["#gfx-hud", "#gfx-shader-pane", "#gfx-ext", "#gfx-ext-btn", "#gfx-testcard", "#gfx-say", "#gfx-install-error"];
 
 const STYLE = `
   #gfx-mode-switch {
@@ -42,6 +42,23 @@ const STYLE = `
   body[data-ui-mode="graphics"] ${APP_CHROME.join(", body[data-ui-mode=\"graphics\"] ")} { display: none !important; }
   body[data-ui-mode="graphics"] #gfx-canvas { inset: 0 !important; width: 100vw !important; height: 100vh !important; }
   body[data-ui-mode="graphics"] #gfx-hud { display: block; }
+
+  /* graphics: OUR layout -- the shader editor docks right, the settings panel left, the HUD in the corner.
+     These are our own elements (gfx-editor.js makes #gfx-shader-pane, gfx-ui.js makes #gfx-ext and its button);
+     in Sonic Pi mode the app's drawer owns them, here we place them ourselves, so the two halves do not have to
+     agree about where our UI lives. */
+  body[data-ui-mode="graphics"] #gfx-shader-pane {
+    display: flex !important; position: fixed; top: 36px; right: 8px; bottom: 8px;
+    width: min(46vw, 760px); z-index: 96; border: 1px solid var(--WindowBorder); border-radius: 8px;
+    overflow: hidden; background: color-mix(in srgb, var(--WindowBackground) 95%, transparent);
+  }
+  body[data-ui-mode="graphics"] #gfx-ext {
+    display: flex !important; position: fixed; top: 36px; left: 8px; bottom: 44px;
+    width: min(30vw, 420px); z-index: 96; border: 1px solid var(--WindowBorder); border-radius: 8px;
+    overflow: auto; background: color-mix(in srgb, var(--WindowBackground) 95%, transparent);
+  }
+  body[data-ui-mode="graphics"] #gfx-ext-btn { position: fixed; left: 8px; bottom: 8px; z-index: 97; display: block; }
+  body[data-ui-mode="graphics"] #gfx-hud { position: fixed; top: 40px; left: 50%; transform: translateX(-50%); }
 
   /* sonic pi: our canvas stays (it is the background), but every control of ours goes */
   body[data-ui-mode="sonicpi"] ${OUR_UI.filter((s) => s !== "#gfx-install-error").join(", body[data-ui-mode=\"sonicpi\"] ")} { display: none !important; }
