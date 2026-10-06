@@ -168,8 +168,8 @@ export function createShadertoyPage() {
       <span class="tag" id="gfx-st-perf">—</span>
       <button id="gfx-st-fs-down" title="smaller code (Ctrl/Cmd+-)">A−</button>
       <button id="gfx-st-fs-up" title="larger code (Ctrl/Cmd++)">A+</button>
-      <button id="gfx-st-compile">Compile</button>
-      <button id="gfx-st-compile-all">Compile all</button>
+      <button id="gfx-st-compile" title="compile this pass — F8 (or Ctrl/Cmd+Enter in the code)">Compile</button>
+      <button id="gfx-st-compile-all" title="compile every pass — Shift+F8">Compile all</button>
       <button id="gfx-st-export">Export</button>
       <button id="gfx-st-import">Import</button>
       <input id="gfx-st-file" type="file" accept=".json,application/json" hidden>
@@ -440,6 +440,10 @@ export function createShadertoyPage() {
     return true;
   }
   document.addEventListener("keydown", (e) => {
+    // F8 compiles wherever the focus is (the original layer's own key for this: its probes record that Alt+Enter
+    // belongs to the app's Run, and that the shader key has to work with the focus somewhere else). Nothing is
+    // taken from the app while this page is closed -- every branch below checks `open` first except the switch.
+    if (open && e.key === "F8") { e.preventDefault(); e.stopPropagation(); return void compile(e.shiftKey ? null : tab); }
     if ((e.ctrlKey || e.metaKey) && e.altKey && (e.key === "s" || e.key === "S")) { e.preventDefault(); e.stopPropagation(); setOpen(!open); }
     else if (open && e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setOpen(false); }
     else if (open && (e.ctrlKey || e.metaKey) && (e.key === "+" || e.key === "=")) { e.preventDefault(); setFont(fontSize + 1); }
