@@ -8,6 +8,8 @@
 //             `audio` 512x2 of the engine's signal (row 0 spectrum, row 1 waveform), `none` a black pixel.
 //   * VARIABLES from the audio side: `puts :gfx, :set, :name, 0.5` in the music sets a uniform the shaders can
 //             declare (`uniform float name;`), and iAudioLevel follows the output's RMS with nothing asked for.
+import { parseDirective } from "./graphics/gfx-directive.js";
+
 export const PREVIEW = "preview";
 export const FULL = "fullscreen";
 export const HIDDEN = "hidden";
@@ -69,7 +71,7 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
   const t0 = performance.now();
   let frames = 0, raf = 0, prev = performance.now(), lastError = null;
   let passes = {}, channels = [];
-  const extra = new Map();                 // uniforms the music set
+  const extra = new Map();                 // name -> { vec: 1..4, value: number[] }, as the music set it
   const programs = new Map(), targets = new Map(), imageCache = new Map();
   let blackTex = null, audioTex = null, analyser = null, wave = null, spectrum = null, level = 0;
 
@@ -82,7 +84,7 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
     return sh;
   };
   function build(pass) {
-    const decl = [...extra.keys()].map((n) => `uniform float ${n};`).join("\n");
+    const decl = [...extra.entries()].map(([n, u]) => `uniform ${u.vec === 1 ? "float" : `vec${u.vec}`} ${n};`).join("\n");
     const vs = shader(gl.VERTEX_SHADER, VERT);
     const fs = shader(gl.FRAGMENT_SHADER, `${HEADER(decl)}\n${passes.Common ?? ""}\n${passes[pass] ?? ""}\n${BODY}`);
     const prog = gl.createProgram();
@@ -203,7 +205,14 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
       gl.uniform1i(u.frame, frames);
       gl.uniform4f(u.mouse, 0, 0, 0, 0);
       gl.uniform1f(u.level, level);
-      for (const [name, loc] of u.extra) if (loc) gl.uniform1f(loc, extra.get(name) ?? 0);
+      for (const [name, loc] of u.extra) {
+        if (!loc) continue;
+        const v = extra.get(name)?.value ?? [0];
+        if (v.length === 1) gl.uniform1f(loc, v[0]);
+        else if (v.length === 2) gl.uniform2f(loc, v[0], v[1]);
+        else if (v.length === 3) gl.uniform3f(loc, v[0], v[1], v[2]);
+        else gl.uniform4f(loc, v[0], v[1], v[2], v[3]);
+      }
       for (const i of [0, 1, 2, 3]) bindChannel(i);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     }
@@ -229,13 +238,19 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
     return { ok, failed };
   }
 
-  /** A variable from the audio side: `puts :gfx, :set, :name, 0.5` in the music. */
+  /**
+   * A uniform from the music: 1 to 4 numbers, as the directive parser allows (`:gfx, :uGain, 0.5`).
+   * Everything that declares uniforms is rebuilt, since the declaration has to match the value's width.
+   */
   function setVariable(name, value) {
     const n = String(name).replace(/[^A-Za-z0-9_]/g, "");
     if (!n) return false;
-    extra.set(n, Number(value) || 0);
+    const values = (Array.isArray(value) ? value : [value]).map(Number).filter((v) => Number.isFinite(v));
+    if (!values.length || values.length > 4) return false;
+    extra.set(n, { vec: values.length, value: values });
     programs.clear();
     for (const pass of PASS_ORDER) if ((passes[pass] ?? "").trim()) { try { build(pass); } catch (e) { lastError = String(e.message ?? e); } }
+    if ([...programs.keys()].length) ensureLoop();
     return true;
   }
 
@@ -252,27 +267,41 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
    *   puts "vol=0.5"                    (as part of a :gfx line)
    */
   const seen = [];
+  /** The same path as a record, for anyone calling it directly (a probe, the console). */
   function applyDirectives(text) {
-    const found = [];
-    for (const m of String(text).matchAll(/:(set|uniform)\b\s*,\s*:([A-Za-z_]\w*)\s*,\s*(-?\d*\.?\d+(?:[eE][-+]?\d+)?)/g)) found.push([m[2], Number(m[3])]);
-    if (!found.length) for (const m of String(text).matchAll(/:([A-Za-z_]\w*)\s*,\s*(-?\d*\.?\d+(?:[eE][-+]?\d+)?)/g)) found.push([m[1], Number(m[2])]);
-    if (!found.length) for (const m of String(text).matchAll(/([A-Za-z_]\w*)\s*[=:]\s*(-?\d*\.?\d+(?:[eE][-+]?\d+)?)/g)) found.push([m[1], Number(m[2])]);
-    for (const [name, value] of found) if (name !== "gfx" && name !== "gfxv") setVariable(name, value);
-    return found;
+    const d = parseDirective(String(text));
+    if (!d.ok || d.command) return [];
+    return setVariable(d.name, d.values) ? [[d.name, d.values]] : [];
   }
+
   function record(r) {
     const text = typeof r === "string" ? r : (r?.text ?? r?.message ?? r?.output ?? "");
-    if (!/:gfx/.test(text)) return false;
-    const applied = applyDirectives(text);
-    seen.push({ text: String(text).slice(0, 120), applied });
+    if (!/^\s*:?gfx/i.test(String(text).trim())) return false;
+    const d = parseDirective(String(text));
+    if (!d.ok) {                                  // never silent: the parser's own words
+      onSay?.(`the music said something I could not read: ${d.error}`);
+      console.info(`Shadertoy — ${d.error}`);
+      seen.push({ text: String(text).slice(0, 120), error: d.error });
+      if (seen.length > 6) seen.shift();
+      return false;
+    }
+    if (d.command === "document") {                // which set is on screen: not wired to the canvas yet
+      onSay?.(`the music asked for the "${d.arg}" set (not wired to the canvas yet)`);
+      seen.push({ text: String(text).slice(0, 120), command: "document", arg: d.arg });
+      if (seen.length > 6) seen.shift();
+      return false;
+    }
+    const ok = setVariable(d.name, d.values);
+    seen.push({ text: String(text).slice(0, 120), name: d.name, values: d.values, ok });
     if (seen.length > 6) seen.shift();
-    const line = applied.length
-      ? `from the music: ${applied.map(([n, v]) => `${n}=${v}`).join(", ")}`
-      : `a :gfx line arrived but no name/value pair was in it: ${String(text).slice(0, 80)}`;
-    onSay?.(line);
-    console.info(`Shadertoy — ${line}`);
-    return applied.length > 0;
+    if (d.verbose || !ok) {                        // :gfxv says each one, and a failure always does
+      const line = ok ? `${d.name} = ${d.values.join(", ")}` : `${d.name}: ${d.error ?? "not usable"}`;
+      onSay?.(`from the music: ${line}`);
+      console.info(`Shadertoy — from the music: ${line}`);
+    }
+    return ok;
   }
+
   globalThis.sonicPiGfx = Object.assign(globalThis.sonicPiGfx ?? {}, { record, canvas });
 
   const btn = document.createElement("button");

@@ -18,16 +18,26 @@ export const EDITOR_TAB = true;     // ...except the editor, which is back on it
 if (GFX_ENABLED) await import("./graphics/gfx-layer.js");
 
 if (EDITOR_TAB && !GFX_ENABLED) {
-  const { createCanvasView } = await import("./gfx-canvas-view.js");
-  const canvasView = createCanvasView({ onSay: (t) => console.info(`Shadertoy — ${t}`) });
-  const { createEditorTab, defaultPasses } = await import("./gfx-editor-tab.js");
-  const editor = createEditorTab({ log: (t) => console.info(`Shadertoy — ${t}`), canvasView });
-  // compile once at start, so the preview is not a black square: the saved set if there is one, the starter if
-  // there is not (measured: with nothing saved this used to hand the canvas an empty Image and refuse it)
-  const sets = (() => { try { return JSON.parse(localStorage.getItem("sp-shadertoy-sets") ?? "null"); } catch { return null; } })();
-  const set0 = sets?.docs?.[sets.doc ?? 0];
-  const passes = set0?.passes ?? defaultPasses();
-  canvasView.setPasses(passes, set0?.channels ?? []);
-  window.sonicPiCanvas = canvasView;
-  window.sonicPiCanvas = canvasView;
+  let canvasView = null;
+  try {
+    const { createCanvasView } = await import("./gfx-canvas-view.js");
+    canvasView = createCanvasView({ onSay: (t) => console.info(`Shadertoy — ${t}`) });
+  } catch (e) {
+    // loud, because a canvas that never appears is otherwise indistinguishable from one that draws nothing
+    console.error(`Shadertoy — the canvas could not be created: ${e?.stack ?? e}`);
+  }
+  // published BEFORE anything is compiled: a startup compile that throws must not take the object with it, or
+  // the picture is there and nothing can reach it (measured: window.sonicPiCanvas was undefined while every
+  // module had loaded fine)
+  if (canvasView) window.sonicPiCanvas = canvasView;
+  try {
+    const { createEditorTab, defaultPasses } = await import("./gfx-editor-tab.js");
+    createEditorTab({ log: (t) => console.info(`Shadertoy — ${t}`), canvasView });
+    const sets = (() => { try { return JSON.parse(localStorage.getItem("sp-shadertoy-sets") ?? "null"); } catch { return null; } })();
+    const set0 = sets?.docs?.[sets.doc ?? 0];
+    canvasView?.setPasses(set0?.passes ?? defaultPasses(), set0?.channels ?? []);
+  } catch (e) {
+    console.error(`Shadertoy — the editor or the startup compile failed: ${e?.message ?? e}`);
+    try { canvasView.setPasses({ Image: "void mainImage(out vec4 c, in vec2 p) { c = vec4(p.x / iResolution.x, p.y / iResolution.y, 0.5, 1.0); }" }, []); } catch {}
+  }
 }
