@@ -51,7 +51,7 @@ void mainImage(out vec4 c, in vec2 p) {
 `,
 };
 const STYLE = `
-  #gfx-st { position: fixed; inset: 0; z-index: 99; display: none; flex-direction: column;
+  #gfx-st { --gfx-st-fs: 13px; position: fixed; inset: 0; z-index: 99; display: none; flex-direction: column;
     background: var(--WindowBackground); color: var(--WindowForeground);
     font: 13px/1.45 system-ui, sans-serif; }
   body[data-gfx-st="open"] #gfx-st { display: flex; }
@@ -96,7 +96,7 @@ const STYLE = `
      The textarea keeps the caret, the selection and the keyboard; its own text is invisible. */
   #gfx-st-codewrap { position: relative; flex: 1 1 auto; min-width: 0; margin: 8px; }
   #gfx-st-hl, #gfx-st-code { position: absolute; inset: 0; margin: 0; padding: 10px; border-radius: 8px;
-    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; tab-size: 4;
+    font: var(--gfx-st-fs, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; tab-size: 4;
     overflow: auto; border: 1px solid var(--WindowBorder); }
   #gfx-st-hl { pointer-events: none; color: var(--WindowForeground); background: color-mix(in srgb, var(--WindowBackground) 72%, transparent); }
   #gfx-st-code { resize: none; outline: none; background: transparent; color: transparent;
@@ -166,6 +166,8 @@ export function createShadertoyPage() {
       <span class="tag" id="gfx-st-status"></span>
       <span class="spacer"></span>
       <span class="tag" id="gfx-st-perf">—</span>
+      <button id="gfx-st-fs-down" title="smaller code (Ctrl/Cmd+-)">A−</button>
+      <button id="gfx-st-fs-up" title="larger code (Ctrl/Cmd++)">A+</button>
       <button id="gfx-st-compile">Compile</button>
       <button id="gfx-st-compile-all">Compile all</button>
       <button id="gfx-st-export">Export</button>
@@ -361,6 +363,18 @@ export function createShadertoyPage() {
       : `compiled ${r.ok.length} pass(es)`, r.failed.length > 0);
     return r.failed.length === 0;
   }
+  /** The code's size: one number, worn by both layers, so the highlight cannot drift off the text. */
+  const FS_KEY = "sp-gfx-code-size";
+  let fontSize = Number((() => { try { return localStorage.getItem(FS_KEY); } catch { return null; } })()) || 13;
+  function setFont(px) {
+    fontSize = Math.max(9, Math.min(28, Math.round(px)));
+    el.style.setProperty("--gfx-st-fs", `${fontSize}px`);
+    try { localStorage.setItem(FS_KEY, String(fontSize)); } catch {}
+    say(`code size ${fontSize}px`);
+  }
+  el.querySelector("#gfx-st-fs-up").addEventListener("click", () => setFont(fontSize + 1));
+  el.querySelector("#gfx-st-fs-down").addEventListener("click", () => setFont(fontSize - 1));
+
   el.querySelector("#gfx-st-compile").addEventListener("click", () => compile(tab === SHARED ? SHARED : tab));
   el.querySelector("#gfx-st-compile-all").addEventListener("click", () => compile(null));
 
@@ -428,9 +442,12 @@ export function createShadertoyPage() {
   document.addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.altKey && (e.key === "s" || e.key === "S")) { e.preventDefault(); e.stopPropagation(); setOpen(!open); }
     else if (open && e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setOpen(false); }
+    else if (open && (e.ctrlKey || e.metaKey) && (e.key === "+" || e.key === "=")) { e.preventDefault(); setFont(fontSize + 1); }
+    else if (open && (e.ctrlKey || e.metaKey) && (e.key === "-" || e.key === "_")) { e.preventDefault(); setFont(fontSize - 1); }
   }, true);
 
   document.body.dataset.gfxSt = "closed";
+  setFont(fontSize);      // the remembered size, before the first paint
   paintAll();
   return { el, button: btn, open: () => open, set: setOpen, toggle: () => setOpen(!open), record,
     set: () => set, doc, values: () => Object.fromEntries([...values].map(([n, v]) => [n, v.value])), tab: () => tab };
