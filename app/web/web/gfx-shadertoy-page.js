@@ -311,6 +311,9 @@ export function createShadertoyPage() {
     const vec = d.values.length;
     values.set(d.name, { value: d.values, vec });
     paintVars();
+    // and on to the render loop -- without this the value only ever reached this panel, which is exactly how it
+    // looked: the page showed "uGain = 0.5" while no shader ever saw it
+    globalThis.sonicPiCanvas?.setVariable?.(d.name, d.values);
     if (d.verbose) say(`from the music: ${d.name} = ${d.values.join(", ")}`);
     return true;
   }
