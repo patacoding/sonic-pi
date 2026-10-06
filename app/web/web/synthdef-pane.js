@@ -75,9 +75,26 @@ export function highlightSC(code) {
 export function createSynthdefPane({
   service = SERVICE_DEFAULT, session = null, onSay = null, onProblem = null,
   store = globalThis.localStorage ?? null, fetchImpl = globalThis.fetch?.bind(globalThis) ?? null,
-} = {}) {
+  enabled = true, } = {}) {
   const say = (t) => { console.info(`Synth — ${t}`); if (onSay) onSay(t); };
   const problem = (t) => (onProblem ? onProblem(t) : console.warn(t));
+
+  // PAUSED: the synth side is off (web/synth-host.js: OWN_SYNTH = false). Nothing of it may reach the UI --
+  // no rail button, no pane, no panel section -- but the shape of the API stays, so nothing that calls it has
+  // to know. The code below is untouched and comes back with the switch.
+  if (!enabled) {
+    return {
+      paused: true,
+      open() { return false; }, close() { return false; }, toggle() { return false; }, isOpen: () => false,
+      compile: async () => null, loadDef: async () => false, refresh() {},
+      knownNames: () => [], autoLoadKnown: async () => false,
+      get state() { return { note: "", library: "", status: "" }; },
+      get active() { return { name: "", source: "" }; },
+      get documents() { return []; },
+      setSource() {}, onChange() { return () => {}; },
+      highlightSC: (t) => t, EXAMPLE: "",
+    };
+  }
   const read = (k, d) => { try { return store?.getItem(k) ?? d; } catch { return d; } };
   const write = (k, v) => { try { store?.setItem(k, v); } catch { /* private mode */ } };
 
@@ -476,6 +493,8 @@ body[data-drawer="${SYNTHDEF_PANE}"] #gfx-synthdef-pane { display: flex; }
     document.addEventListener("DOMContentLoaded", attach, { once: true });
     setTimeout(attach, 1000);
   }
+
+
 
   const isOpen = () => document.body?.dataset.drawer === SYNTHDEF_PANE || pane?.classList.contains("sd-floating");
   function open() {

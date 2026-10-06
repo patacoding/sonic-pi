@@ -74,8 +74,10 @@ export function createSynthHost({ say = null, problem = null, section = null } =
   // source, polls the job, and loads what comes back. If the service is not running, it says so and nothing
   // else in the app is affected.
   // the writing area: its own pane in the drawer (synthdef-pane.js); the panel section below is only a way in
-  const synthdefPane = createSynthdefPane({ onSay: text, onProblem: warn });
-  const synthdefs = createSynthdefs({ pane: synthdefPane, onSay: text, onProblem: warn });
+  const synthdefPane = createSynthdefPane({ onSay: text, onProblem: warn, enabled: OWN_SYNTH });
+  const synthdefs = OWN_SYNTH
+    ? createSynthdefs({ pane: synthdefPane, onSay: text, onProblem: warn })
+    : { panelSection: () => null, refresh() {} };          // paused: no section, no pane, no rail button
 
   /**
    * Is anything reading our synth? Its sound goes INTO the engine's input, and only a `sound_in_stereo`
