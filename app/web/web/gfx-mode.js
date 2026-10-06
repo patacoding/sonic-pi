@@ -26,6 +26,11 @@ const APP_CHROME = [
 const OUR_UI = ["#gfx-hud", "#gfx-shader-pane", "#gfx-ext", "#gfx-ext-btn", "#gfx-testcard", "#gfx-say", "#gfx-install-error"];
 
 const STYLE = `
+  /* How much of the picture shows through our own docks. It is a knob, not a taste: the whole point of a shader
+     editor is watching the picture change as the code does, and a dock that hides it makes the editor useless.
+     --gfx-dock-alpha is set from the layer's settings; 0.82 is a readable default that still shows the picture. */
+  :root { --gfx-dock-alpha: 0.82; }
+
   #gfx-mode-switch {
     position: fixed; top: 6px; left: 50%; transform: translateX(-50%); z-index: 99;
     display: flex; gap: 0; border: 1px solid var(--WindowBorder); border-radius: 999px; overflow: hidden;
@@ -37,6 +42,11 @@ const STYLE = `
     padding: 5px 12px; cursor: pointer; font: inherit;
   }
   #gfx-mode-switch button[aria-pressed="true"] { opacity: 1; background: var(--HighlightBackground, #d53); color: #fff; }
+
+  /* The picture is never hidden by either mode: Sonic Pi works over it (its interface is translucent, which is
+     the point of it being behind), and so does the shader editor -- the preview IS the point. This is asserted
+     rather than assumed: see the mode check in webui-probe (canvas visible, rendering, under our docks). */
+  #gfx-canvas { z-index: 0; }
 
   /* graphics: the picture is the window, and none of Sonic Pi's furniture is in it */
   body[data-ui-mode="graphics"] ${APP_CHROME.join(", body[data-ui-mode=\"graphics\"] ")} { display: none !important; }
@@ -50,12 +60,16 @@ const STYLE = `
   body[data-ui-mode="graphics"] #gfx-shader-pane {
     display: flex !important; position: fixed; top: 36px; right: 8px; bottom: 8px;
     width: min(46vw, 760px); z-index: 96; border: 1px solid var(--WindowBorder); border-radius: 8px;
-    overflow: hidden; background: color-mix(in srgb, var(--WindowBackground) 95%, transparent);
+    overflow: hidden;
+    background: color-mix(in srgb, var(--WindowBackground) calc(var(--gfx-dock-alpha) * 100%), transparent);
+    backdrop-filter: blur(2px);
   }
   body[data-ui-mode="graphics"] #gfx-ext {
     display: flex !important; position: fixed; top: 36px; left: 8px; bottom: 44px;
     width: min(30vw, 420px); z-index: 96; border: 1px solid var(--WindowBorder); border-radius: 8px;
-    overflow: auto; background: color-mix(in srgb, var(--WindowBackground) 95%, transparent);
+    overflow: auto;
+    background: color-mix(in srgb, var(--WindowBackground) calc(var(--gfx-dock-alpha) * 100%), transparent);
+    backdrop-filter: blur(2px);
   }
   body[data-ui-mode="graphics"] #gfx-ext-btn { position: fixed; left: 8px; bottom: 8px; z-index: 97; display: block; }
   body[data-ui-mode="graphics"] #gfx-hud { position: fixed; top: 40px; left: 50%; transform: translateX(-50%); }
