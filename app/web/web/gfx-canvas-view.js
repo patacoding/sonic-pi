@@ -116,7 +116,14 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
     const loc = gl.getAttribLocation(prog, "a");
     gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
-    for (const i of [0, 1, 2, 3]) gl.uniform1i(gl.getUniformLocation(prog, `iChannel${i}`), i);
+    // the program must be CURRENT before its uniforms can be set: without this the sampler bindings were
+    // rejected with INVALID_OPERATION ("location is not from the associated program") and every iChannel read
+    // whatever texture unit happened to be left over
+    gl.useProgram(prog);
+    for (const i of [0, 1, 2, 3]) {
+      const loc = gl.getUniformLocation(prog, `iChannel${i}`);
+      if (loc) gl.uniform1i(loc, i);      // null when the shader does not use that channel: nothing to bind
+    }
     programs.set(pass, { prog, u: {
       res: gl.getUniformLocation(prog, "iResolution"), time: gl.getUniformLocation(prog, "iTime"),
       delta: gl.getUniformLocation(prog, "iTimeDelta"), frame: gl.getUniformLocation(prog, "iFrame"),
