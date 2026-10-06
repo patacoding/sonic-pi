@@ -274,15 +274,22 @@ export function createEditorTab({ canvasView = null, log = null } = {}) {
       log?.(res.failed.length ? `canvas: ${res.failed.join("; ")}` : `canvas compiled: ${res.ok.join(", ")}`);
     }
     const used = doc().channels.map((c, i) => (c.kind === "buffer" ? `iChannel${i}→${c.buffer}` : c.kind === "none" ? null : `iChannel${i}→${c.kind}`)).filter(Boolean);
-    say(problems ? problems
-      : `${state.pass} looks like a shader. channels: ${used.length ? used.join(", ") : "none set"}. ` +
-        "The render canvas is not wired up yet, so nothing was drawn — the text is saved either way.", !!problems);
+    if (problems) return say(problems, true);
+    const res = canvasView?.setPasses?.(doc().passes, doc().channels);
+    const compiled = res?.ok ?? [];
+    const failed = res?.failed ?? [];
+    const vars = Object.keys(canvasView?.variables?.() ?? {});
+    say(`${state.pass} is fine${compiled.length ? `; the canvas compiled ${compiled.join(", ")}` : "; no pass has code yet"}.` +
+      ` channels: ${used.length ? used.join(", ") : "none set"}${vars.length ? `, variables: ${vars.join(", ")}` : ""}.` +
+      (failed.length ? `\nnot compiled: ${failed.join("; ")}` : "") +
+      (canvasView?.lastError?.() && !failed.length ? `\ncanvas: ${canvasView.lastError()}` : ""), false);
   }
   function compileAll() {
     const problems = PASSES.map(checkOne).filter(Boolean);
-    say(problems.length ? problems.join("\n")
-      : `all ${PASSES.length} passes check out (${PASSES.filter((p) => (doc().passes[p] ?? "").trim()).length} with code). ` +
-        "The render canvas is not wired up yet, so nothing was drawn.", problems.length > 0);
+    if (problems.length) return say(problems.join("\n"), true);
+    const res = canvasView?.setPasses?.(doc().passes, doc().channels) ?? { ok: [], failed: [] };
+    say(`all ${PASSES.length} passes check out; the canvas compiled ${res.ok.length ? res.ok.join(", ") : "nothing (no pass has code)"}.` +
+      (res.failed.length ? `\nnot compiled: ${res.failed.join("; ")}` : ""), res.failed.length > 0);
   }
   el.querySelector("#gfx-ed-compile").addEventListener("click", compile);
   el.querySelector("#gfx-ed-compile-all").addEventListener("click", compileAll);

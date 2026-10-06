@@ -239,11 +239,39 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
     return true;
   }
 
-  /** The app hands records to whoever is at window.sonicPiGfx: this is the audio side's way in. */
+  /**
+   * The app hands records to whoever is at window.sonicPiGfx: this is the audio side's way in.
+   *
+   * Tolerant on purpose, and LOUD about what it sees. The first version matched one exact spelling
+   * (`:gfx, :set, :name, 0.5`) and said nothing when it did not match, so "the variables do not sync" and "the
+   * directive never arrived" looked identical -- which is the worst way for a feature to fail. Now every record
+   * that mentions the sigil is reported, and the name/value is read however it is written:
+   *
+   *   puts :gfx, :set, :vol, 0.5        puts :gfx, :uniform, :vol, 0.5
+   *   puts :gfx, :vol, 0.5              puts :gfx, :set, :vol, 0.5, :set, :pitch, 3
+   *   puts "vol=0.5"                    (as part of a :gfx line)
+   */
+  const seen = [];
+  function applyDirectives(text) {
+    const found = [];
+    for (const m of String(text).matchAll(/:(set|uniform)\b\s*,\s*:([A-Za-z_]\w*)\s*,\s*(-?\d*\.?\d+(?:[eE][-+]?\d+)?)/g)) found.push([m[2], Number(m[3])]);
+    if (!found.length) for (const m of String(text).matchAll(/:([A-Za-z_]\w*)\s*,\s*(-?\d*\.?\d+(?:[eE][-+]?\d+)?)/g)) found.push([m[1], Number(m[2])]);
+    if (!found.length) for (const m of String(text).matchAll(/([A-Za-z_]\w*)\s*[=:]\s*(-?\d*\.?\d+(?:[eE][-+]?\d+)?)/g)) found.push([m[1], Number(m[2])]);
+    for (const [name, value] of found) if (name !== "gfx" && name !== "gfxv") setVariable(name, value);
+    return found;
+  }
   function record(r) {
-    const text = typeof r === "string" ? r : (r?.text ?? r?.message ?? "");
-    const m = /:gfx\w*\s*,\s*:set\s*,\s*:([A-Za-z_][A-Za-z0-9_]*)\s*,\s*(-?[\d.]+)/.exec(text);
-    if (m) setVariable(m[1], Number(m[2]));
+    const text = typeof r === "string" ? r : (r?.text ?? r?.message ?? r?.output ?? "");
+    if (!/:gfx/.test(text)) return false;
+    const applied = applyDirectives(text);
+    seen.push({ text: String(text).slice(0, 120), applied });
+    if (seen.length > 6) seen.shift();
+    const line = applied.length
+      ? `from the music: ${applied.map(([n, v]) => `${n}=${v}`).join(", ")}`
+      : `a :gfx line arrived but no name/value pair was in it: ${String(text).slice(0, 80)}`;
+    onSay?.(line);
+    console.info(`Shadertoy — ${line}`);
+    return applied.length > 0;
   }
   globalThis.sonicPiGfx = Object.assign(globalThis.sonicPiGfx ?? {}, { record, canvas });
 
@@ -266,7 +294,7 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
   }
   set(state);
 
-  return { canvas, button: btn, setPasses, setVariable, record,
+  return { canvas, button: btn, setPasses, setVariable, record, applyDirectives, seen: () => [...seen],
     audio: () => ({ attached: !!analyser, level: Number(level.toFixed(4)), samples: !!audioTex }),
     variables: () => Object.fromEntries(extra),
     state: () => state, set, next: () => set(ORDER[(ORDER.indexOf(state) + 1) % ORDER.length]),
