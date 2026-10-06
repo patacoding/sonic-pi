@@ -185,13 +185,13 @@ export function createShadertoyPage() {
         d.channels[i] = kind.value === "buffer" ? { kind: "buffer", pass: "Buffer A" }
           : kind.value === "audio" ? { kind: "audio", band: "fft" }
             : kind.value === "image" ? { kind: "image", name: ch.name ?? "" } : { kind: "none" };
-        save(); paintChannels();
+        save(); paintChannels(); push();
       });
       box.append(n, kind);
       if (ch.kind === "buffer") {
         const sel = document.createElement("select");
         for (const p of PASS_ORDER) { const o = document.createElement("option"); o.value = p; o.textContent = p; o.selected = (ch.pass ?? ch.buffer) === p; sel.appendChild(o); }
-        sel.addEventListener("change", () => { ch.pass = sel.value; save(); });
+        sel.addEventListener("change", () => { ch.pass = sel.value; save(); push(); });
         box.appendChild(sel);
       } else if (ch.kind === "image") {
         const f = document.createElement("input");
@@ -203,7 +203,7 @@ export function createShadertoyPage() {
           const rd = new FileReader();
           rd.onload = () => {
             ch.name = file.name; ch.data = String(rd.result);       // in memory: storage keeps CODE only
-            save(); paintChannels();
+            save(); paintChannels(); push();
             say(`iChannel${i} ← ${file.name} (${Math.round(String(ch.data).length / 1024)} KB, in memory — a reload asks for it again)`);
           };
           rd.onerror = () => say(`could not read ${file.name}`, true);
@@ -224,7 +224,7 @@ export function createShadertoyPage() {
       } else if (ch.kind === "audio") {
         const sel = document.createElement("select");
         for (const band of ["fft", "wave", "scope"]) { const o = document.createElement("option"); o.value = band; o.textContent = band; o.selected = ch.band === band; sel.appendChild(o); }
-        sel.addEventListener("change", () => { ch.band = sel.value; save(); });
+        sel.addEventListener("change", () => { ch.band = sel.value; save(); push(); });
         box.appendChild(sel);
       }
       chansEl.appendChild(box);
@@ -236,6 +236,12 @@ export function createShadertoyPage() {
       ? [...values].map(([n, v]) => `${n} = ${v.value.join(", ")}  (${v.vec === 1 ? "float" : `vec${v.vec}`})`).join("\n")
       : "(nothing yet — put a live_loop in the music)";
   };
+  /** Everything the canvas needs, sent now: a channel change must not wait for a Compile. */
+  function push() {
+    const d = doc();
+    return globalThis.sonicPiCanvas?.setPasses?.({ Common: d.common ?? "", ...d.passes }, d.channels);
+  }
+
   function paintAll() { paintPasses(); paintChannels(); paintVars(); codeEl.value = tab === SHARED ? (doc().common ?? "") : (doc().passes?.[tab] ?? ""); }
 
   codeEl.addEventListener("input", () => { remember(); });
@@ -263,8 +269,7 @@ export function createShadertoyPage() {
       if (pc !== SHARED && !/void\s+mainImage\s*\(/.test(src)) problems.push(`${pc}: no void mainImage(out vec4 c, in vec2 p)`);
     }
     if (problems.length) { say(problems.join("\n"), true); return false; }
-    const r = globalThis.sonicPiCanvas?.setPasses?.({ Common: d.common ?? "", ...d.passes }, d.channels)
-      ?? { ok: [], failed: ["there is no canvas to compile into"] };
+    const r = push() ?? { ok: [], failed: ["there is no canvas to compile into"] };
     say(r.failed.length ? `compiled ${r.ok.join(", ") || "nothing"}; not compiled: ${r.failed.join("; ")}`
       : `compiled ${r.ok.length} pass(es): ${r.ok.join(", ")}`, r.failed.length > 0);
     return r.failed.length === 0;
