@@ -31,7 +31,7 @@ const STYLE = `
   body[data-gfx-view="hidden"] #gfx-canvas { display: none !important; }
 
   #gfx-view-btn {
-    position: fixed; top: 6px; right: 6px; z-index: 99;
+    position: fixed; top: 6px; right: 108px; z-index: 99;   /* the tab button sits to its right */
     display: flex; align-items: center; gap: 6px; padding: 4px 10px; cursor: pointer;
     border: 1px solid var(--WindowBorder); border-radius: 999px;
     background: color-mix(in srgb, var(--WindowBackground) 92%, transparent);

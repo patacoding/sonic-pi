@@ -43,6 +43,7 @@ import { emptyDocument } from "./gfx-document.js";
 import { testCardDocument, TEST_CARD } from "./gfx-testcard.js";
 import { createSynthHost, isSynthOrder } from "./synth-host.js";
 import { createViewSwitch } from "./gfx-view.js";
+import { createShadertoyTab } from "./gfx-tab.js";
 
 const STYLE_ID = "gfx-style";
 const ALPHA_KEY = "sp-gfx-ui-alpha";
@@ -897,9 +898,12 @@ function install() {
 
   // how the rendered picture is shown: preview / fullscreen / hidden (gfx-view.js)
   const viewSwitch = createViewSwitch({ onChange: (v) => say(`graphics: ${v}`) });
+  // our own fullscreen tab: the editor and its settings, over the audio page (gfx-tab.js)
+  const shadertoy = createShadertoyTab({ viewSwitch, onChange: (o) => say(o ? "Shadertoy tab" : "back to audio") });
 
   window.sonicPiGfx = {
     viewSwitch,
+    shadertoy,
     record,
     canvas: null,
     /**
