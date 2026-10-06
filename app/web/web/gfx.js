@@ -1,14 +1,17 @@
-// ── The graphics layer is OFF ───────────────────────────────────────────────────────────────────────────────
+// ── Nothing of ours is on the page ──────────────────────────────────────────────────────────────────────────
 //
-// By request: the page is the app's own again, with none of our graphics UI on it -- no canvas, no panes, no
-// panel, no HUD, no mode switch, no styles. The whole layer is kept, untouched, in gfx-layer.js beside this
-// file, and one line brings it back:
+// By request: every piece of graphics UI is out of the audio interface -- no canvas, no buttons, no panes, no
+// settings, no styles, not even a file fetched beyond this one. What is left in the page is the app's own
+// interface, untouched.
 //
-//     export const GFX_ENABLED = true;
+// The whole layer is kept in ./graphics/ (every file moved, nothing rewritten: graphics/gfx-layer.js is the
+// entry it always was). The page loads this file and nothing comes of it -- and the app's own record hook calls
+// window.sonicPiGfx?.record(…), which is a no-op when the object is not there, so the app runs exactly as it
+// shipped.
 //
-// Nothing upstream is involved either way: index.html loads this file (one of the two lines that are the whole
-// intrusion), and with the layer off `window.sonicPiGfx` simply never appears -- the app's record hook calls it
-// through `window.sonicPiGfx?.record(…)`, so it is a no-op and the app runs exactly as it shipped.
-export const GFX_ENABLED = true;
+// Putting it back is deliberately a piece at a time: turn this on and the gate imports the layer, which is where
+// every part of it lives; or import one module from ./graphics/ directly to bring back only that part. The
+// build copies ./graphics/ into the artifact when this is true (tools/build-for-cdn.sh).
+export const GFX_ENABLED = false;
 
-if (GFX_ENABLED) await import("./gfx-layer.js");
+if (GFX_ENABLED) await import("./graphics/gfx-layer.js");
