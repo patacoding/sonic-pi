@@ -44,21 +44,16 @@ void main() {
 }`;
 
 const STYLE = `
-  #gfx-canvas { position: fixed; z-index: 94; background: #000; display: block; }
+  /* The canvas is the top level of the page, on its own: it does not know or care whether the audio interface or
+     the Shadertoy one is showing, and neither of them can place it. One layer above them (z 100), three states,
+     one button (z 101) -- and the only thing that ever takes it off the screen is "hidden". */
+  #gfx-canvas { position: fixed; z-index: 100; background: #000; display: block; }
   body[data-gfx-canvas="preview"] #gfx-canvas { inset: auto 8px 8px auto; width: 25vw; height: 25vh;
     border: 1px solid var(--WindowBorder); border-radius: 8px; box-shadow: 0 6px 24px rgb(0 0 0 / 35%); }
   body[data-gfx-canvas="fullscreen"] #gfx-canvas { inset: 0; width: 100vw; height: 100vh; border: 0; border-radius: 0; }
   body[data-gfx-canvas="hidden"] #gfx-canvas { display: none !important; }
 
-  /* In the Shadertoy view the picture sits ABOVE the editor: the top strip of the window, with the editor's own
-     rows and code starting underneath it. That is Shadertoy's own arrangement, and it is the one that makes
-     sense -- you look at the picture and the code that draws it in the same glance. The three states still
-     apply; "hidden" leaves the editor the whole window. */
-  body[data-gfx-ed="open"] #gfx-canvas { position: fixed; inset: 0 0 auto 0; width: 100vw; height: 40vh;
-    z-index: 99; border: 0; border-bottom: 1px solid var(--WindowBorder); border-radius: 0; }
-  body[data-gfx-ed="open"] #gfx-ed { padding-top: 40vh; }
-
-  #gfx-canvas-btn { position: fixed; right: 0; top: calc(50% + 58px); transform: translateY(-50%); z-index: 99;
+  #gfx-canvas-btn { position: fixed; right: 0; top: calc(50% + 58px); transform: translateY(-50%); z-index: 101;
     writing-mode: vertical-rl; padding: 10px 6px; cursor: pointer; font: 12px/1 system-ui, sans-serif;
     letter-spacing: .04em; color: var(--WindowForeground); border: 1px solid var(--WindowBorder); border-right: 0;
     border-radius: 8px 0 0 8px; background: color-mix(in srgb, var(--WindowBackground) 92%, transparent); }
