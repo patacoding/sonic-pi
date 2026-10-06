@@ -92,11 +92,26 @@ const STYLE = `
   #gfx-st .chan .prev img { width: 100%; height: 100%; object-fit: cover; display: block; }
   #gfx-st .chan { flex-wrap: wrap; }
   #gfx-st-main { flex: 1 1 auto; min-height: 0; display: flex; }
-  #gfx-st-code { flex: 1 1 auto; min-width: 0; margin: 8px; resize: none; tab-size: 4; white-space: pre;
-    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--WindowForeground);
-    background: color-mix(in srgb, var(--WindowBackground) 72%, transparent);
-    border: 1px solid var(--WindowBorder); border-radius: 8px; padding: 10px; outline: none; }
+  /* the code area: a highlight layer UNDER the textarea, both with identical metrics so they line up exactly.
+     The textarea keeps the caret, the selection and the keyboard; its own text is invisible. */
+  #gfx-st-codewrap { position: relative; flex: 1 1 auto; min-width: 0; margin: 8px; }
+  #gfx-st-hl, #gfx-st-code { position: absolute; inset: 0; margin: 0; padding: 10px; border-radius: 8px;
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; tab-size: 4;
+    overflow: auto; border: 1px solid var(--WindowBorder); }
+  #gfx-st-hl { pointer-events: none; color: var(--WindowForeground); background: color-mix(in srgb, var(--WindowBackground) 72%, transparent); }
+  #gfx-st-code { resize: none; outline: none; background: transparent; color: transparent;
+    caret-color: var(--WindowForeground); }
   #gfx-st-code:focus { border-color: #d53; }
+  #gfx-st-code::selection { background: color-mix(in srgb, #d53 45%, transparent); }
+  #gfx-st-hl .c { color: #7f8c98; font-style: italic; }   /* comment */
+  #gfx-st-hl .s { color: #9ccc65; }                       /* string */
+  #gfx-st-hl .p { color: #d19a66; }                       /* preprocessor */
+  #gfx-st-hl .k { color: #c678dd; }                       /* keyword */
+  #gfx-st-hl .t { color: #e5c07b; }                       /* type */
+  #gfx-st-hl .b { color: #61afef; }                       /* builtin function */
+  #gfx-st-hl .u { color: #56b6c2; }                       /* Shadertoy's own uniforms */
+  #gfx-st-hl .n { color: #d19a66; }                       /* number */
+  #gfx-st-hl .f { color: #98c379; }                       /* a call this shader defines */
   #gfx-st-side { flex: 0 0 300px; display: flex; flex-direction: column; gap: 8px; margin: 8px 8px 8px 0; }
   #gfx-st-side section { border: 1px solid var(--WindowBorder); border-radius: 8px; padding: 8px;
     background: color-mix(in srgb, var(--WindowBackground) 72%, transparent); }
@@ -158,7 +173,7 @@ export function createShadertoyPage() {
       <input id="gfx-st-file" type="file" accept=".json,application/json" hidden>
       </div>
     <div id="gfx-st-row" class="passes"></div>
-    <div id="gfx-st-main"><textarea id="gfx-st-code" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+    <div id="gfx-st-main"><div id="gfx-st-codewrap"><pre id="gfx-st-hl" aria-hidden="true"></pre><textarea id="gfx-st-code" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea></div>
       <div id="gfx-st-side"><section><h4>iChannels</h4><div id="gfx-st-chans"></div></section>
         <section><h4>from the music</h4><div id="gfx-st-vars">(nothing yet)</div></section></div></div>
 `;
@@ -166,8 +181,41 @@ export function createShadertoyPage() {
 
   const passesRow = el.querySelector("#gfx-st-row.passes");
   const codeEl = el.querySelector("#gfx-st-code");
+  const hlEl = el.querySelector("#gfx-st-hl");
+  const paintHl = () => { hlEl.innerHTML = highlightGLSL(codeEl.value) + "\n"; hlEl.scrollTop = codeEl.scrollTop; hlEl.scrollLeft = codeEl.scrollLeft; };
   const chansEl = el.querySelector("#gfx-st-chans");
   const varsEl = el.querySelector("#gfx-st-vars");
+  /**
+   * GLSL, highlighted in one pass.
+   *
+   * One regex with its alternatives in priority order -- comment, string, preprocessor, keyword, type, builtin,
+   * Shadertoy's uniforms, number, call -- and every match escaped and wrapped as it is found. Chained replaces
+   * were what broke the last highlighter I wrote: each pass rescanned the markup the previous one had inserted.
+   */
+  const GLSL_TOKEN = new RegExp([
+    "(\\/\\/[^\\n]*|\\/\\*[\\s\\S]*?\\*\\/)",                                  // 1 comment
+    "(&quot;(?:[^&\"\\\\]|\\\\.)*&quot;|\"(?:[^\"\\\\]|\\\\.)*\")",             // 2 string
+    "(^[ \\t]*#[^\\n]*)",                                                              // 3 preprocessor
+    "\\b(void|float|int|uint|bool|vec2|vec3|vec4|ivec2|ivec3|ivec4|bvec2|bvec3|bvec4|mat2|mat3|mat4|sampler2D|samplerCube|uniform|varying|attribute|const|in|out|inout|if|else|for|while|do|return|break|continue|discard|struct|precision|highp|mediump|lowp|true|false)\\b", // 4 keyword/type
+    "\\b(sin|cos|tan|asin|acos|atan|pow|exp|exp2|log|log2|sqrt|inversesqrt|abs|sign|floor|ceil|fract|mod|min|max|clamp|mix|step|smoothstep|length|distance|dot|cross|normalize|reflect|refract|faceforward|texture|textureLod|texelFetch|dFdx|dFdy|fwidth|mainImage)\\b", // 5 builtin
+    "\\b(iResolution|iTime|iTimeDelta|iFrame|iFrameRate|iMouse|iDate|iSampleRate|iChannel0|iChannel1|iChannel2|iChannel3|iChannelResolution|iChannelTime|iAudioLevel)\\b", // 6 ours
+    "\\b(\\d+\\.?\\d*(?:[eE][-+]?\\d+)?|\\.\\d+)\\b",                                     // 7 number
+    "\\b([A-Za-z_]\\w*)(?=\\s*\\()",                                                          // 8 call
+  ].join("|"), "gm");
+  const esc = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  // one entry per alternative, in the same order (the 4th is decided by the test below: keyword vs type)
+  const CLASSES = ["c", "s", "p", null, "b", "u", "n", "f"];
+  const KEYWORDS = /^(void|uniform|varying|attribute|const|in|out|inout|if|else|for|while|do|return|break|continue|discard|struct|precision|highp|mediump|lowp|true|false)$/;
+  function highlightGLSL(src) {
+    return String(src).replace(GLSL_TOKEN, (...args) => {
+      const groups = args.slice(1, 1 + CLASSES.length);
+      const at = groups.findIndex((g) => g !== undefined);
+      if (at < 0) return esc(args[0]);
+      const cls = at === 3 ? (KEYWORDS.test(groups[3]) ? "k" : "t") : CLASSES[at];
+      return `<span class="${cls}">${esc(args[0])}</span>`;
+    });
+  }
+
   const statusEl = el.querySelector("#gfx-st-status");
   const perfEl = el.querySelector("#gfx-st-perf");
   // one place for what the page has to say, in the head: the "from the music" panel already shows the values,
@@ -280,9 +328,10 @@ export function createShadertoyPage() {
     return globalThis.sonicPiCanvas?.setPasses?.({ Common: d.common ?? "", ...d.passes }, d.channels);
   }
 
-  function paintAll() { paintPasses(); paintChannels(); paintVars(); codeEl.value = tab === SHARED ? (doc().common ?? "") : (doc().passes?.[tab] ?? ""); }
+  function paintAll() { paintPasses(); paintChannels(); paintVars(); codeEl.value = tab === SHARED ? (doc().common ?? "") : (doc().passes?.[tab] ?? ""); paintHl(); }
 
-  codeEl.addEventListener("input", () => { remember(); saveSoon(); });
+  codeEl.addEventListener("input", () => { remember(); saveSoon(); paintHl(); });
+  codeEl.addEventListener("scroll", () => { hlEl.scrollTop = codeEl.scrollTop; hlEl.scrollLeft = codeEl.scrollLeft; });
   codeEl.addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); return compile(tab); }
     if (e.key === "Tab") {
@@ -373,7 +422,7 @@ export function createShadertoyPage() {
     btn.textContent = open ? "Audio" : "Shadertoy";          // what clicking does, not what is on screen
     btn.setAttribute("aria-pressed", String(open));
     btn.title = open ? "back to the audio page (Ctrl/Cmd+Alt+S, or Escape)" : "the shader editor (Ctrl/Cmd+Alt+S)";
-    if (open) { paintAll(); setTimeout(() => codeEl.focus(), 0); }
+    if (open) { paintAll(); setTimeout(() => { paintHl(); codeEl.focus(); }, 0); }
     return true;
   }
   document.addEventListener("keydown", (e) => {
