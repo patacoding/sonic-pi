@@ -31,8 +31,14 @@ const STYLE = `
     background: color-mix(in srgb, var(--WindowBackground) 92%, transparent); border: 1px solid var(--WindowBorder);
     border-radius: 999px; padding: 4px 10px; }
   #gfx-editor-tab-body { flex: 1 1 auto; min-height: 0; display: flex; }
-  #gfx-editor-tab-body > .gfx-ed { position: static !important; inset: auto !important; flex: 1 1 auto;
-    margin: 8px; border-radius: 8px; }
+  /* it is a DRAWER pane, so the drawer's rules hide it (measured: display none, 0x0, inside our tab) -- here it
+     is the tab's whole body, and it has to lay itself out at full height */
+  body[data-gfx-editor="open"] #gfx-editor-tab-body > #gfx-shader-pane {
+    display: flex !important; flex: 1 1 auto; height: 100% !important; min-height: 0;
+    position: static !important; inset: auto !important; width: auto !important; margin: 0; border-radius: 0;
+    border: 0;
+  }
+  body[data-gfx-editor="open"] #gfx-editor-tab-body > #gfx-shader-pane > * { min-height: 0; }
   body:not([data-gfx-editor="open"]) #gfx-editor-tab { display: none !important; }
 `;
 
