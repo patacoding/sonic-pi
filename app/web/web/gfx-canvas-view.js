@@ -150,20 +150,36 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
       })(),
     } });
   }
+  /**
+   * A pass's two textures: the one this frame READS (last frame's output) and the one it WRITES. Shadertoy's
+   * feedback -- a Buffer reading its own iChannel0 to accumulate -- is the reason: reading and writing one
+   * texture in the same pass is undefined, and it is how "everything is black, or noise" happens.
+   */
   function targetFor(pass, w, h) {
     const t = targets.get(pass);
     if (t && t.w === w && t.h === h) return t;
-    if (t) { gl.deleteFramebuffer(t.fb); gl.deleteTexture(t.tex); }
-    const tex = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-    for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.LINEAR);
-    for (const p of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, p, gl.CLAMP_TO_EDGE);
-    const fb = gl.createFramebuffer();
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    if (t) { for (const k of ["read", "write"]) { gl.deleteFramebuffer(t[k].fb); gl.deleteTexture(t[k].tex); } }
+    const make = () => {
+      const tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.LINEAR);
+      for (const p of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, p, gl.CLAMP_TO_EDGE);
+      const fb = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      return { fb, tex };
+    };
+    const made = { read: make(), write: make(), w, h };
+    // both start black, so a pass that reads before anything has drawn reads black rather than garbage
+    for (const k of ["read", "write"]) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, made[k].fb);
+      gl.clearColor(0, 0, 0, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+    }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    const made = { fb, tex, w, h }; targets.set(pass, made); return made;
+    targets.set(pass, made); return made;
   }
   const onePixel = (r, g, b) => {
     const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -212,7 +228,7 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
     const ch = channels[i] ?? { kind: "none" };
     if (ch.kind === "buffer") {
       const t = targets.get(ch.buffer);
-      if (t) { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, t.tex); return; }
+      if (t) { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, t.read.tex); return; }
     } else if (ch.kind === "image" && ch.data) {
       let tex = imageCache.get(ch.data);
       if (!tex) {
@@ -258,7 +274,7 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
       if (!(passes[pass] ?? "").trim() || !programs.has(pass)) continue;
       const { prog, u } = programs.get(pass);
       if (pass === "Image") { gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, canvas.width, canvas.height); }
-      else { const t = targetFor(pass, canvas.width, canvas.height); gl.bindFramebuffer(gl.FRAMEBUFFER, t.fb); gl.viewport(0, 0, t.w, t.h); }
+      else { const t = targetFor(pass, canvas.width, canvas.height); gl.bindFramebuffer(gl.FRAMEBUFFER, t.write.fb); gl.viewport(0, 0, t.w, t.h); }
       gl.useProgram(prog);
       gl.uniform3f(u.res, canvas.width, canvas.height, 1);
       gl.uniform1f(u.time, (now - t0) / 1000);
@@ -285,6 +301,9 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
       for (const i of [0, 1, 2, 3]) bindChannel(i);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     }
+    // this frame's output becomes next frame's input: without the swap a pass reading itself would sample the
+    // texture it is writing into
+    for (const t of targets.values()) { const tmp = t.read; t.read = t.write; t.write = tmp; }
     prev = now; frames++;
   }
   const ensureLoop = () => { if (!raf) loop(); };
