@@ -901,6 +901,8 @@ function install() {
   // our own fullscreen tab: the editor and its settings, over the audio page (gfx-tab.js)
   const shadertoy = createShadertoyTab({ viewSwitch, onChange: (o) => say(o ? "Shadertoy tab" : "back to audio") });
 
+  shadertoy.sync();     // everything is built now: the audio page must hold none of our editor
+
   window.sonicPiGfx = {
     viewSwitch,
     shadertoy,

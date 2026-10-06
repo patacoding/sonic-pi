@@ -32,6 +32,14 @@ const STYLE = `
   #gfx-tab-body > #gfx-ext { position: static !important; inset: auto !important; width: min(30vw, 420px) !important;
     height: auto !important; margin: 8px 0 8px 8px; border-radius: 8px; }
   #gfx-tab-btn { position: fixed; top: 6px; right: 6px; z-index: 99; }
+
+  /* On the audio page our editor must not be there at all -- not hidden by a stylesheet, not sitting in the
+     app's drawer waiting to be opened, not even a rail button for it. Its elements are DETACHED (kept alive in
+     JS, adopted by the tab) and the rest of our UI is off. Only the two buttons and the status line stay. */
+  body[data-gfx-tab="closed"] #gfx-ext,
+  body[data-gfx-tab="closed"] #gfx-ext-btn,
+  body[data-gfx-tab="closed"] #gfx-hud,
+  body[data-gfx-tab="closed"] #gfx-testcard { display: none !important; }
   body[data-gfx-tab="open"] #gfx-tab-btn { position: static; }
 `;
 
@@ -73,31 +81,44 @@ export function createShadertoyTab({ store = globalThis.localStorage ?? null, vi
   }
   const body = tab.querySelector("#gfx-tab-body");
 
-  /** Give an element to the tab, remembering where it came from so it can go home. */
-  function take(sel, key) {
-    const el = document.querySelector(sel);
-    if (!el) return;
-    if (el.parentElement !== body) {
-      if (!home[key]) home[key] = { parent: el.parentElement, next: el.nextSibling };
-      body.appendChild(el);
-    }
+  // Kept by REFERENCE, not looked up: once the pane is detached (the audio page must not hold it) a
+  // document.querySelector cannot find it any more -- measured, and it made the editor vanish from the tab too.
+  const held = { pane: null, ext: null };
+
+  /** Put our element in the tab, capturing the reference the first time we can see it. */
+  function take(key, sel) {
+    held[key] ??= document.getElementById(sel.slice(1));
+    const el = held[key];
+    if (el && el.parentElement !== body) body.appendChild(el);
   }
+
+  /**
+   * Let go of an element: out of the document entirely, still alive here.
+   *
+   * NOT back into the app's drawer, which is where it used to live: a pane waiting in the drawer is still our
+   * editor on the audio page, with a rail button to open it, and that is the complaint this answers. The tab is
+   * the only place it belongs.
+   */
   function give(key) {
-    const el = key === "pane" ? document.getElementById("gfx-shader-pane") : document.getElementById("gfx-ext");
-    const h = home[key];
-    if (!el || !h?.parent) return;
-    if (el.parentElement === h.parent) return;
-    h.parent.insertBefore(el, h.next?.parentElement === h.parent ? h.next : null);
-    home[key] = null;
+    const el = held[key];
+    if (el?.parentElement) el.remove();
+  }
+
+  /** And the rail buttons for our panes: gone, in both states -- the tab is the way in. */
+  function dropRailButtons() {
+    for (const sel of ['#drawer-rail [data-drawer="gfx-shader"]', '#drawer-rail [data-drawer="gfx-synthdef"]']) {
+      document.querySelector(sel)?.remove();
+    }
   }
 
   function paint() {
     document.body.dataset.gfxTab = open ? "open" : "closed";
+    dropRailButtons();
     btn.textContent = open ? "Audio" : "Shadertoy";
     btn.title = open ? "back to the audio page (Ctrl/Cmd+Alt+S)" : "the shader editor, in a tab of its own (Ctrl/Cmd+Alt+S)";
     if (open) {
-      take("#gfx-shader-pane", "pane");
-      take("#gfx-ext", "ext");
+      take("pane", "#gfx-shader-pane");
+      take("ext", "#gfx-ext");
       viewSwitch?.set?.(FULL);                       // the picture fills the window behind the editor
     } else {
       give("pane");
@@ -122,5 +143,21 @@ export function createShadertoyTab({ store = globalThis.localStorage ?? null, vi
   }, true);
 
   paint();
-  return { el: tab, button: btn, open: () => open, set, toggle: () => set(!open) };
+
+  /**
+   * Called again once the layer has finished building its UI.
+   *
+   * The first paint happens while the editor is still being made, so there is nothing to hold yet and the pane
+   * would sit in the app's drawer on a fresh page (measured: editorInPage true, parent drawer-panes). This picks
+   * up whatever appeared since, and puts the audio page back to holding none of our editor.
+   */
+  function sync() {
+    held.pane ??= document.getElementById("gfx-shader-pane");
+    held.ext ??= document.getElementById("gfx-ext");
+    dropRailButtons();
+    if (!open) { give("pane"); give("ext"); }
+  }
+  sync();
+
+  return { el: tab, button: btn, open: () => open, set, toggle: () => set(!open), sync };
 }
