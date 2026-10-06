@@ -82,6 +82,10 @@ const STYLE = `
   #gfx-st .chan { display: flex; align-items: center; gap: 5px; padding: 3px 6px;
     border: 1px solid var(--WindowBorder); border-radius: 6px; }
   #gfx-st .chan .n { opacity: .6; font: 11px ui-monospace, monospace; }
+  #gfx-st .chan .prev { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px;
+    border: 1px solid var(--WindowBorder); border-radius: 4px; overflow: hidden; font: 11px ui-monospace, monospace; }
+  #gfx-st .chan .prev img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  #gfx-st .chan { flex-wrap: wrap; }
   #gfx-st-main { flex: 1 1 auto; min-height: 0; display: flex; }
   #gfx-st-code { flex: 1 1 auto; min-width: 0; margin: 8px; resize: none; tab-size: 4; white-space: pre;
     font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--WindowForeground);
@@ -92,6 +96,10 @@ const STYLE = `
   #gfx-st-side section { border: 1px solid var(--WindowBorder); border-radius: 8px; padding: 8px;
     background: color-mix(in srgb, var(--WindowBackground) 72%, transparent); }
   #gfx-st-side h4 { margin: 0 0 6px; font: 600 12px/1 system-ui, sans-serif; opacity: .8; }
+  #gfx-st-previews { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  #gfx-st-previews figure { margin: 0; text-align: center; }
+  #gfx-st-previews img { width: 84px; height: 84px; object-fit: cover; display: block; border: 1px solid var(--WindowBorder); border-radius: 6px; }
+  #gfx-st-previews figcaption { font: 10px ui-monospace, monospace; opacity: .6; margin-top: 3px; max-width: 84px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #gfx-st-vars { font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; min-height: 3em; }
   #gfx-st-say { flex: 0 0 auto; padding: 0 10px 8px; font: 12px/1.4 ui-monospace, monospace; opacity: .85; white-space: pre-wrap; }
   #gfx-st-say.bad { color: #f66; opacity: 1; }
@@ -139,7 +147,7 @@ export function createShadertoyPage() {
       <button id="gfx-st-close">Back to audio</button></div>
     <div id="gfx-st-row" class="passes"></div>
     <div id="gfx-st-main"><textarea id="gfx-st-code" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
-      <div id="gfx-st-side"><section><h4>iChannels</h4><div id="gfx-st-chans"></div></section>
+      <div id="gfx-st-side"><section><h4>iChannels</h4><div id="gfx-st-chans"></div><div id="gfx-st-previews"></div></section>
         <section><h4>from the music</h4><div id="gfx-st-vars">(nothing yet)</div></section></div></div>
     <div id="gfx-st-say"></div>`;
   document.body.appendChild(el);
@@ -194,33 +202,40 @@ export function createShadertoyPage() {
         sel.addEventListener("change", () => { ch.pass = sel.value; save(); push(); });
         box.appendChild(sel);
       } else if (ch.kind === "image") {
-        const f = document.createElement("input");
-        f.type = "file"; f.accept = "image/*"; f.dataset.pick = String(i);
-        f.title = ch.name ? `choose ${ch.name} again` : "choose a picture";
-        f.addEventListener("change", () => {
-          const file = f.files?.[0];
+        // a picture for this channel: a button that says what it does, the picture itself, and its name
+        const hidden = document.createElement("input");
+        hidden.type = "file"; hidden.accept = "image/*"; hidden.hidden = true;
+        const pick = document.createElement("button");
+        pick.type = "button"; pick.dataset.pick = String(i);
+        pick.textContent = ch.data ? "replace" : "choose picture";
+        pick.title = ch.name ? `choose ${ch.name} again` : "a picture for this channel (kept in memory, not in storage)";
+        const frame = document.createElement("span");
+        frame.className = "prev";
+        if (ch.data) {
+          const img = document.createElement("img");
+          img.src = ch.data; img.alt = ch.name ?? "channel picture"; img.title = ch.name ?? "";
+          frame.appendChild(img);
+        } else {
+          frame.textContent = ch.name ? "?" : "-";
+          frame.title = ch.name ? `${ch.name} is not loaded: choose it again` : "no picture chosen";
+        }
+        const label = document.createElement("span");
+        label.className = "n";
+        label.textContent = ch.data ? (ch.name ?? "picture") : ch.name ? `${ch.name} (choose again)` : "no picture";
+        pick.addEventListener("click", () => hidden.click());
+        hidden.addEventListener("change", () => {
+          const file = hidden.files?.[0];
           if (!file) return;
           const rd = new FileReader();
           rd.onload = () => {
-            ch.name = file.name; ch.data = String(rd.result);       // in memory: storage keeps CODE only
-            save(); paintChannels(); push();
-            say(`iChannel${i} ← ${file.name} (${Math.round(String(ch.data).length / 1024)} KB, in memory — a reload asks for it again)`);
+            ch.name = file.name; ch.data = String(rd.result);        // memory: storage keeps the CODE only
+            save(); paintChannels(); paintPreviews(); push();
+            say(`iChannel${i} <- ${file.name} (${Math.round(String(ch.data).length / 1024)} KB) - the canvas has it now; a reload asks for it again`);
           };
           rd.onerror = () => say(`could not read ${file.name}`, true);
           rd.readAsDataURL(file);
         });
-        box.appendChild(f);
-        if (ch.data) {
-          const img = document.createElement("img");                 // the picture itself, small: proof it took
-          img.src = ch.data; img.alt = ch.name ?? "channel picture";
-          img.title = ch.name ?? "";
-          img.style.cssText = "width:28px;height:28px;object-fit:cover;border:1px solid var(--WindowBorder);border-radius:4px";
-          box.appendChild(img);
-        } else if (ch.name) {
-          const need = document.createElement("span");
-          need.className = "n"; need.textContent = `${ch.name} (choose it again)`;
-          box.appendChild(need);
-        }
+        box.append(pick, hidden, frame, label);
       } else if (ch.kind === "audio") {
         const sel = document.createElement("select");
         for (const band of ["fft", "wave", "scope"]) { const o = document.createElement("option"); o.value = band; o.textContent = band; o.selected = ch.band === band; sel.appendChild(o); }
@@ -230,6 +245,22 @@ export function createShadertoyPage() {
       chansEl.appendChild(box);
     });
   }
+  /** Every picture wired to a channel, shown at a size you can actually look at. */
+  function paintPreviews() {
+    const box = el.querySelector("#gfx-st-previews");
+    box.textContent = "";
+    (doc().channels ?? []).forEach((ch, i) => {
+      if (ch.kind !== "image" || !ch.data) return;
+      const fig = document.createElement("figure");
+      const img = document.createElement("img");
+      img.src = ch.data; img.alt = ch.name ?? `iChannel${i}`; img.title = ch.name ?? "";
+      const cap = document.createElement("figcaption");
+      cap.textContent = `iChannel${i}`;
+      fig.append(img, cap);
+      box.appendChild(fig);
+    });
+  }
+
   const values = new Map();
   const paintVars = () => {
     varsEl.textContent = values.size
@@ -242,7 +273,7 @@ export function createShadertoyPage() {
     return globalThis.sonicPiCanvas?.setPasses?.({ Common: d.common ?? "", ...d.passes }, d.channels);
   }
 
-  function paintAll() { paintPasses(); paintChannels(); paintVars(); codeEl.value = tab === SHARED ? (doc().common ?? "") : (doc().passes?.[tab] ?? ""); }
+  function paintAll() { paintPasses(); paintChannels(); paintPreviews(); paintVars(); codeEl.value = tab === SHARED ? (doc().common ?? "") : (doc().passes?.[tab] ?? ""); }
 
   codeEl.addEventListener("input", () => { remember(); });
   codeEl.addEventListener("keydown", (e) => {
