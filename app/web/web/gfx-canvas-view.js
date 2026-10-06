@@ -100,6 +100,18 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
   const channelTime = new Float32Array([0, 0, 0, 0]);
   const channelResolution = new Float32Array(12);
   const date = [1970, 0, 0, 0];
+  // iMouse, Shadertoy's way: xy = where the pointer is now, zw = where it was pressed, with the sign of z saying
+  // whether the button is still down (positive) or has been released (negative). y counts from the BOTTOM.
+  const mouse = { x: 0, y: 0, downX: 0, downY: 0, down: false };
+  const toCanvas = (e) => {
+    const r = canvas.getBoundingClientRect();
+    const sx = canvas.width / Math.max(1, r.width), sy = canvas.height / Math.max(1, r.height);
+    return { x: (e.clientX - r.left) * sx, y: canvas.height - (e.clientY - r.top) * sy };
+  };
+  canvas.addEventListener("pointermove", (e) => { const p = toCanvas(e); mouse.x = p.x; mouse.y = p.y; });
+  canvas.addEventListener("pointerdown", (e) => { const p = toCanvas(e); mouse.x = mouse.downX = p.x; mouse.y = mouse.downY = p.y; mouse.down = true; canvas.setPointerCapture?.(e.pointerId); });
+  canvas.addEventListener("pointerup", (e) => { const p = toCanvas(e); mouse.x = p.x; mouse.y = p.y; mouse.down = false; });
+  canvas.addEventListener("pointerleave", () => { mouse.down = false; });
 
   const shader = (type, src) => {
     const sh = gl.createShader(type); gl.shaderSource(sh, src); gl.compileShader(sh);
@@ -280,7 +292,7 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
       gl.uniform1f(u.time, (now - t0) / 1000);
       gl.uniform1f(u.delta, (now - prev) / 1000);
       gl.uniform1i(u.frame, frames);
-      gl.uniform4f(u.mouse, 0, 0, 0, 0);
+      gl.uniform4f(u.mouse, mouse.x, mouse.y, mouse.down ? mouse.downX : -mouse.downX, mouse.downY);
       gl.uniform1f(u.level, level);
       gl.uniform1f(u.rate, rate);
       gl.uniform1f(u.sampleRate, sampleRate);
@@ -443,6 +455,24 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
       gpuMs: null,
       passed: [...programs.keys()].length,
     }),
+    /**
+     * What the canvas is showing, as data: the size, a mean brightness and a PNG data URL. The old layer had
+     * this (probes and a "save the picture" both used it) and it is the only way to assert on a picture without
+     * looking at it.
+     */
+    capture: ({ scale = 1 } = {}) => {
+      const w = Math.max(1, Math.round(canvas.width * scale));
+      const h = Math.max(1, Math.round(canvas.height * scale));
+      const off = document.createElement("canvas");
+      off.width = w; off.height = h;
+      const ctx = off.getContext("2d");
+      ctx.drawImage(canvas, 0, 0, w, h);
+      const px = ctx.getImageData(0, 0, w, h).data;
+      let sum = 0;
+      for (let i = 0; i < px.length; i += 4) sum += (px[i] + px[i + 1] + px[i + 2]) / 3;
+      return { width: w, height: h, mean: sum / (w * h) / 255, dataUrl: off.toDataURL("image/png") };
+    },
+    mouse: () => ({ ...mouse }),
     get usable() { return [...new Set([...programs.values()].flatMap((p) => [...p.u.declared.keys()]))].filter((n) => !SHADERTOY_UNIFORMS.has(n)); },
     variables: () => Object.fromEntries([...values].map(([n, v]) => [n, v.value])),
     declared: () => [...new Set([...programs.values()].flatMap((p) => [...p.u.declared.keys()]))].filter((n) => !SHADERTOY_UNIFORMS.has(n)),
