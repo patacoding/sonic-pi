@@ -401,6 +401,7 @@ export function createCanvasView({ store = globalThis.localStorage ?? null, onSa
 
   return { canvas, button: btn, setPasses, setVariable, record, applyDirectives, seen: () => [...seen],
     audio: () => ({ attached: !!analyser, level: Number(level.toFixed(4)), samples: !!audioTex }),
+    get usable() { return [...new Set([...programs.values()].flatMap((p) => [...p.u.declared.keys()]))].filter((n) => !SHADERTOY_UNIFORMS.has(n)); },
     variables: () => Object.fromEntries([...values].map(([n, v]) => [n, v.value])),
     declared: () => [...new Set([...programs.values()].flatMap((p) => [...p.u.declared.keys()]))].filter((n) => !SHADERTOY_UNIFORMS.has(n)),
     state: () => state, set, next: () => set(ORDER[(ORDER.indexOf(state) + 1) % ORDER.length]),

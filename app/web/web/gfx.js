@@ -31,11 +31,12 @@ if (EDITOR_TAB && !GFX_ENABLED) {
   // module had loaded fine)
   if (canvasView) window.sonicPiCanvas = canvasView;
   try {
-    const { createEditorTab, defaultPasses } = await import("./gfx-editor-tab.js");
+    const { createEditorTab } = await import("./gfx-editor-tab.js");
     createEditorTab({ log: (t) => console.info(`Shadertoy — ${t}`), canvasView });
-    const sets = (() => { try { return JSON.parse(localStorage.getItem("sp-shadertoy-sets") ?? "null"); } catch { return null; } })();
-    const set0 = sets?.docs?.[sets.doc ?? 0];
-    canvasView?.setPasses(set0?.passes ?? defaultPasses(), set0?.channels ?? []);
+    // the startup document comes from the ORIGINAL model, not from a shape of my own (gfx-document.js)
+    const { emptyDocument } = await import("./graphics/gfx-document.js");
+    const doc = emptyDocument("Alpha");
+    canvasView?.setPasses({ Common: doc.common, ...doc.passes }, doc.channels);
   } catch (e) {
     console.error(`Shadertoy — the editor or the startup compile failed: ${e?.message ?? e}`);
     try { canvasView.setPasses({ Image: "void mainImage(out vec4 c, in vec2 p) { c = vec4(p.x / iResolution.x, p.y / iResolution.y, 0.5, 1.0); }" }, []); } catch {}
