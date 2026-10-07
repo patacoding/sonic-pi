@@ -129,6 +129,10 @@ using namespace oscpkt; // OSC specific stuff
 #include "widgets/logpanel.h"
 #include "widgets/metricspanel.h"
 #include "widgets/trackspanel.h"
+#include <QEnterEvent>
+#include "widgets/chevronbutton.h"
+#include "widgets/divider.h"
+#include "widgets/awaydock.h"
 #include "widgets/zoombar.h"
 #include "widgets/thinsplitter.h"
 #include "utils/dividerproxystyle.h"
@@ -168,6 +172,27 @@ using namespace oscpkt; // OSC specific stuff
 using namespace std::chrono;
 
 using namespace SonicPi;
+
+// Dock title rows take double-clicks two ways. Docked, they swallow them:
+// QDockWidget reads one as "toggle floating", so double-tapping anything in the
+// row detaches the pane into a window, which is never what was meant. Floating,
+// they re-dock — the way back from an accidental detach, and the only obvious
+// one since a floated pane has no divider to double-click.
+class DockTitleBar : public QWidget
+{
+public:
+    using QWidget::QWidget;
+protected:
+    void mouseDoubleClickEvent(QMouseEvent* e) override
+    {
+        if (QDockWidget* dock = qobject_cast<QDockWidget*>(parentWidget()))
+            if (dock->isFloating())
+                dock->setFloating(false);
+        e->accept();
+    }
+};
+
+
 
 MainWindow::MainWindow(QApplication& app, SplashWidget* splash)
 {
@@ -564,7 +589,7 @@ void MainWindow::showWelcomeScreen()
             welcome->close();
             focusEditor();
         });
-        docWidget->show();
+        helpShow();
         southTabs->setCurrentWidget(quickstartPane);
         // Size the dock so a fresh install sees two full rows of cards.
         resizeDocks({ docWidget }, { quickstartPane->preferredDockHeight() }, Qt::Vertical);
@@ -800,9 +825,18 @@ void MainWindow::setupWindowStructure()
                 if (!piSettings->show_loop_scopes || !workspace.startsWith("workspace_") || !m_spAPI)
                     return;
                 SonicPiScintilla* ws = filenameToWorkspace(workspace.toStdString());
-                if (ws)
-                    ws->setLiveLoopScope(name, line - 1,
-                                         m_spAPI->AudioProcessor_GetScopeReader((unsigned int)scopeNum));
+                if (!ws)
+                    return;
+                // The loop lives in this buffer now: no other buffer keeps a
+                // scope for it, or for its slot.
+                for (int i = 0; i < editorTabWidget->count(); i++)
+                {
+                    SonicPiScintilla* other = ((SonicPiEditor*)editorTabWidget->widget(i))->getWorkspace();
+                    if (other != ws)
+                        other->dropLiveLoopScopesFor(scopeNum, name);
+                }
+                ws->setLiveLoopScope(name, line - 1, scopeNum,
+                                     m_spAPI->AudioProcessor_GetScopeReader((unsigned int)scopeNum));
             });
     connect(m_spClient.get(), &SonicPi::QtAPIClient::LiveLoopScopeEndedReceived, this,
             [this](int, const QString& name) {
@@ -824,6 +858,8 @@ void MainWindow::setupWindowStructure()
             this, &MainWindow::onMixerSettings);
     connect(m_spClient.get(), &SonicPi::QtAPIClient::AudioSwitchDoneReceived,
             this, &MainWindow::onAudioSwitchDone);
+    connect(m_spClient.get(), &SonicPi::QtAPIClient::AudioStateChangedReceived,
+            this, &MainWindow::onAudioStateChanged, Qt::QueuedConnection);
     connect(m_spClient.get(), &SonicPi::QtAPIClient::AudioDeviceReopenReplyReceived,
             this, &MainWindow::onAudioDeviceReopenReply);
 
@@ -1293,17 +1329,49 @@ void MainWindow::setupWindowStructure()
     // the central area entirely.
     southTabs->setMinimumHeight(ScaleHeightForDPI(60));
 
-    // A persistent close ✕ for the help pane, placed in the dock title row
-    // (see makeControlTitleBar below) so it stays put across tabs and floats.
-    // Its #helpCloseButton chip stays legible on any background; eventFilter()
-    // swaps its tint on hover. (Tooltip gains the shortcut once helpAct exists.)
-    helpCloseButton = new QPushButton(southTabs);
-    helpCloseButton->setObjectName("helpCloseButton");
-    helpCloseButton->setCursor(Qt::PointingHandCursor);
-    helpCloseButton->setFocusPolicy(Qt::NoFocus);
-    helpCloseButton->setAccessibleName(tr("Close the help pane"));
-    connect(helpCloseButton, &QPushButton::clicked, this, &MainWindow::toggleDocPane);
-    updateHelpCloseIcon();
+    // The help pane's chevrons, in the dock title row (see makeControlTitleBar
+    // below) so they stay put across tabs and floats, as the web's sit on its
+    // divider: up makes the pane full size over the editor's room, down hides
+    // it (from full size, first back beside the editor). Flat glyphs;
+    // eventFilter() swaps their tint on hover. (Tooltips gain the shortcut once
+    // helpAct exists.)
+    // The web's grips: 36x16 pills in the window border colour sitting on the
+    // divider at its right, the glyph muted; the accent and its contrast text
+    // under the pointer. Laid over the dock separator (positionHelpChevrons),
+    // so the pane has no title row of its own, as the web's has none.
+    helpChevrons = new QWidget(this);
+    helpChevrons->setObjectName("helpDividerGrips");
+    helpChevrons->setAttribute(Qt::WA_StyledBackground, true);
+    QHBoxLayout* gripRow = new QHBoxLayout(helpChevrons);
+    gripRow->setContentsMargins(0, 0, 0, 0);
+    gripRow->setSpacing(ScaleWidthForDPI(8));
+    auto makeHelpChevron = [this, gripRow](ChevronButton::Dir dir, const QString& accessible) {
+        auto* b = new ChevronButton(helpChevrons);
+        b->setObjectName("helpGrip");
+        b->setFixedSize(ScaleForDPI(36, 16));
+        b->setDir(dir);
+        b->setAccessibleName(accessible);
+        gripRow->addWidget(b);
+        return b;
+    };
+    helpFullButton = makeHelpChevron(ChevronButton::Up, tr("Make the help panel full size"));
+    helpHideButton = makeHelpChevron(ChevronButton::Down, tr("Hide the documentation and information panel"));
+    // The grip on the editor | column divider, at its top (every grip sits
+    // at its divider's trailing end: the right of a horizontal one, the top
+    // of a vertical one). Right puts the scope, log, cues and metronome
+    // away together; left brings them back (SideColumnModel).
+    sideGrip = new ChevronButton(this);
+    sideGrip->setObjectName("sideGrip");
+    sideGrip->setFixedSize(ScaleForDPI(16, 36));
+    sideGrip->setDir(ChevronButton::Right);
+    sideGrip->setAccessibleName(tr("Hide the scope, log and cues"));
+    connect(sideGrip, &QToolButton::clicked, this, [this] { sideToggle(); });
+    // Down: from full size, back beside the editor; else away, or back — the
+    // same action as the toolbar's Help icon, so the two never disagree. Up:
+    // full size.
+    connect(helpFullButton, &QToolButton::clicked, this, [this] { helpFull(); });
+    connect(helpHideButton, &QToolButton::clicked, this, [this] { helpToggle(); });
+    updateHelpChevronIcons();
 
     docWidget = new QDockWidget(tr("Help"), this);
     // Whatever reveals the help dock, land on a real page rather than an empty
@@ -1324,22 +1392,41 @@ void MainWindow::setupWindowStructure()
     docWidget->setWidget(southTabs);
     docWidget->setObjectName("help");
 
-    // Help dock title row: HELP + docs text-size (A-/A+) + the persistent close
-    // ✕, so all three sit on the same row as the title. The row stays put
-    // whether or not pane titles are shown (only the HELP label toggles).
-    // Every help tab has A-/A+ text-size controls; they share the title row so
-    // they line up beside the always-present close ✕. Only the current tab's
-    // pair is shown. (The Logs/Debug panels are built further down, so their
-    // bars are wired to the panels once those exist.)
+    // No title row: the help pane starts right under the dock separator, which
+    // is its divider, as on the web. The HELP label still exists for the code
+    // that shows and names pane titles, inside a row of no height.
+    {
+        auto* bar = new DockTitleBar();
+        bar->setObjectName("dockTitleBar");
+        bar->setFixedHeight(0);
+        titleBarDoc = new QLabel(docWidget->windowTitle().toUpper(), bar);
+        titleBarDoc->setObjectName("paneTitle");
+        titleBarDoc->hide();
+        docWidget->setTitleBarWidget(bar);
+        docWidget->installEventFilter(this);
+        for (QDockWidget* dock : { scopeWidget, outputWidget, incomingWidget, metroWidget })
+            if (dock) dock->installEventFilter(this);
+        connect(docWidget, &QDockWidget::topLevelChanged, this, [this](bool) { applyHelpPanel(); });
+    }
+
+    // Every help tab has A-/A+ text-size controls, at the foot of the tab rail
+    // as the web has them at the foot of its: only the current tab's pair is
+    // shown. (The Logs/Debug panels are built further down, so their bars are
+    // wired to the panels once those exist.)
     QWidget* docZoomControls = tutorialPane->zoomControls();
     QWidget* cardsZoomControls = quickstartPane->zoomControls();
     logsZoom = new ZoomBar(theme, tr("logs"), this);
     debugZoom = new ZoomBar(theme, tr("metrics"), this);
     tracksZoom = new ZoomBar(theme, tr("tracks"), this);
-    docWidget->setTitleBarWidget(
-        makeControlTitleBar(docWidget->windowTitle(), titleBarDoc,
-                            { docZoomControls, cardsZoomControls, logsZoom, debugZoom,
-                              tracksZoom, helpCloseButton }));
+    QWidget* helpZoomFoot = new QWidget;
+    QVBoxLayout* helpZoomLayout = new QVBoxLayout(helpZoomFoot);
+    helpZoomLayout->setContentsMargins(0, 0, 0, ScaleHeightForDPI(6));
+    helpZoomLayout->setSpacing(0);
+    for (QWidget* zoom : { docZoomControls, cardsZoomControls,
+                           static_cast<QWidget*>(logsZoom), static_cast<QWidget*>(debugZoom),
+                           static_cast<QWidget*>(tracksZoom) })
+        helpZoomLayout->addWidget(zoom, 0, Qt::AlignHCenter);
+    southTabs->setFootWidget(helpZoomFoot);
     auto syncDocZoomVisible = [this, docZoomControls, cardsZoomControls]() {
         QWidget* current = southTabs->currentWidget();
         docZoomControls->setVisible(current == docsPane);
@@ -1370,6 +1457,27 @@ void MainWindow::setupWindowStructure()
 
     addDockWidget(Qt::BottomDockWidgetArea, docWidget);
     docWidget->hide();
+
+    // With a panel away its dock separator would go with it; the web keeps
+    // the divider as the way back. A 1px placeholder dock takes the panel's
+    // place in its area while it is away (applyHelpPanel, applySideColumn),
+    // so Qt lays out a separator — the one divider, painted by
+    // DividerProxyStyle across the whole area — with the grip laid over it.
+    helpAwayDock = SonicPi::makeAwayDock(this, QStringLiteral("helpAwayDock"), Qt::BottomDockWidgetArea);
+    sideAwayDock = SonicPi::makeAwayDock(this, QStringLiteral("sideAwayDock"), Qt::RightDockWidgetArea);
+    helpAwayDock->installEventFilter(this);
+    sideAwayDock->installEventFilter(this);
+    // Qt reserves the separator beside each placeholder but paints nothing
+    // there (it is fixed-size): these paint it, the one divider, laid over
+    // that rect by positionHelpChevrons / positionSideGrip.
+    helpAwayDivider = new DividerOverlay(Qt::Horizontal, this);
+    helpAwayDivider->setObjectName("helpAwayDivider");
+    helpAwayDivider->hide();
+    helpAwayDivider->installEventFilter(this);
+    sideAwayDivider = new DividerOverlay(Qt::Vertical, this);
+    sideAwayDivider->setObjectName("sideAwayDivider");
+    sideAwayDivider->hide();
+    sideAwayDivider->installEventFilter(this);
 
     // Currently causes a segfault when dragging doc pane out of main
     // window:
@@ -1416,24 +1524,165 @@ void MainWindow::setupWindowStructure()
 
     incomingPane->setZoomLevel(gui_settings->value("prefs/cue-zoom", 0).toInt());
     outputPane->setZoomLevel(gui_settings->value("prefs/log-zoom", 0).toInt());
+
+    // The help panel on screen from its state (away: its placeholder's
+    // separator is the divider at the editor's foot). The column's panes
+    // follow their settings later (honourPrefs), once the View menu's
+    // actions exist; the session restore re-applies both.
+    applyHelpPanel();
 }
 
-void MainWindow::toggleDocPane()
+// The Help icon, the divider's down grip, the shortcut and a double-click on
+// the divider: one action on the one state (HelpPanelModel::toggle). Focus
+// follows the panel: into the pane shown, back to the editor from the pane
+// hidden. The grip on a floating pane brings it back here, docked.
+void MainWindow::helpToggle()
 {
     if (!docWidget)
         return;
-    if (docWidget->isVisible())
+    if (docWidget->isFloating())
     {
-        m_savedDockH = docWidget->height();   // remember for re-open
-        docWidget->hide();
+        docWidget->setFloating(false);
+        m_helpPanel.show();
+        applyHelpPanel();
+        return;
+    }
+    QWidget* focused = QApplication::focusWidget();
+    const bool hadFocus = focused && docWidget->isAncestorOf(focused);
+    const auto was = m_helpPanel.state();
+    m_helpPanel.toggle();
+    applyHelpPanel();
+    if (!m_helpPanel.panelVisible())
+    {
+        showStatusAndAnnounce(tr("Hiding help..."), 2000);
+        // Focus in the pane just hidden would fall to the window itself:
+        // hand it back to the editor instead.
+        if (hadFocus)
+            focusPane(getCurrentWorkspace());
+    }
+    else if (was == SonicPi::HelpPanelModel::State::Away)
+    {
+        showStatusAndAnnounce(tr("Showing help..."), 2000);
+        // Opening help takes you to it. On Docs that means the topics list, so
+        // the chapters are immediately arrow-key navigable; on any other tab it
+        // means that tab's own pane.
+        const int i = docsNavTabs->currentIndex();
+        if (southTabs->currentWidget() == docsPane && i >= 0 && i < helpLists.size())
+            focusPane(helpLists[i]);
+        else if (southTabs->currentWidget() == quickstartPane)
+            quickstartPane->focusCarousel(); // as the Cards menu item does
+        else
+            focusPane(southTabs->currentWidget());
     }
     else
     {
-        docWidget->show();
-        const int h = (m_savedDockH > 0) ? m_savedDockH : (height() / 3);
-        resizeDocks({ docWidget }, { h }, Qt::Vertical);
-        ensureDocsSelection();   // never land on a blank pane
+        showStatusAndAnnounce(tr("Help panel beside the code..."), 2000);
     }
+}
+
+// The up grip: the help pane over the whole of the code's room, for reading
+// at length (HelpPanelModel::full — from beside the code only).
+void MainWindow::helpFull()
+{
+    if (m_helpPanel.state() == SonicPi::HelpPanelModel::State::Beside)
+    {
+        m_helpPanel.full();
+        applyHelpPanel();
+        showStatusAndAnnounce(tr("Help panel full size..."), 2000);
+    }
+}
+
+// A pane asked for — a docs tab, the cards, the logs: the panel beside the
+// code if it was away (HelpPanelModel::show).
+void MainWindow::helpShow()
+{
+    m_helpPanel.show();
+    applyHelpPanel();
+}
+
+// The grip on the editor | column divider: the scope, log, cues and
+// metronome away together, or back as their settings say.
+void MainWindow::sideToggle()
+{
+    m_sideColumn.toggle();
+    applySideColumn();
+    showStatusAndAnnounce(m_sideColumn.away() ? tr("Hiding the scope, log and cues...")
+                                              : tr("Showing the scope, log and cues..."), 2000);
+}
+
+// The panes from their settings and the one state, then the grip and the
+// bar at the editor's right edge.
+void MainWindow::applySideColumn()
+{
+    if (outputWidget)   updateLogVisibility();
+    if (incomingWidget) updateCuesVisibility();
+    if (metroWidget)    updateMetroVisibility();
+    if (scopeWidget)    scope();
+    if (sideAwayDock)
+        sideAwayDock->setVisible(m_sideColumn.awayBarVisible());
+    if (sideGrip)
+    {
+        sideGrip->setDir(m_sideColumn.gripPointsLeft() ? ChevronButton::Left : ChevronButton::Right);
+        sideGrip->setAccessibleName(m_sideColumn.away() ? tr("Show the scope, log and cues")
+                                                        : tr("Hide the scope, log and cues"));
+        sideGrip->setToolTip(sideGrip->accessibleName());
+    }
+    positionSideGrip();
+    QTimer::singleShot(0, this, [this] { positionSideGrip(); positionHelpChevrons(); });
+}
+
+// The grip sits on the divider between the editor and the column, 24px down
+// from its top, as the help's sit 24px in from the right; with the column
+// away it sits on the bar at the editor's right edge. With every pane of the
+// column off in the View menu there is no divider and nothing to bring back,
+// so no grip.
+void MainWindow::positionSideGrip()
+{
+    if (!sideGrip)
+        return;
+    QWidget* editorArea = centralWidget();
+    if (!editorArea || !editorArea->isVisible())
+    {
+        sideGrip->hide();
+        return;
+    }
+    const QRect room = editorArea->geometry();
+    int cx = -1;
+    const int sep = style()->pixelMetric(QStyle::PM_DockWidgetSeparatorExtent, nullptr, this);
+    if (sideAwayDivider && !(sideAwayDock && sideAwayDock->isVisible() && m_sideColumn.away()))
+        sideAwayDivider->hide();
+    if (m_sideColumn.away())
+    {
+        if (!sideAwayDock || !sideAwayDock->isVisible())
+        {
+            sideGrip->hide();
+            return;
+        }
+        const QRect bar = SonicPi::awaySeparatorRect(sideAwayDock, Qt::RightDockWidgetArea, sep);
+        if (sideAwayDivider)
+        {
+            sideAwayDivider->setGeometry(bar);
+            sideAwayDivider->show();
+            sideAwayDivider->raise();
+        }
+        cx = bar.center().x();
+    }
+    else
+    {
+        bool anyShown = false;
+        for (QDockWidget* dock : { scopeWidget, outputWidget, incomingWidget, metroWidget })
+            if (dock && dock->isVisible() && !dock->isFloating())
+                anyShown = true;
+        if (!anyShown)
+        {
+            sideGrip->hide();
+            return;
+        }
+        cx = room.right() + 1 + sep / 2;
+    }
+    sideGrip->move(cx - sideGrip->width() / 2, room.top() + ScaleHeightForDPI(24));
+    sideGrip->show();
+    sideGrip->raise();   // above the overlay
 }
 
 void MainWindow::docLinkClicked(const QUrl& url)
@@ -1571,25 +1820,6 @@ void MainWindow::namedTitleBars()
     if (metricsPanel) metricsPanel->setTitlesVisible(true);
 }
 
-// Dock title rows take double-clicks two ways. Docked, they swallow them:
-// QDockWidget reads one as "toggle floating", so double-tapping anything in the
-// row detaches the pane into a window, which is never what was meant. Floating,
-// they re-dock — the way back from an accidental detach, and the only obvious
-// one since a floated pane has no divider to double-click.
-class DockTitleBar : public QWidget
-{
-public:
-    using QWidget::QWidget;
-protected:
-    void mouseDoubleClickEvent(QMouseEvent* e) override
-    {
-        if (QDockWidget* dock = qobject_cast<QDockWidget*>(parentWidget()))
-            if (dock->isFloating())
-                dock->setFloating(false);
-        e->accept();
-    }
-};
-
 QWidget* MainWindow::makeControlTitleBar(const QString& title, QLabel*& outLabel,
                                          const QVector<QWidget*>& controls)
 {
@@ -1687,7 +1917,8 @@ void MainWindow::updateFocusMode()
         piSettings->show_cues = false;
         piSettings->show_metro = false;
         piSettings->show_scopes = false;
-        docWidget->hide();
+        m_helpPanel.enterFocus();
+        applyHelpPanel();
     }
     else
     {
@@ -1698,10 +1929,8 @@ void MainWindow::updateFocusMode()
         piSettings->show_cues = preFocus.cues;
         piSettings->show_metro = preFocus.metro;
         piSettings->show_scopes = preFocus.scopes;
-        if (preFocus.docs)
-        {
-            docWidget->show();
-        }
+        m_helpPanel.leaveFocus();   // beside the code again, if it was showing
+        applyHelpPanel();
     }
     focusModeAct->setChecked(focusMode);
     // Quiet the fullscreen transition below: its message would clobber the
@@ -1762,17 +1991,14 @@ void MainWindow::toggleCuesVisibility()
 
 void MainWindow::updateLogVisibility()
 {
-    QSignalBlocker blocker(showLogAct);
-    showLogAct->setChecked(piSettings->show_log);
+    if (showLogAct)   // the View menu comes after the docks in setup
+    {
+        QSignalBlocker blocker(showLogAct);
+        showLogAct->setChecked(piSettings->show_log);
+    }
 
-    if (piSettings->show_log)
-    {
-        outputWidget->show();
-    }
-    else
-    {
-        outputWidget->hide();
-    }
+    outputWidget->setVisible(m_sideColumn.paneVisible(piSettings->show_log));
+    positionSideGrip();
 }
 
 void MainWindow::showCuesMenuChanged()
@@ -1925,17 +2151,14 @@ void MainWindow::showLogMenuChanged()
 
 void MainWindow::updateCuesVisibility()
 {
-    QSignalBlocker blocker(showCuesAct);
-    showCuesAct->setChecked(piSettings->show_cues);
+    if (showCuesAct)
+    {
+        QSignalBlocker blocker(showCuesAct);
+        showCuesAct->setChecked(piSettings->show_cues);
+    }
 
-    if (piSettings->show_cues)
-    {
-        incomingWidget->show();
-    }
-    else
-    {
-        incomingWidget->hide();
-    }
+    incomingWidget->setVisible(m_sideColumn.paneVisible(piSettings->show_cues));
+    positionSideGrip();
 }
 
 void MainWindow::createDebugAndLogTabs()
@@ -2033,17 +2256,14 @@ void MainWindow::createDebugAndLogTabs()
 
 void MainWindow::updateMetroVisibility()
 {
-    QSignalBlocker blocker(showMetroAct);
-    showMetroAct->setChecked(piSettings->show_metro);
+    if (showMetroAct)
+    {
+        QSignalBlocker blocker(showMetroAct);
+        showMetroAct->setChecked(piSettings->show_metro);
+    }
 
-    if (piSettings->show_metro)
-    {
-        metroWidget->show();
-    }
-    else
-    {
-        metroWidget->hide();
-    }
+    metroWidget->setVisible(m_sideColumn.paneVisible(piSettings->show_metro));
+    positionSideGrip();
 }
 
 void MainWindow::toggleTabsVisibility()
@@ -3136,6 +3356,7 @@ void MainWindow::loadSetFromFile(const QString& path)
     saveWorkspaces();
 
     currentSetPath = QFileInfo(path).absoluteFilePath();
+    currentSetMeta = set.meta;
     rememberRecentSet(path);
     showStatusAndAnnounce(tr("Set %1 loaded...").arg(QFileInfo(path).completeBaseName()), 2000);
 }
@@ -3190,7 +3411,7 @@ bool MainWindow::saveSetToPath(const QString& path)
         buffers[i] = workspaces[i]->text();
         zooms[i] = workspaces[i]->currentZoom();
     }
-    const QString err = SonicPi::SetBundle::write(path, buffers, editorTabWidget->currentIndex(), zooms);
+    const QString err = SonicPi::SetBundle::write(path, buffers, editorTabWidget->currentIndex(), zooms, currentSetMeta);
     if (!err.isEmpty())
     {
         QMessageBox::warning(this, tr("Sonic Pi"),
@@ -3237,6 +3458,7 @@ void MainWindow::clearAllBuffers()
     saveWorkspaces();
     // Detach so a later Save Set can't overwrite the old set with new material.
     currentSetPath.clear();
+    currentSetMeta = QJsonObject();
     showStatusAndAnnounce(tr("All buffers cleared..."), 2000);
 }
 
@@ -3313,23 +3535,148 @@ void MainWindow::dismissErrorCard()
     focusEditor();
 }
 
-void MainWindow::updateHelpCloseIcon()
+void MainWindow::updateHelpChevronIcons()
 {
-    if (!helpCloseButton)
+    if (!helpFullButton || !helpHideButton)
         return;
-    const int px = ScaleWidthForDPI(26);
-    const qreal dpr = devicePixelRatioF();
-    // Flat button (no chip): muted at rest, accent on hover — matching the
-    // A-/A+ zoom glyphs sharing the title row.
-    const QColor rest = SonicPiTheme::blend(theme->color("LogForeground"),
-                                            theme->color("LogBackground"), 0.55);
-    const QColor hover = theme->color("HighlightedBackground");
-    helpCloseButton->setIconSize(QSize(px, px));
-    m_helpCloseIcon = TablerIcons::icon(TablerIcons::Glyph::SquareX, rest, px, dpr);
-    m_helpCloseIconHover = TablerIcons::icon(TablerIcons::Glyph::SquareX, hover, px, dpr);
-    helpCloseButton->setIcon(helpCloseButton->underMouse() ? m_helpCloseIconHover
-                                                           : m_helpCloseIcon);
+    // The divider grips' palette, the web's: the window border colour at rest
+    // with the muted foreground on it, the accent and its contrast text under
+    // the pointer. ChevronButton draws them; so do the metrics dividers' knobs.
+    const QColor border = theme->color("WindowBorder");
+    const QColor accent = theme->color("HighlightedBackground");
+    const QColor rest   = SonicPiTheme::blend(theme->color("LogForeground"),
+                                              theme->color("LogBackground"), 0.30);
+    const QColor hover  = theme->contrastingText(accent);
+    // The hide chevron points the way it acts: down to put the panel away, up
+    // to bring it back.
+    const bool wayBack = m_helpPanel.hideGripPointsUp() || (docWidget && docWidget->isFloating());
+    helpHideButton->setDir(wayBack ? ChevronButton::Up : ChevronButton::Down);
+    for (ChevronButton* b : { helpFullButton, helpHideButton, sideGrip })
+        if (b) b->setColors(border, accent, rest, hover);
+    if (helpChevrons)
+        helpChevrons->setStyleSheet(QStringLiteral("#helpDividerGrips { background: transparent; }"));
 }
+
+// Everything on screen, from the one state: the dock (its height kept
+// across a hide), the editor's room and every other docked pane's (given to
+// a full-size panel, back as they were), the Help icon, which grip shows and
+// which way it points, and the bar at the editor's foot. A floating pane is
+// beside the code as far as the state goes, with the bar and an up grip to
+// bring it back docked.
+void MainWindow::applyHelpPanel()
+{
+    if (!docWidget || m_applyingHelpPanel)
+        return;
+    m_applyingHelpPanel = true;   // the dock's own signals land back here
+    const SonicPi::HelpPanelModel& m = m_helpPanel;
+
+    if (m.panelVisible() && !docWidget->isVisible())
+    {
+        docWidget->show();
+        const int h = (m_savedDockH > 0) ? m_savedDockH : (height() / 3);
+        resizeDocks({ docWidget }, { h }, Qt::Vertical);
+        ensureDocsSelection();   // never land on a blank pane
+    }
+    else if (!m.panelVisible() && docWidget->isVisible())
+    {
+        m_savedDockH = docWidget->height();   // for the way back
+        docWidget->hide();
+    }
+
+    const bool full = !m.editorVisible();
+    if (QWidget* editorArea = centralWidget())
+        editorArea->setVisible(!full);
+    if (full && !m_helpFullApplied)
+    {
+        // The web hides its editor column and the sidebar beside it: here the
+        // central editor and every other pane that was showing.
+        m_hiddenForHelpFull.clear();
+        for (QDockWidget* dock : findChildren<QDockWidget*>())
+            if (dock != docWidget && dock->isVisible() && !dock->isFloating())
+            {
+                m_hiddenForHelpFull.append(dock);
+                dock->hide();
+            }
+    }
+    else if (!full && m_helpFullApplied)
+    {
+        for (QDockWidget* dock : m_hiddenForHelpFull)
+            dock->show();
+        m_hiddenForHelpFull.clear();
+    }
+    m_helpFullApplied = full;
+
+    if (helpAct && theme)   // the action and the theme come after the dock in setup
+    {
+        QSignalBlocker blocker(helpAct);
+        helpAct->setChecked(m.iconLit());
+        helpAct->setIcon(theme->getHelpIcon(m.iconLit()));
+    }
+
+    const bool floating = docWidget->isFloating();
+    const bool wayBack = m.hideGripPointsUp() || floating;
+    if (helpAwayDock)
+        helpAwayDock->setVisible(m.awayBarVisible() || floating);
+    if (helpFullButton)
+        helpFullButton->setVisible(m.fullGripVisible() && !floating);
+    if (helpHideButton)
+        helpHideButton->setAccessibleName(wayBack
+            ? tr("Show the documentation and information panel")
+            : tr("Hide the documentation and information panel"));
+    updateHelpChevronIcons();
+    positionHelpChevrons();
+    positionSideGrip();
+    // The dock layout places the panes on its next pass; the grips are
+    // placed again after it, whatever events that pass does or does not send.
+    QTimer::singleShot(0, this, [this] { positionHelpChevrons(); positionSideGrip(); });
+    m_applyingHelpPanel = false;
+}
+
+// The grips sit on the separator above the help pane, centred on it, 24px in
+// from the pane's right edge, as the web's sit on its divider. With the pane
+// away they sit on the separator of the placeholder that takes the pane's
+// place in the bottom area (helpAwayDock) as the way back, as the web's
+// divider stays; a floating pane has the same placeholder, the way back
+// docked.
+void MainWindow::positionHelpChevrons()
+{
+    if (!helpChevrons || !docWidget)
+        return;
+    helpChevrons->adjustSize();
+    int cy, right;
+    if (helpAwayDivider && !(helpAwayDock && helpAwayDock->isVisible()))
+        helpAwayDivider->hide();
+    if (docWidget->isVisible() && !docWidget->isFloating())
+    {
+        const QRect pane = docWidget->geometry();
+        const int sep = style()->pixelMetric(QStyle::PM_DockWidgetSeparatorExtent, nullptr, this);
+        cy    = pane.top() - sep / 2;
+        right = pane.right();
+    }
+    else if (helpAwayDock && helpAwayDock->isVisible())
+    {
+        const int sep = style()->pixelMetric(QStyle::PM_DockWidgetSeparatorExtent, nullptr, this);
+        const QRect bar = SonicPi::awaySeparatorRect(helpAwayDock, Qt::BottomDockWidgetArea, sep);
+        if (helpAwayDivider)
+        {
+            helpAwayDivider->setGeometry(bar);
+            helpAwayDivider->show();
+            helpAwayDivider->raise();
+        }
+        cy    = bar.center().y();
+        right = bar.right();
+    }
+    else
+    {
+        helpChevrons->hide();
+        return;
+    }
+    helpChevrons->move(right - ScaleWidthForDPI(24) - helpChevrons->width(),
+                       cy - helpChevrons->height() / 2);
+    helpChevrons->show();
+    helpChevrons->raise();
+}
+
 
 void MainWindow::updateDocsFilterIcons()
 {
@@ -3773,8 +4120,7 @@ void MainWindow::showHelpListTab(int tabIdx, int row)
         else if (list->currentRow() < 0 && list->count() > 0)
             list->setCurrentRow(0);
     }
-    if (!docWidget->isVisible())
-        toggleDocPane();
+    helpShow();
     // A browse request (no specific row) is an invitation to explore: land
     // focus in the topics list so the arrow keys page through the entries —
     // without this a screen-reader user is left wherever they were, hearing
@@ -3864,8 +4210,7 @@ void MainWindow::applySouthTabIcons()
 void MainWindow::showQuickstartCards()
 {
     southTabs->setCurrentWidget(quickstartPane);
-    if (!docWidget->isVisible())
-        docWidget->show();
+    helpShow();
     // Choosing the menu item moves you to the cards (like Help/Examples/
     // Preferences), with Left/Right paging live straight away.
     quickstartPane->focusCarousel();
@@ -4027,14 +4372,19 @@ void MainWindow::stopCode()
 
 void MainWindow::scopeVisibilityChanged()
 {
-    piSettings->show_scopes = scopeWidget->isVisible();
+    // The column away hides the dock without changing the setting
+    // (SideColumnModel), and so does a session restore moving it: the setting
+    // is the user's, the dock follows both.
+    if (!m_sideColumn.away() && !m_restoringLayout)
+        piSettings->show_scopes = scopeWidget->isVisible();
     // A hidden dock must suspend the audio processor: the deferred
     // pause-when-silent cannot resolve inside OnConsumeAudioData's
     // isVisible() gate.
-    scopeWindow->SetSuspended(!piSettings->show_scopes);
+    scopeWindow->SetSuspended(!scopeWidget->isVisible());
     scopeAct->setIcon(theme->getScopeIcon(piSettings->show_scopes));
     QSignalBlocker blocker(scopeAct);
     scopeAct->setChecked(piSettings->show_scopes);
+    positionSideGrip();
     emit settingsChanged();
 }
 
@@ -4542,27 +4892,28 @@ void MainWindow::graphicsVisibilityChanged()
 
 void MainWindow::scope()
 {
-    scopeAct->setIcon(theme->getScopeIcon(piSettings->show_scopes));
+    if (scopeAct && theme)
+        scopeAct->setIcon(theme->getScopeIcon(piSettings->show_scopes));
     if (piSettings->show_scopes)
     {
         for (auto name : scopeWindow->GetScopeCategories())
         {
             scopeWindow->EnableScope(name, piSettings->isScopeActive(name));
         }
-        scopeWidget->show();
     }
-    else
-    {
-        scopeWidget->hide();
-    }
+    scopeWidget->setVisible(m_sideColumn.paneVisible(piSettings->show_scopes));
+    positionSideGrip();
     // Explicit sync: a dock hidden before its first show emits no
     // visibilityChanged, so the boot path (honourPrefs → scope()) must set
     // the suspend state directly or Resume() at run start re-enables the
     // audio processor behind a closed dock.
     scopeWindow->SetSuspended(!piSettings->show_scopes);
 
-    QSignalBlocker blocker(scopeAct);
-    scopeAct->setChecked(piSettings->show_scopes);
+    if (scopeAct)
+    {
+        QSignalBlocker blocker(scopeAct);
+        scopeAct->setChecked(piSettings->show_scopes);
+    }
 }
 
 void MainWindow::about()
@@ -4604,47 +4955,21 @@ void MainWindow::about()
 
 void MainWindow::toggleHelpIcon()
 {
-    helpAct->setIcon(theme->getHelpIcon(docWidget->isVisible()));
-    // The dock can be shown/hidden by paths that never touch helpAct (e.g.
-    // toggleDocPane); keep the checked state a screen reader announces true.
-    QSignalBlocker blocker(helpAct);
-    helpAct->setChecked(docWidget->isVisible());
+    // The dock changed by Qt's own hand (a floating pane closed from its title
+    // bar, a layout restored): the one state follows it, then every control
+    // follows the state. Nothing else reads the dock to decide anything.
+    if (!docWidget)
+        return;
+    if (docWidget->isVisible() != m_helpPanel.panelVisible())
+    {
+        if (docWidget->isVisible()) m_helpPanel.show();
+        else m_helpPanel.away();
+    }
+    applyHelpPanel();
 }
 void MainWindow::help()
 {
-
-    QSignalBlocker blocker(helpAct);
-
-    if (docWidget->isVisible())
-    {
-        showStatusAndAnnounce(tr("Hiding help..."), 2000);
-        // If focus lives in the pane being hidden it would fall to the
-        // window itself — hand it back to the editor instead.
-        QWidget* focused = QApplication::focusWidget();
-        const bool hadFocus = focused && docWidget->isAncestorOf(focused);
-        docWidget->hide();
-        helpAct->setChecked(false);
-        if (hadFocus)
-            focusPane(getCurrentWorkspace());
-    }
-    else
-    {
-        showStatusAndAnnounce(tr("Showing help..."), 2000);
-        docWidget->show();
-        ensureDocsSelection();   // never land on a blank page
-        helpAct->setChecked(true);
-        // Opening help takes you to it. On Docs that means the topics list, so
-        // the chapters are immediately arrow-key navigable; on any other tab it
-        // means that tab's own pane.
-        const int i = docsNavTabs->currentIndex();
-        if (southTabs->currentWidget() == docsPane && i >= 0 && i < helpLists.size())
-            focusPane(helpLists[i]);
-        else if (southTabs->currentWidget() == quickstartPane)
-            quickstartPane->focusCarousel(); // as the Cards menu item does
-        else
-            focusPane(southTabs->currentWidget());
-    }
-    helpAct->setIcon(theme->getHelpIcon(docWidget->isVisible()));
+    helpToggle();
 }
 
 void MainWindow::helpContext()
@@ -5164,11 +5489,17 @@ void MainWindow::updateColourTheme()
                                theme->color("WindowBorder"),
                                theme->color("ScrollBarHover"));
 
-    // Same reveal for the QMainWindow dock separators (painted by the proxy style).
+    // The same divider for the QMainWindow dock separators (painted by the
+    // proxy style) and the bar that stands in for the help's while it is away.
     DividerProxyStyle::setDividerColors(theme->color("WindowBackground"),
                                         theme->color("WindowBorder"),
                                         theme->color("ScrollBarHover"));
-    updateHelpCloseIcon();   // re-tint the help ✕ for the new theme
+    for (DividerOverlay* d : { helpAwayDivider, sideAwayDivider })
+        if (d) d->setColours({ theme->color("WindowBackground"), theme->color("WindowBorder"),
+                               theme->color("ScrollBarHover") });
+    for (QDockWidget* d : { helpAwayDock, sideAwayDock })
+        if (d) SonicPi::setAwayDockColour(d, theme->color("WindowBackground"));
+    updateHelpChevronIcons();   // re-tint the help chevrons for the new theme
     updateDocsFilterIcons(); // re-tint the docs filter magnifiers too
     applyDocsNavZoom();      // reassert the zoom over the freshly applied qss
     updateDocsNavMinWidth(); // chip metrics may have changed with the theme
@@ -6435,11 +6766,12 @@ void MainWindow::createToolBar()
     helpAct->setCheckable(true);
     helpAct->setChecked(false);
     connect(helpAct, &QAction::toggled, this, [this](bool) { help(); }); // see scopeAct
-    if (helpCloseButton)
+    if (helpHideButton)
     {
         const QString ks = helpAct->shortcut().toString(QKeySequence::NativeText);
-        helpCloseButton->setToolTip(ks.isEmpty() ? tr("Close Help")
-                                                 : tr("Close Help (%1)").arg(ks));
+        helpHideButton->setToolTip(ks.isEmpty() ? tr("Hide the documentation and information panel")
+                                                : tr("Hide the documentation and information panel (%1)").arg(ks));
+        helpFullButton->setToolTip(tr("Make the help panel full size"));
     }
 
     // Preferences
@@ -7950,28 +8282,45 @@ void MainWindow::startSessionRecordingFlow()
 
     // The engine's OUT tap: the master mix, flowing since boot. Nothing to
     // ask the engine for; the recorder reads it from its live position.
-    shm_audio_buffer* audioSlot = m_spAPI
-        ? m_spAPI->AudioProcessor_GetAudioBufferSlot(SHM_AUDIO_OUT_SLOT)
-        : nullptr;
-    if (!audioSlot) {
+    shm_audio_buffer_reader audio = m_spAPI
+        ? m_spAPI->AudioProcessor_GetAudioBufferReader(SHM_AUDIO_OUT_SLOT)
+        : shm_audio_buffer_reader();
+    if (!audio.valid()) {
         std::cout << "[GUI] - Session recording: no audio tap available — recording video-only" << std::endl;
     }
 
     WId wid = this->winId();
+    // The capture is set up asynchronously: a failure after this returns
+    // true arrives through onFailed, on the GUI thread.
     const bool started = SonicPi::startSessionRecording(
         reinterpret_cast<void*>(wid),
         m_videoTempPath.toStdString(),
         piSettings->record_show_cursor,
-        audioSlot);
-    if (!started) {
-        is_recording = false;
-        updateRecordingUI();
-        statusBar()->showMessage(tr("Recording failed to start"), 2000);
-        announce(tr("Recording failed to start"), true);
-        rec_flash_timer->stop();
-        recAct->setIcon(theme->getRecIcon(false, false));
-        m_videoTempPath.clear();
-    }
+        std::move(audio),
+        [this](const std::string& reason) {
+            const QString why = QString::fromStdString(reason);
+            QMetaObject::invokeMethod(this, [this, why] { recordingFailed(why); }, Qt::QueuedConnection);
+        });
+    if (!started)
+        recordingFailed(QString());
+}
+
+// The recording never started, or died setting itself up: the Record
+// control goes back to rest and says why, so the user is not left watching
+// a red light record nothing.
+void MainWindow::recordingFailed(const QString& reason)
+{
+    if (!is_recording)
+        return;
+    is_recording = false;
+    updateRecordingUI();
+    const QString message = reason.isEmpty() ? tr("Recording failed to start")
+                                             : tr("Recording failed: %1").arg(reason);
+    statusBar()->showMessage(message, 4000);
+    announce(message, true);
+    rec_flash_timer->stop();
+    recAct->setIcon(theme->getRecIcon(false, false));
+    m_videoTempPath.clear();
 }
 
 void MainWindow::stopSessionRecordingFlow()
@@ -8048,9 +8397,17 @@ void MainWindow::restoreWindows()
     }
 
     const QByteArray savedWindowState = gui_settings->value("windowState").toByteArray();
+    m_restoringLayout = true;   // the scope dock's visibility is not the user's setting while this runs
     restoreState(savedWindowState);
     docsplit->restoreState(gui_settings->value("docsplitState").toByteArray());
     restoreGeometry(gui_settings->value("windowGeom").toByteArray());
+    m_restoringLayout = false;
+    // restoreState() shows and hides docks behind the models' backs (the
+    // help dock, and the placeholders if a session saved them): the help
+    // panel's state follows the dock it finds, the column's placeholder
+    // follows its state, and the grips and dividers follow both.
+    toggleHelpIcon();
+    applySideColumn();
 
     auto current_state = saveState();
 
@@ -8117,6 +8474,8 @@ void MainWindow::readSettings()
         const double oldGainPct = gui_settings->value("prefs/system-vol").toInt() * 2.4;
         piSettings->main_drive = qBound(25, qRound(oldGainPct), 400);
         piSettings->main_volume = qBound(0, qRound(100.0 * oldGainPct / piSettings->main_drive), 100);
+    // The capture is set up asynchronously: a failure after this returns
+    // true arrives through onFailed, on the GUI thread.
     }
     piSettings->mixer_force_mono = gui_settings->value("prefs/mixer-force-mono", false).toBool();
     piSettings->mixer_invert_stereo = gui_settings->value("prefs/mixer-invert-stereo", false).toBool();
@@ -9131,12 +9490,43 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
         update();
     }
 
-    // Swap the help ✕ glyph to its accent hover tint (flat button, no chip).
-    if (helpCloseButton && obj == helpCloseButton
-        && (event->type() == QEvent::Enter || event->type() == QEvent::Leave))
+
+    // The help grips follow the pane wherever it goes, and the bar that stands
+    // in for its separator while it is away.
+    if (docWidget && obj == docWidget)
     {
-        helpCloseButton->setIcon(event->type() == QEvent::Enter ? m_helpCloseIconHover
-                                                                : m_helpCloseIcon);
+        if (event->type() == QEvent::Show || event->type() == QEvent::Hide)
+            toggleHelpIcon();           // the dock moved by Qt's own hand: the state follows it
+        else if (event->type() == QEvent::Resize || event->type() == QEvent::Move)
+            positionHelpChevrons();
+    }
+    if (helpAwayDivider && obj == helpAwayDivider)
+    {
+        if (event->type() == QEvent::Enter || event->type() == QEvent::HoverEnter) { if (helpHideButton) helpHideButton->setHovering(true); }
+        else if (event->type() == QEvent::Leave || event->type() == QEvent::HoverLeave) { if (helpHideButton) helpHideButton->setHovering(false); }
+    }
+    if (sideAwayDivider && obj == sideAwayDivider)
+    {
+        if (event->type() == QEvent::Enter || event->type() == QEvent::HoverEnter) { if (sideGrip) sideGrip->setHovering(true); }
+        else if (event->type() == QEvent::Leave || event->type() == QEvent::HoverLeave) { if (sideGrip) sideGrip->setHovering(false); }
+    }
+    if (sideAwayDock && obj == sideAwayDock)
+    {
+        if (event->type() == QEvent::Resize || event->type() == QEvent::Move
+            || event->type() == QEvent::Show)
+            positionSideGrip();
+    }
+    if (obj == scopeWidget || obj == outputWidget || obj == incomingWidget || obj == metroWidget)
+    {
+        if (event->type() == QEvent::Show || event->type() == QEvent::Hide
+            || event->type() == QEvent::Resize || event->type() == QEvent::Move)
+            positionSideGrip();
+    }
+    if (helpAwayDock && obj == helpAwayDock)
+    {
+        if (event->type() == QEvent::Resize || event->type() == QEvent::Move
+            || event->type() == QEvent::Show)
+            positionHelpChevrons();
     }
 
     // The prefs Levels meter only needs the audio feed while its pane is on
@@ -9192,7 +9582,7 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
         if (!onButton && g.y() >= qMin(sepTop, sepBot) - 4 && g.y() <= qMax(sepTop, sepBot) + 4 &&
             g.x() >= dockL && g.x() <= dockR)
         {
-            toggleDocPane();
+            helpToggle();
             return true;
         }
     }
@@ -9361,7 +9751,7 @@ void MainWindow::focusPane(QWidget* pane)
 
 void MainWindow::revealDocsTab()
 {
-    docWidget->show();
+    helpShow();
     southTabs->setCurrentWidget(docsPane);   // may currently be on Debug or another tab
     updatePrefsIcon();
 }
@@ -9473,7 +9863,7 @@ void MainWindow::focusHelpCards()
 
 void MainWindow::focusHelpLogs()
 {
-    docWidget->show();
+    helpShow();
     southTabs->setCurrentWidget(debugLogPanel);
     // The panel is a tab widget of log tails; focus the visible one so the
     // arrow keys read it straight away.
@@ -9483,7 +9873,7 @@ void MainWindow::focusHelpLogs()
 
 void MainWindow::focusHelpDebug()
 {
-    docWidget->show();
+    helpShow();
     southTabs->setCurrentWidget(metricsPanel);
     focusPane(metricsPanel);
 }
@@ -9691,6 +10081,8 @@ void MainWindow::slidePrefsWidgetOut()
 
 void MainWindow::resizeEvent(QResizeEvent* e)
 {
+    positionHelpChevrons();
+    positionSideGrip();
     movePrefsWidget();
     QMainWindow::resizeEvent(e);
 }
@@ -9757,7 +10149,21 @@ void MainWindow::updateAudioDevices(const SonicPi::AudioDevicesInfo& devicesInfo
     m_lastAudioDevices = devicesInfo;
     m_audioDevicesSeen = true;
     settingsWidget->updateAudioDevices(devicesInfo);
+    // The engine lost its device and fell back on its own: this push names
+    // where the sound went (audiodevicepolicy.h, audioStateLostDevice).
+    if (m_announceDeviceAfterRollback)
+    {
+        m_announceDeviceAfterRollback = false;
+        showStatusAndAnnounce(tr("Audio device lost — output is now %1")
+                                  .arg(QString::fromStdString(devicesInfo.currentDevice)), 8000);
+    }
     maybeRestoreAudioIntent();
+}
+
+void MainWindow::onAudioStateChanged(const QString& state, const QString& reason)
+{
+    if (SonicPi::audioStateLostDevice(state.toStdString(), reason.toStdString()))
+        m_announceDeviceAfterRollback = true;
 }
 
 void MainWindow::updateAudioInputDevices(const SonicPi::AudioInputDevicesInfo& devicesInfo)
@@ -9863,6 +10269,7 @@ void MainWindow::maybeRestoreAudioIntent()
         // GUI makes. Without it a restore that the engine resolves elsewhere
         // leaves the settings describing the device it declined to open, and
         // the same request replays on every launch.
+        m_pendingAudioPrefs            = PendingAudioPrefs();
         m_pendingAudioPrefs.output     = QString::fromStdString(plan.output);
         m_pendingAudioPrefs.input      = QString::fromStdString(plan.input);
         m_pendingAudioPrefs.sampleRate = plan.sampleRate;
@@ -9929,6 +10336,7 @@ void MainWindow::switchAudioDriver(QString driver)
 void MainWindow::switchAudioDevice(QString device)
 {
     m_pendingAudioPrefs.output = device;
+    m_pendingAudioPrefs.outputFollowsDefault = settingsWidget->selectedOutputFollowsDefault();
     sendDeviceSwitch(device, 0, 0);
 }
 
@@ -9939,6 +10347,7 @@ void MainWindow::switchAudioDevice(QString device)
 void MainWindow::switchAudioDeviceAndInput(QString device, QString input)
 {
     m_pendingAudioPrefs.output = device;
+    m_pendingAudioPrefs.outputFollowsDefault = settingsWidget->selectedOutputFollowsDefault();
     m_pendingAudioPrefs.input  = input;
     sendDeviceSwitch(device, 0, 0, input);
 }
@@ -10036,6 +10445,7 @@ void MainWindow::onAudioSwitchDone(const SonicPi::AudioSwitchOutcome& outcome)
     request.input      = pending.input.toStdString();
     request.sampleRate = pending.sampleRate;
     request.bufferSize = pending.bufferSize;
+    request.outputFollowsDefault = pending.outputFollowsDefault;
 
     const auto decision = SonicPi::audioPrefsDecision(request, outcome);
 
@@ -10061,6 +10471,22 @@ void MainWindow::onAudioSwitchDone(const SonicPi::AudioSwitchOutcome& outcome)
     if (decision.bufferSize == SonicPi::PrefAction::Save) {
         piSettings->audio_buffer_size = decision.bufferSizeValue;
         gui_settings->setValue("prefs/audio-buffer-size", decision.bufferSizeValue);
+    }
+
+    // Where the sound now goes, when it is not where the user pointed: on
+    // the status bar and to a screen reader, whether or not the preferences
+    // are open (audiodevicepolicy.h, AudioNotice).
+    switch (decision.notice) {
+    case SonicPi::AudioNotice::OutputUnavailable:
+        showStatusAndAnnounce(tr("Audio output '%1' isn't available — following the system default")
+                                  .arg(QString::fromStdString(decision.noticeDevice)), 8000);
+        break;
+    case SonicPi::AudioNotice::FollowingSystemDefault:
+        showStatusAndAnnounce(tr("Audio output: %1 (the system default)")
+                                  .arg(QString::fromStdString(decision.noticeDevice)), 6000);
+        break;
+    case SonicPi::AudioNotice::None:
+        break;
     }
 
     // Two failure shapes from the engine. Surface both as a modal

@@ -47,10 +47,21 @@ add_executable(${PROJECT_NAME}
     ${GUI_TESTS_ROOT}/completion_rank.test.cpp
     ${GUI_TESTS_ROOT}/completion_trackparams.test.cpp
     ${GUI_TESTS_ROOT}/completion_trackparams_editor.test.cpp
+    ${GUI_TESTS_ROOT}/completion_cuepaths_editor.test.cpp
     ${GUI_TESTS_ROOT}/tutorialdocs.test.cpp
     ${GUI_TESTS_ROOT}/tutorialwidgets_a11y.test.cpp
     ${GUI_TESTS_ROOT}/tutorialpane_clip.test.cpp
     ${GUI_TESTS_ROOT}/trackspanel_look.test.cpp
+    ${GUI_TESTS_ROOT}/helprail_look.test.cpp
+    ${GUI_TESTS_ROOT}/chevron_look.test.cpp
+    ${GUI_TESTS_ROOT}/recorder_limits.test.cpp
+    ${GUI_TESTS_ROOT}/recorder_audio_mix.test.cpp
+    ${GUI_TESTS_ROOT}/helppanelmodel.test.cpp
+    ${GUI_TESTS_ROOT}/sidecolumnmodel.test.cpp
+    ${GUI_TESTS_ROOT}/nodetreemotion.test.cpp
+    ${GUI_TESTS_ROOT}/nodetreegraph_look.test.cpp
+    ${GUI_TESTS_ROOT}/loopscope_lifecycle.test.cpp
+    ${GUI_ROOT}/widgets/nodetreegraph.cpp
     ${GUI_ROOT}/widgets/trackspanel.cpp
     ${GUI_ROOT}/widgets/tutorialpane.cpp
     ${GUI_ROOT}/widgets/sonicpiscintilla.cpp
@@ -60,6 +71,7 @@ add_executable(${PROJECT_NAME}
     ${GUI_ROOT}/model/sonicpitheme.cpp
     ${GUI_ROOT}/widgets/editortoolbar.cpp
     ${GUI_ROOT}/widgets/findpopup.cpp
+    ${GUI_ROOT}/widgets/chevronbutton.cpp
     ${GUI_TESTS_ROOT}/sampleheaderinfo.test.cpp
     ${GUI_TESTS_ROOT}/setbundle.test.cpp
     ${GUI_TESTS_ROOT}/splash_quit_policy.test.cpp
@@ -69,13 +81,40 @@ add_executable(${PROJECT_NAME}
     ${GUI_ROOT}/utils/sampleheaderinfo.cpp
     ${GUI_ROOT}/utils/completion_context.cpp
     ${GUI_ROOT}/utils/reducedmotion.cpp
+    ${GUI_ROOT}/utils/framepacer.cpp
     ${GUI_ROOT}/utils/tutorialdocs.cpp
     ${GUI_ROOT}/widgets/tutorialwidgets.cpp
     ${GUI_ROOT}/utils/setbundle.cpp
     ${GUI_ROOT}/utils/scintilla_api.cpp
 )
 
+# The Objective-C++ guard every system callback block goes through, and the
+# lint that keeps it so: macOS only, with the frameworks the guard test
+# provokes a real exception from. As in gui/, the .mm files go to the C++
+# compiler, which reads Objective-C++ from the extension.
+if(APPLE)
+  target_sources(${PROJECT_NAME} PRIVATE
+      ${GUI_TESTS_ROOT}/objc_guard.test.mm
+      ${GUI_ROOT}/platform/objc_guard.mm)
+  set_source_files_properties(${GUI_TESTS_ROOT}/objc_guard.test.mm ${GUI_ROOT}/platform/objc_guard.mm
+      PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+  target_link_libraries(${PROJECT_NAME} PRIVATE "-framework Foundation" "-framework AVFoundation")
+endif()
+
 target_include_directories(${PROJECT_NAME} PRIVATE
+# The Objective-C++ guard every system callback block goes through, and the
+# lint that keeps it so: macOS only, with the frameworks the guard test
+# provokes a real exception from. As in gui/, the .mm files go to the C++
+# compiler, which reads Objective-C++ from the extension.
+if(APPLE)
+  target_sources(${PROJECT_NAME} PRIVATE
+      ${GUI_TESTS_ROOT}/objc_guard.test.mm
+      ${GUI_ROOT}/platform/objc_guard.mm)
+  set_source_files_properties(${GUI_TESTS_ROOT}/objc_guard.test.mm ${GUI_ROOT}/platform/objc_guard.mm
+      PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+  target_link_libraries(${PROJECT_NAME} PRIVATE "-framework Foundation" "-framework AVFoundation")
+endif()
+
     ${GUI_ROOT}
     ${GUI_ROOT}/widgets
     ${GUI_ROOT}/QScintilla_src-2.14.1/src   # <Qsci/...> headers (declarations only)

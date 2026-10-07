@@ -14,6 +14,7 @@
 #include "metricspanel.h"
 #include "nodetreegraph.h"
 #include "model/sonicpitheme.h"
+#include "utils/framepacer.h"
 
 #include <api/sonicpi_api.h>
 #include <api/audio/server_shm.hpp>
@@ -431,7 +432,7 @@ void MetricsPanel::buildUi()
     m_mainSplit = mainRow;
     outer->addWidget(mainRow);
 
-    auto* leftCol = new QSplitter(Qt::Vertical);
+    auto* leftCol = new ThinSplitter(Qt::Vertical);
     m_leftSplit = leftCol;
     buildNodeColumn(leftCol);
 
@@ -558,17 +559,15 @@ void MetricsPanel::buildUi()
 
     mainRow->setStretchFactor(0, 618);  // (tree + metrics) : logs ≈ golden ratio
     mainRow->setStretchFactor(1, 382);
-    // A wide grab area whose centre is a thin 2px line at rest, revealed to the
-    // full width on hover (ThinSplitter). Fixed px (not DPI-scaled) so the reveal
-    // stays clearly wider than the resting line on macOS's sub-1.0 display scale.
-    const int kHandleW = 7;
-    const int kLineW = 2;
+    // The one divider (Divider::paint): a wide grab area whose centre is a thin
+    // line at rest, revealed to the full width on hover.
+    const int kHandleW = Divider::kExtent;
     mainRow->setHandleWidth(kHandleW);
     mainRow->setChildrenCollapsible(false);
 
     // Both vertical columns are draggable, and laid out by revealColumns()
     // until the user drags a divider (then that column is left to the user).
-    for (QSplitter* col : { leftCol, static_cast<QSplitter*>(rightCol) })
+    for (QSplitter* col : std::initializer_list<QSplitter*>{ leftCol, rightCol })
     {
         // Non-collapsible so a zero-height pane stays visible and keeps its
         // handle, leaving the divider bar (and its chevron) draggable even when
@@ -592,34 +591,29 @@ void MetricsPanel::buildUi()
         col->installEventFilter(this);   // track height changes to re-reveal
     }
 
-    // Chevron grip on the node-tree / metrics divider. Parented to the panel,
-    // not the splitter (a QSplitter would adopt a child widget as a pane), so
-    // it floats as an overlay, positioned onto the divider by
-    // positionMetricsToggle().
-    // Spans the whole tree/metrics divider (sized/placed in positionMetricsToggle)
-    // so the divider line and its glyph are one button: hover or click anywhere
-    // on the divider hits it. A click toggles the metrics' visibility.
+    // The grips on the dividers: the one chevron control (ChevronButton), the
+    // help divider's 36x16 pill, laid over the divider at its right as the
+    // web's is. Parented to the panel, not the splitter (a QSplitter would
+    // adopt a child widget as a pane), so each floats as an overlay, placed by
+    // positionMetricsToggle / positionLogsToggle. The divider line is the
+    // splitter handle's own (Divider::paint); a grip and its handle are
+    // filtered together so hovering either reveals both as one control, and
+    // double-clicking the line does what the grip does.
+    // Tree / metrics: a click minimises the metrics and restores them.
     m_metricsToggle = new ChevronButton(this);
-    // Thin divider line across the full width + a 48px knob box on the right
-    // (6px inset) holding the triangle — restores the box look while keeping the
-    // whole divider as one hover/click target. On hover the line reveals to the
-    // handle width (kHandleW), matching the ThinSplitter dividers.
-    m_metricsToggle->setBox(kLineW, 48, 6, ChevronButton::Horizontal, kHandleW);
+    m_metricsToggle->setFixedSize(ScaleForDPI(36, 16));
     connect(m_metricsToggle, &QToolButton::clicked, this, &MetricsPanel::toggleMetrics);
     updateChevron();
+    if (QSplitterHandle* treeHandle = leftCol->handle(1))
+        treeHandle->installEventFilter(this);
+    m_metricsToggle->installEventFilter(this);
 
-    // Vertical chevron on the main (left columns | logs) divider — the rotated
-    // sibling of the metrics chevron. A knob centred on the divider: clicking it
-    // (or double-clicking the divider line, handled in eventFilter) minimises the
-    // logs column off to the right and restores it. The line itself stays
-    // draggable for resizing, so the knob is short rather than full-height.
+    // Left columns | logs: the rotated sibling, near the top of the divider. A
+    // click minimises the logs column off to the right and restores it.
     m_logsToggle = new ChevronButton(this);
-    m_logsToggle->setBox(kLineW, 48, 0, ChevronButton::Vertical, kHandleW);
+    m_logsToggle->setFixedSize(ScaleForDPI(16, 36));
     connect(m_logsToggle, &QToolButton::clicked, this, &MetricsPanel::toggleLogs);
     updateLogsChevron();
-    // The short logs knob overlays the main divider handle; filter both so their
-    // hover states stay in sync and they reveal as one control (as the full-width
-    // metrics chevron does over its own divider).
     if (QSplitterHandle* mainHandle = mainRow->handle(1))
         mainHandle->installEventFilter(this);
     m_logsToggle->installEventFilter(this);
@@ -714,14 +708,36 @@ void MetricsPanel::buildNodeColumn(QSplitter* topRow)
     title->setFont(mono);
     m_rowLabels.append(title);
 
-    // Legend + live counts (populated in updateNodeTree()).
+    // Legend + live counts (populated in updateNodeTree()), and the labels'
+    // switch beside them, as the web's tree has it.
     m_treeStats = new QLabel(card);
     m_treeStats->setFont(mono);
     m_treeStats->setTextFormat(Qt::RichText);
-    body->addWidget(m_treeStats);
+    m_treeLabels = new QToolButton(card);
+    m_treeLabels->setObjectName("ssTreeLabels");
+    m_treeLabels->setText(tr("Labels"));
+    m_treeLabels->setCheckable(true);
+    m_treeLabels->setChecked(true);
+    m_treeLabels->setFocusPolicy(Qt::StrongFocus);
+    m_treeLabels->setToolTip(tr("Name the fx under them"));
+    m_treeLabels->setAccessibleName(tr("Node tree labels"));
+    auto* head = new QHBoxLayout;
+    head->setContentsMargins(0, 0, 0, 0);
+    head->addWidget(m_treeStats, 1);
+    head->addWidget(m_treeLabels, 0, Qt::AlignVCenter);
+    body->addLayout(head);
 
     m_nodeGraph = new NodeTreeGraph(card);
+    m_nodeGraph->setAccessibleName(tr("Node tree"));
     body->addWidget(m_nodeGraph, 1);
+    connect(m_treeLabels, &QToolButton::toggled, m_nodeGraph, &NodeTreeGraph::setLabelsShown);
+    // The switch says when there are too many to label, so it never looks dead.
+    connect(m_nodeGraph, &NodeTreeGraph::labelsHiddenChanged, this, [this](bool hidden) {
+        const QString why = hidden ? tr("Too many to label at once: the labels come back when there are fewer")
+                                   : QString();
+        m_treeLabels->setToolTip(hidden ? why : tr("Name the fx under them"));
+        m_treeLabels->setAccessibleDescription(why);
+    });
     topRow->addWidget(card);
 }
 
@@ -1076,7 +1092,8 @@ void MetricsPanel::updateNodeTree()
     if (version == m_lastTreeVersion) return;   // unchanged — skip rebuild
     m_lastTreeVersion = version;
 
-    QVector<NodeTreeGraph::Node> nodes;
+    std::vector<NodeTreeGraph::LiveNode> nodes;
+    nodes.reserve(nt.header->node_count.load(std::memory_order_relaxed));
     int groups = 0, fx = 0, samples = 0, synths = 0;
 
     for (uint32_t i = 0; i < nt.max_nodes; ++i)
@@ -1092,25 +1109,18 @@ void MetricsPanel::updateNodeTree()
         const int32_t nextId  = e.next_id;
         const int32_t headId  = e.head_id;
         const char* nm = e.def_name;
-        QString name = QString::fromUtf8(nm, qstrnlen(nm, NODE_TREE_DEF_NAME_SIZE));
+        std::string name(nm, qstrnlen(nm, NODE_TREE_DEF_NAME_SIZE));
 
-        const bool isFx     = name.contains("-fx_") || name.contains("-fx-");
-        const bool isSample = name.contains("stereo_player") || name.contains("mono_player");
-        NodeTreeGraph::Kind kind;
-        if (isGroup)       { kind = NodeTreeGraph::Group;  ++groups; }
-        else if (isFx)     { kind = NodeTreeGraph::Fx;     ++fx; ++synths; }
-        else if (isSample) { kind = NodeTreeGraph::Sample; ++samples; ++synths; }
-        else               { kind = NodeTreeGraph::Synth;  ++synths; }
+        const NodeTreeGraph::Kind kind = SonicPi::NodeTreeMotion::kindOf(isGroup != 0, name);
+        switch (kind)
+        {
+        case NodeTreeGraph::Kind::Group:  ++groups; break;
+        case NodeTreeGraph::Kind::Fx:     ++fx; ++synths; break;
+        case NodeTreeGraph::Kind::Sample: ++samples; ++synths; break;
+        case NodeTreeGraph::Kind::Synth:  ++synths; break;
+        }
 
-        NodeTreeGraph::Node node;
-        node.id = id;
-        node.parent = parent;
-        node.head = headId;
-        node.next = nextId;
-        node.kind = kind;
-        node.label = isGroup ? (name.isEmpty() ? QStringLiteral("group") : name)
-                             : name;
-        nodes.append(node);
+        nodes.push_back({ id, parent, headId, nextId, kind, isGroup ? std::string() : std::move(name) });
     }
 
     const int pureSynths = synths - fx - samples;
@@ -1118,18 +1128,19 @@ void MetricsPanel::updateNodeTree()
     m_nodeGraph->setTree(nodes);
     if (m_treeStats)
     {
-        // Swatch colours match the graph's node colours (set in applyTheme).
-        auto sw = [&](const char* themeName, const char* label, int n) {
+        // Swatches in the graph's node colours (set in applyTheme) and shapes:
+        // groups circles, fx squares, synths and samples diamonds.
+        auto sw = [&](const char* themeName, const char* shape, const char* label, int n) {
             const QString dot = m_theme ? m_theme->color(themeName).name() : m_textColor.name();
-            return QStringLiteral("<span style=\"color:%1\">&#9679;</span> "
-                                  "<span style=\"color:%2\">%3 %4</span>")
-                .arg(dot, kindColor(K_Dim).name(), QString::fromUtf8(label), QString::number(n));
+            return QStringLiteral("<span style=\"color:%1\">%2</span> "
+                                  "<span style=\"color:%3\">%4 %5</span>")
+                .arg(dot, QString::fromUtf8(shape), kindColor(K_Dim).name(), QString::fromUtf8(label), QString::number(n));
         };
         const QString gap = QStringLiteral("&nbsp;&nbsp;&nbsp;");
-        m_treeStats->setText(sw("NumberForeground", "Groups", groups) + gap
-                             + sw("FunctionMethodNameForeground", "Synths", pureSynths) + gap
-                             + sw("KeywordForeground", "FX", fx) + gap
-                             + sw("DoubleQuotedStringForeground", "Samples", samples));
+        m_treeStats->setText(sw("NumberForeground", "&#9679;", "Groups", groups) + gap
+                             + sw("FunctionMethodNameForeground", "&#9670;", "Synths", pureSynths) + gap
+                             + sw("KeywordForeground", "&#9632;", "FX", fx) + gap
+                             + sw("DoubleQuotedStringForeground", "&#9670;", "Samples", samples));
     }
 }
 
@@ -1243,11 +1254,10 @@ void MetricsPanel::refresh()
         }
     }
 
-    // Tail the rings + node tree.
+    // Tail the rings. (The node tree is read on the frame tick: startTreeTicks.)
     drainOscRing(/*outgoing=*/true);   // IN ring     → To SuperSonic (what Sonic Pi sent)
     drainEgressRing(/*nrt=*/false);    // OUT ring     → /clockwork/debug → Debug, rest → From SuperSonic
     drainEgressRing(/*nrt=*/true);     // NRT-out ring → /clockwork/debug → Debug, rest → From SuperSonic
-    updateNodeTree();
 
     // Now that the debug cursor is primed (tailing live), ask SuperSonic once
     // for its build/runtime summary — it replies down the debug ring, so the
@@ -1324,6 +1334,17 @@ void MetricsPanel::applyTheme(SonicPiTheme* theme)
         "QLabel[ssRole=\"rowlabel\"] { color:%4; }"
         "QTextEdit { color:%2; background:%1; border:none; }")
         .arg(bg, fg, border, dim, muted, winBorder).arg(gridW).arg(qMax(6, 11 + m_fontZoom));
+    // The node tree's Labels switch, as the web's: a small chip with a 2px
+    // border in the button colour, lit in the accent while on. Hover and focus
+    // take the hover colour, focus last so the keyboard's place always shows.
+    const QString hoverCol = theme->color("HoverButton").name();
+    panelQss += QString(
+        "QToolButton#ssTreeLabels { color:%1; background:transparent; border:2px solid %2;"
+        " border-radius:@radiusMedium; padding:0px 8px; margin:0px; font-weight:600; }"
+        "QToolButton#ssTreeLabels:hover { color:%3; border-color:%3; }"
+        "QToolButton#ssTreeLabels:checked { color:%4; border-color:%4; }"
+        "QToolButton#ssTreeLabels:focus { color:%3; border-color:%3; }")
+        .arg(fg, theme->color("Button").name(), hoverCol, theme->color("HighlightedBackground").name());
     // Card radius from the shared scale (dpi.h), as a named token rather than
     // another %N arg in an already-crowded sequence.
     panelQss.replace("@radiusMedium", QString::number(ScaleHeightForDPI(kRadiusMediumDx)) + "px");
@@ -1334,45 +1355,31 @@ void MetricsPanel::applyTheme(SonicPiTheme* theme)
     // theme colours in; bg blends the wide grab area with the panel.
     const QColor divLine  = theme->color("WindowBorder");
     const QColor divHover = theme->color("ScrollBarHover");
-    if (m_mainSplit)  m_mainSplit->setDividerColors(m_bgColor, divLine, divHover);
-    if (m_rightSplit) m_rightSplit->setDividerColors(m_bgColor, divLine, divHover);
-    // The tree/metrics divider line is painted by the metrics ChevronButton (its
-    // band spans the whole divider), so that splitter's own handle stays
-    // transparent to avoid a doubled line.
-    if (m_leftSplit)
-        m_leftSplit->setStyleSheet("QSplitter::handle { background:transparent; image:none; }");
-    // The logs chevron's band is short, so the main divider's full-height line is
-    // the splitter handle itself — shown while the logs are visible, hidden once
-    // they're collapsed (setDividerLineVisible toggles it).
+    for (ThinSplitter* s : { m_mainSplit, m_leftSplit, m_rightSplit })
+        if (s) s->setDividerColors(m_bgColor, divLine, divHover);
+    // A divider's line shows while its pane is visible, and goes once the pane
+    // is collapsed (setDividerLineVisible toggles it): just the grip remains.
     setDividerLineVisible(m_mainSplit, !m_logsMinimised);
+    setDividerLineVisible(m_leftSplit, !m_metricsMinimised);
 
-    // The chevron grip is painted by ChevronButton (not styled via QSS): fill
-    // with the exact divider-line colour, brighten to the accent on hover like
-    // the splitter handle, glyph in the foreground colour. In high-contrast mode
-    // LogForeground is near-black, which vanishes on the grey divider grip — so
-    // force the glyph to white there to keep the chevron legible.
-    if (m_metricsToggle)
-    {
-        const QColor glyph = (theme->getColourScheme() == SonicPiTheme::HighContrastScheme)
-                                 ? QColor(Qt::white)
-                                 : m_textColor;
-        m_metricsToggle->setColors(theme->color("WindowBorder"),
-                                   theme->color("ScrollBarHover"),
-                                   glyph);
-    }
-
-    if (m_logsToggle)
-    {
-        const QColor glyph = (theme->getColourScheme() == SonicPiTheme::HighContrastScheme)
-                                 ? QColor(Qt::white)
-                                 : m_textColor;
-        m_logsToggle->setColors(theme->color("WindowBorder"),
-                                theme->color("ScrollBarHover"),
-                                glyph);
-    }
+    // The grips' palette (MainWindow::updateHelpChevronIcons): the window
+    // border colour at rest with the muted foreground on it, the accent and its
+    // contrast text under the pointer. In high-contrast mode LogForeground is
+    // near-black, which vanishes on the grey grip, so the glyph is white there.
+    const QColor glyph = (theme->getColourScheme() == SonicPiTheme::HighContrastScheme)
+                             ? QColor(Qt::white)
+                             : SonicPiTheme::blend(m_textColor, theme->color("LogBackground"), 0.30);
+    for (ChevronButton* grip : { m_metricsToggle, m_logsToggle })
+        if (grip)
+            grip->setColors(theme->color("WindowBorder"),
+                            theme->color("HighlightedBackground"),
+                            glyph,
+                            theme->contrastingText(theme->color("HighlightedBackground")));
 
     if (m_nodeGraph)
-        m_nodeGraph->applyTheme(m_textColor, m_bgColor, m_borderColor,
+        m_nodeGraph->applyTheme(m_textColor, m_bgColor,
+                                theme->color("Background"),                   // each node's outline
+                                theme->mutedForeground(),                     // labels
                                 theme->color("NumberForeground"),             // group  (blue)
                                 theme->color("FunctionMethodNameForeground"), // synth  (pink)
                                 theme->color("KeywordForeground"),            // fx     (yellow)
@@ -1430,38 +1437,62 @@ void MetricsPanel::showEvent(QShowEvent* e)
     positionLogsToggle();
     refresh();
     m_timer->start();
+    startTreeTicks();
 }
 
 void MetricsPanel::hideEvent(QHideEvent* e)
 {
     QWidget::hideEvent(e);
     m_timer->stop();
+    stopTreeTicks();
+}
+
+void MetricsPanel::startTreeTicks()
+{
+    if (m_treeTicking) return;
+    m_treeTicking = true;
+    // A read is one word when nothing has changed (updateNodeTree's version
+    // gate), so a tick costs nothing while the tree is still.
+    connect(SonicPi::FramePacer::instance(), &SonicPi::FramePacer::tick,
+            this, &MetricsPanel::updateNodeTree, Qt::UniqueConnection);
+    SonicPi::FramePacer::instance()->retain();
+    updateNodeTree();
+}
+
+void MetricsPanel::stopTreeTicks()
+{
+    if (!m_treeTicking) return;
+    m_treeTicking = false;
+    disconnect(SonicPi::FramePacer::instance(), &SonicPi::FramePacer::tick,
+               this, &MetricsPanel::updateNodeTree);
+    SonicPi::FramePacer::instance()->release();
 }
 
 bool MetricsPanel::eventFilter(QObject* obj, QEvent* e)
 {
-    // Double-clicking the main divider line toggles the logs column, mirroring a
-    // click on its chevron knob.
-    if (m_mainSplit && e->type() == QEvent::MouseButtonDblClick
-        && obj == m_mainSplit->handle(1))
+    // A grip and the divider it overlays are one control: double-clicking the
+    // line does what the grip does, and hovering either reveals both.
+    struct GripOnDivider { ThinSplitter* split; ChevronButton* grip; void (MetricsPanel::*toggle)(); };
+    for (const GripOnDivider& d : { GripOnDivider{ m_mainSplit, m_logsToggle, &MetricsPanel::toggleLogs },
+                                    GripOnDivider{ m_leftSplit, m_metricsToggle, &MetricsPanel::toggleMetrics } })
     {
-        toggleLogs();
-        return true;
-    }
-    // Keep the logs chevron knob and the main divider handle it overlays in sync:
-    // hovering either reveals both, so they act as one control.
-    QSplitterHandle* mainHandle = m_mainSplit ? m_mainSplit->handle(1) : nullptr;
-    if (obj == mainHandle || obj == m_logsToggle)
-    {
+        QSplitterHandle* handle = d.split ? d.split->handle(1) : nullptr;
+        if (!handle || (obj != handle && obj != d.grip))
+            continue;
+        if (obj == handle && e->type() == QEvent::MouseButtonDblClick)
+        {
+            (this->*d.toggle)();
+            return true;
+        }
         if (e->type() == QEvent::Enter || e->type() == QEvent::HoverEnter)
         {
-            if (m_mainSplit) m_mainSplit->setForcedHover(true);
-            if (m_logsToggle) m_logsToggle->setHovering(true);
+            d.split->setForcedHover(true);
+            if (d.grip) d.grip->setHovering(true);
         }
         else if (e->type() == QEvent::Leave || e->type() == QEvent::HoverLeave)
         {
-            if (m_mainSplit) m_mainSplit->setForcedHover(false);
-            if (m_logsToggle) m_logsToggle->setHovering(false);
+            d.split->setForcedHover(false);
+            if (d.grip) d.grip->setHovering(false);
         }
     }
     // A minimised logs column must hold at zero width, but a restyle (the main
@@ -1613,16 +1644,17 @@ void MetricsPanel::positionMetricsToggle()
     if (h <= 0)
         return;
     const int hw = m_leftSplit->handleWidth();
-    // The grip spans the whole divider width and is a bit taller than the line so
-    // its knob box can rise above/below it; centre that band on the divider. The
-    // metrics pane is fixed-height and sits at the bottom, so the divider is
-    // directly above it — derive its position from that height (sizes() would be
-    // momentarily stale right after a toggle, as the splitter relayouts async).
+    // The grip sits centred on the divider, 24px in from its right end, as the
+    // help's does. The metrics pane is fixed-height and sits at the bottom, so
+    // the divider is directly above it — derive its position from that height
+    // (sizes() would be momentarily stale right after a toggle, as the splitter
+    // relayouts async).
     const int m = m_metricsMinimised ? 0 : qBound(0, m_metricsNeededH, qMax(0, h - hw));
     const int dividerCentre = h - m - hw / 2;
-    const int boxH = ScaleHeightForDPI(18);
-    const int top = qBound(0, dividerCentre - boxH / 2, qMax(0, h - boxH));
-    m_metricsToggle->setGeometry(0, top, m_leftSplit->width(), boxH);
+    const QSize knob = m_metricsToggle->size();
+    const int top = qBound(0, dividerCentre - knob.height() / 2, qMax(0, h - knob.height()));
+    const int left = qMax(0, m_leftSplit->width() - ScaleWidthForDPI(24) - knob.width());
+    m_metricsToggle->move(left, top);
 }
 
 void MetricsPanel::toggleMetrics()
@@ -1672,8 +1704,8 @@ void MetricsPanel::updateChevron()
     m_metricsToggle->setToolTip(m_metricsMinimised ? tr("Show metrics") : tr("Minimise metrics"));
     m_metricsToggle->setAccessibleName(m_metricsMinimised ? tr("Show metrics") : tr("Minimise metrics"));
     // The divider line shows while the metrics are visible, and disappears (just
-    // the knob remains) once collapsed.
-    m_metricsToggle->setLineVisible(!m_metricsMinimised);
+    // the grip remains) once collapsed.
+    setDividerLineVisible(m_leftSplit, !m_metricsMinimised);
 }
 
 void MetricsPanel::setDividerLineVisible(ThinSplitter* s, bool visible)
@@ -1761,9 +1793,8 @@ void MetricsPanel::updateLogsChevron()
     m_logsToggle->setDir(m_logsMinimised ? ChevronButton::Left : ChevronButton::Right);
     m_logsToggle->setToolTip(m_logsMinimised ? tr("Show logs") : tr("Minimise logs"));
     m_logsToggle->setAccessibleName(m_logsMinimised ? tr("Show logs") : tr("Minimise logs"));
-    // The divider line (chevron band + the full-height splitter handle behind it)
-    // shows while the logs are visible, and disappears once collapsed.
-    m_logsToggle->setLineVisible(!m_logsMinimised);
+    // The divider line shows while the logs are visible, and disappears (just
+    // the grip remains) once collapsed.
     setDividerLineVisible(m_mainSplit, !m_logsMinimised);
 }
 
@@ -1776,13 +1807,11 @@ void MetricsPanel::positionLogsToggle()
     if (w <= 0 || h <= 0)
         return;
     const int hw = m_mainSplit->handleWidth();
-    // The divider sits just right of the left column. Centre a short knob band on
-    // it — short enough that the rest of the divider line stays draggable.
+    // The divider sits just right of the left column: centre the grip on it,
+    // near the top (the rest of the line stays draggable).
     const int dividerCentreX = m_leftSplit->width() + hw / 2;
-    const int bandW = ScaleHeightForDPI(18);
-    const int bandH = ScaleHeightForDPI(64);
-    const int left = qBound(0, dividerCentreX - bandW / 2, qMax(0, w - bandW));
-    // Near the top of the divider (top-right of the pane) rather than centred.
-    const int top = qBound(0, ScaleHeightForDPI(10), qMax(0, h - bandH));
-    m_logsToggle->setGeometry(left, top, bandW, bandH);
+    const QSize knob = m_logsToggle->size();
+    const int left = qBound(0, dividerCentreX - knob.width() / 2, qMax(0, w - knob.width()));
+    const int top = qBound(0, ScaleHeightForDPI(24), qMax(0, h - knob.height()));
+    m_logsToggle->move(left, top);
 }

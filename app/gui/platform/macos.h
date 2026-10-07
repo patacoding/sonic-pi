@@ -13,6 +13,7 @@
 
 #pragma once
 
+#include <functional>
 #include <string>
 // shm_audio_buffer pointer is part of the screen-recording extern below,
 // so the recorder can pull master-mix frames into the .mov's audio track.
@@ -21,6 +22,13 @@
 namespace SonicPi {
 
 void removeMacosSpecificMenuItems();
+
+// Logs any Objective-C exception that escapes a block (name, reason,
+// backtrace) to gui.log before the abort, so a crash is explained in the log
+// and not only in a crash report. Every block handed to a system API is
+// guarded (objc_guard.h); this is the net under the guard. Installed at
+// startup.
+void installUncaughtExceptionLog();
 
 // Teach Qt's accessibility elements the AXChildrenInNavigationOrder
 // attribute (tree order), so VoiceOver walks content in the designed
@@ -100,15 +108,20 @@ void setSyphonShowCursor(bool showCursor);
 // the writer can't be created. Same Screen Recording TCC permission as
 // Syphon — first call may prompt.
 //
-// audioSlot points at the engine's OUT tap (SHM_AUDIO_OUT_SLOT): the
+// audio reads the engine's OUT tap (SHM_AUDIO_OUT_SLOT): the
 // master mix, written by the engine from boot, read here for the .mov's
-// audio track from its live position. Pass nullptr for video-only.
+// audio track from its live position. An invalid reader records video only.
+// The reader keeps its mapping alive, so a recording survives a cold swap.
 //
 // API is intentionally platform-neutral (void* window handle, std::string
 // path) — Windows / Linux implementations would land in sibling files.
+// onFailed hears, on the GUI thread, of a recording that could not start
+// or died after startSessionRecording returned true (the capture is set up
+// asynchronously), with the reason in plain words.
 bool startSessionRecording(void* nsViewPtr, const std::string& filePath,
                            bool showCursor,
-                           shm_audio_buffer* audioSlot);
+                           shm_audio_buffer_reader audio,
+                           std::function<void(const std::string&)> onFailed);
 
 // Stop and finalise the recording. Asynchronous — the file isn't valid
 // until AVAssetWriter's finishWriting completion fires. Safe to call

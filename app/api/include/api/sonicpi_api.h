@@ -508,6 +508,9 @@ struct IAPIClient
     // AudioSwitchOutcome. Default no-op so non-GUI consumers don't
     // need to react.
     virtual void AudioSwitchDone(const AudioSwitchOutcome& /*outcome*/) {}
+    // The engine's state and why it changed (/clockwork/statechange: "boot",
+    // "rate-change", "snapshot", "swap-failed-rollback"). Default no-op.
+    virtual void AudioStateChanged(const std::string& /*state*/, const std::string& /*reason*/) {}
     // Immediate accept/reject for /clockwork/devices/reopen (the engine
     // debounces: in-flight or <3s cooldown → rejected). Default no-op.
     virtual void AudioDeviceReopenReply(bool /*accepted*/, const std::string& /*reason*/) {}
@@ -670,10 +673,11 @@ public:
 
     std::vector<LogSource> GetLogSources();
 
-    // Direct pointer to one of the engine's audio taps (SHM_AUDIO_OUT_SLOT
-    // is the master mix, flowing from boot). Used by the session recorder.
-    // Returns nullptr if the audio processor hasn't been initialised.
-    virtual shm_audio_buffer* AudioProcessor_GetAudioBufferSlot(unsigned int slot);
+    // Reader onto one of the engine's audio taps (SHM_AUDIO_OUT_SLOT is the
+    // master mix, flowing from boot). Used by the session recorder. Keeps
+    // the mapping it reads alive across a cold swap; invalid if the audio
+    // processor hasn't attached.
+    virtual shm_audio_buffer_reader AudioProcessor_GetAudioBufferReader(unsigned int slot);
 
     // Reader onto scope stream slot `scope_num`. Slot 0 is the master scope
     // (full mix); higher slots are independent fx_scope_out taps (inline
@@ -718,6 +722,12 @@ public:
     virtual bool SendDaemonOSC(oscpkt::Message m);
     virtual bool SupersonicSendOSC(oscpkt::Message m);
     virtual void RequestAudioDevices();
+    // The Link Audio streams panel's two questions: the channels peers
+    // announce, and the inputs subscribed. Asked through the daemon, whose
+    // connection to the engine gets the answers (ours discards what comes
+    // back) and relays them here. False when the daemon is not there to ask.
+    virtual bool RequestLinkAudioChannels();
+    virtual bool RequestLinkAudioInputs();
     virtual int GetToken() const;
 
     virtual void LoadWorkspaces();

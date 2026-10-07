@@ -209,6 +209,31 @@ TEST_CASE("persist: following the system default is kept as the sentinel",
     CHECK(d.outputValue == SonicPi::kAudioSystemOutput);
 }
 
+// The dropdown's default-follow row goes out under its own name — "System
+// Default" for the engine's synthetic row, the PipeWire device's name on Linux
+// — and the engine resolves it. What is saved is the following, not the name:
+// with Sonic Pi 5.0.0 an "OS Default" pick was saved as the device it happened
+// to open, and every launch after it booted pinned to that device.
+TEST_CASE("persist: a pick of the default-follow row is kept as the sentinel, "
+          "whatever the row is called", "[audio][persist]")
+{
+    for (const char* row : { "System Default", "PipeWire Default" }) {
+        AudioSwitchRequest request;
+        request.output = row;
+        request.outputFollowsDefault = true;
+
+        AudioSwitchOutcome outcome;
+        outcome.success = true;
+        outcome.requestedOutput = row;
+        outcome.actualOutput = "MacBook Pro Speakers";
+
+        const auto d = audioPrefsDecision(request, outcome);
+        INFO(row);
+        REQUIRE(d.output == PrefAction::Save);
+        CHECK(d.outputValue == SonicPi::kAudioSystemOutput);
+    }
+}
+
 TEST_CASE("persist: an unavailable input is cleared, not remembered",
           "[audio][persist]")
 {
@@ -425,4 +450,65 @@ TEST_CASE("input pick: an unknown driver on either side is left to the engine",
     noInputDriver.input        = "In 1-2 (2- MOTU Pro Audio)";
     noInputDriver.engineDriver = "DirectSound";
     REQUIRE(audioInputPickPlan(noInputDriver).send);
+}
+
+// ── 4. Telling the user ────────────────────────────────────────────────────
+//
+// On 2026-10-06 the MOTU was absent at boot: the restore asked for it, the
+// engine refused, the pref was cleared to "follow system" (rightly, so a dead
+// device is not replayed every boot) — and nothing on screen said so. The next
+// boot followed the system default to a streamer in another room, again
+// silently. The decision now says what the user must hear.
+
+TEST_CASE("notice: a failed request names the output that isn't available", "[audio][notice]")
+{
+    SonicPi::AudioSwitchRequest request;
+    request.output = "motu-xaero";
+    SonicPi::AudioSwitchOutcome outcome;
+    outcome.success = false;
+    outcome.error = "No such device: motu-xaero";
+    const auto d = SonicPi::audioPrefsDecision(request, outcome);
+    CHECK(d.notice == SonicPi::AudioNotice::OutputUnavailable);
+    CHECK(d.noticeDevice == "motu-xaero");
+}
+
+TEST_CASE("notice: following the system default names the device it resolved to", "[audio][notice]")
+{
+    SonicPi::AudioSwitchRequest request;
+    request.output = SonicPi::kAudioSystemOutput;
+    SonicPi::AudioSwitchOutcome outcome;
+    outcome.success = true;
+    outcome.actualOutput = "DMP-A6(Kitchen)";
+    const auto d = SonicPi::audioPrefsDecision(request, outcome);
+    CHECK(d.notice == SonicPi::AudioNotice::FollowingSystemDefault);
+    CHECK(d.noticeDevice == "DMP-A6(Kitchen)");
+
+    SonicPi::AudioSwitchRequest byRow;
+    byRow.output = "Some Default Row";
+    byRow.outputFollowsDefault = true;
+    const auto r = SonicPi::audioPrefsDecision(byRow, outcome);
+    CHECK(r.notice == SonicPi::AudioNotice::FollowingSystemDefault);
+}
+
+TEST_CASE("notice: a device the user named and got raises none, nor does an engine-initiated swap", "[audio][notice]")
+{
+    SonicPi::AudioSwitchRequest request;
+    request.output = "motu-xaero";
+    SonicPi::AudioSwitchOutcome outcome;
+    outcome.success = true;
+    outcome.actualOutput = "motu-xaero";
+    CHECK(SonicPi::audioPrefsDecision(request, outcome).notice == SonicPi::AudioNotice::None);
+    SonicPi::AudioSwitchRequest engineInitiated;   // nothing asked: the engine's own reopen
+    CHECK(SonicPi::audioPrefsDecision(engineInitiated, outcome).notice == SonicPi::AudioNotice::None);
+}
+
+TEST_CASE("notice: the engine falling back on its own, mid-session, is a lost device", "[audio][notice]")
+{
+    // The engine's own swap rolled back (a device unplugged, a reopen refused):
+    // the next device-list push names where the sound went, and the user hears it.
+    CHECK(SonicPi::audioStateLostDevice("running", "swap-failed-rollback"));
+    CHECK_FALSE(SonicPi::audioStateLostDevice("running", "rate-change"));   // a swap the user asked for
+    CHECK_FALSE(SonicPi::audioStateLostDevice("running", "boot"));
+    CHECK_FALSE(SonicPi::audioStateLostDevice("running", "snapshot"));
+    CHECK_FALSE(SonicPi::audioStateLostDevice("restarting", "swap-failed-rollback"));   // not until it is running again
 }

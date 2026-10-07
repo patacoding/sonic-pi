@@ -90,13 +90,14 @@ public:
     ~SonicPiSessionRecorder() { Stop(); }
 
     bool Start(HWND hwnd, const std::wstring& filePath, bool showCursor,
-               shm_audio_buffer* audioSlot)
+               shm_audio_buffer_reader audio)
     {
         m_filePath        = filePath;
         m_fragmentedPath  = filePath + L".frag";
         m_showCursor      = showCursor;
-        m_audioReader     = shm_audio_buffer_reader(audioSlot);
-        m_audioChannels   = audioSlot ? audioSlot->channels : 0;
+        m_audioReader     = std::move(audio);
+        // The stereo mix, however wide the device (recorder_audio_mix.h).
+        m_audioChannels   = SonicPi::recordedChannels(m_audioReader.channels());
 
         // MFStartup is refcounted; balanced by MFShutdown in Stop().
         HRESULT hr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
@@ -139,6 +140,7 @@ public:
         m_running.store(true);
 
         if (m_hasAudioStream) {
+            m_audioTapBuf.assign(kAudioPullFrames * m_audioReader.channels(), 0.0f);
             m_audioPullBuf.assign(kAudioPullFrames * m_audioChannels, 0.0f);
             // Discard any pre-roll written between /s_new and now.
             m_audioReader.seek_to_live();
@@ -670,12 +672,15 @@ private:
         for (int iter = 0; iter < 8; ++iter) {
             uint64_t gap = 0;
             uint32_t got = m_audioReader.pull(
-                m_audioPullBuf.data(), kAudioPullFrames, &gap);
+                m_audioTapBuf.data(), kAudioPullFrames, &gap);
             if (gap > 0) {
                 RECORDER_LOG("audio reader gap: " << gap
                              << " frames dropped");
             }
             if (got == 0) break;
+            // The tap is as wide as the device; the recording is its stereo mix.
+            SonicPi::pickRecordedChannels(m_audioTapBuf.data(), got, m_audioReader.channels(),
+                                          m_audioPullBuf.data());
 
             const uint64_t readerPos = m_audioReader.last_read_position();
             if (m_audioAnchor100ns == LLONG_MIN) {
@@ -803,7 +808,8 @@ private:
     uint64_t                               m_audioAnchorFrame{ 0 };
     // Allocated once in Start so DrainAudio's 5ms tick doesn't churn.
     static constexpr uint32_t              kAudioPullFrames = 1024;
-    std::vector<float>                     m_audioPullBuf;
+    std::vector<float>                     m_audioTapBuf;    // the tap's frames, every device channel
+    std::vector<float>                     m_audioPullBuf;   // the recorded channels of them
 
     // Lifecycle / synchronisation
     std::atomic<bool>                      m_running{ false };
@@ -839,8 +845,10 @@ std::wstring Utf8ToWide(const std::string& s)
 namespace SonicPi {
 
 bool startSessionRecording(void* hwndPtr, const std::string& filePath,
-                           bool showCursor, shm_audio_buffer* audioSlot)
+                           bool showCursor, shm_audio_buffer_reader audio,
+                           std::function<void(const std::string&)> onFailed)
 {
+    (void)onFailed;   // every failure here is synchronous: a false return
     if (!hwndPtr) {
         RECORDER_LOG("null HWND");
         return false;
@@ -860,7 +868,7 @@ bool startSessionRecording(void* hwndPtr, const std::string& filePath,
         g_recorder.reset();
     }
     auto rec = std::make_unique<SonicPiSessionRecorder>();
-    if (!rec->Start(hwnd, Utf8ToWide(filePath), showCursor, audioSlot)) {
+    if (!rec->Start(hwnd, Utf8ToWide(filePath), showCursor, std::move(audio))) {
         return false;
     }
     g_recorder = std::move(rec);
