@@ -16,9 +16,31 @@
 // (pulled from supersonic's shm_audio_buffer) into a fragmented .mp4
 // (H.264 + AAC) via Media Foundation's IMFSinkWriter.
 
+// windows.h's min/max macros collide with std::min in recorder_audio_mix.h - same reason and same fix as
+// app/gui/widgets/settingswidget.cpp:36 and app/gui/graphics/rendering/GraphicsPacer.cpp:22.
+#ifndef NOMINMAX
+#  define NOMINMAX
+#endif
+
 #include "windows.h"
 #include "wgc_d3d_interop.h"
 #include "mp4_soft_remux.h"
+// The stereo-mix helpers this file calls: recordedChannels() and pickRecordedChannels().
+//
+// NOT AN OPTIONAL INCLUDE. Upstream's recorder rework - the commits that took the session recorder from
+// "8-channel devices take the app down" to a fixed stereo mix - split that mix into recorder_audio_mix.h and
+// called it from BOTH platform recorders, but added the header only to the macOS SOURCES list and never
+// added the include here. The Windows build therefore fails on upstream's own code:
+//
+//     recorder_win.cpp(100): error C2039: 'recordedChannels': is not a member of 'SonicPi'
+//     recorder_win.cpp(682): error C2039: 'pickRecordedChannels': is not a member of 'SonicPi'
+//
+// Checked against upstream/dev itself (git show upstream/dev:app/gui/platform/recorder_win.cpp has the two
+// calls and no include), so this is an upstream gap rather than a merge accident. That header was also only
+// ever compiled by the macOS build, which is why nothing noticed its std::min: on Windows it arrives after
+// windows.h unless NOMINMAX is set. Recorded in docs/native-upstream-divergence.md 3.7; if upstream adds the
+// include, take theirs and drop this line.
+#include "recorder_audio_mix.h"
 
 #include <d3d11_4.h>
 #include <windows.graphics.capture.interop.h>
@@ -90,13 +112,14 @@ public:
     ~SonicPiSessionRecorder() { Stop(); }
 
     bool Start(HWND hwnd, const std::wstring& filePath, bool showCursor,
-               shm_audio_buffer* audioSlot)
+               shm_audio_buffer_reader audio)
     {
         m_filePath        = filePath;
         m_fragmentedPath  = filePath + L".frag";
         m_showCursor      = showCursor;
-        m_audioReader     = shm_audio_buffer_reader(audioSlot);
-        m_audioChannels   = audioSlot ? audioSlot->channels : 0;
+        m_audioReader     = std::move(audio);
+        // The stereo mix, however wide the device (recorder_audio_mix.h).
+        m_audioChannels   = SonicPi::recordedChannels(m_audioReader.channels());
 
         // MFStartup is refcounted; balanced by MFShutdown in Stop().
         HRESULT hr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
@@ -139,6 +162,7 @@ public:
         m_running.store(true);
 
         if (m_hasAudioStream) {
+            m_audioTapBuf.assign(kAudioPullFrames * m_audioReader.channels(), 0.0f);
             m_audioPullBuf.assign(kAudioPullFrames * m_audioChannels, 0.0f);
             // Discard any pre-roll written between /s_new and now.
             m_audioReader.seek_to_live();
@@ -670,12 +694,15 @@ private:
         for (int iter = 0; iter < 8; ++iter) {
             uint64_t gap = 0;
             uint32_t got = m_audioReader.pull(
-                m_audioPullBuf.data(), kAudioPullFrames, &gap);
+                m_audioTapBuf.data(), kAudioPullFrames, &gap);
             if (gap > 0) {
                 RECORDER_LOG("audio reader gap: " << gap
                              << " frames dropped");
             }
             if (got == 0) break;
+            // The tap is as wide as the device; the recording is its stereo mix.
+            SonicPi::pickRecordedChannels(m_audioTapBuf.data(), got, m_audioReader.channels(),
+                                          m_audioPullBuf.data());
 
             const uint64_t readerPos = m_audioReader.last_read_position();
             if (m_audioAnchor100ns == LLONG_MIN) {
@@ -803,7 +830,8 @@ private:
     uint64_t                               m_audioAnchorFrame{ 0 };
     // Allocated once in Start so DrainAudio's 5ms tick doesn't churn.
     static constexpr uint32_t              kAudioPullFrames = 1024;
-    std::vector<float>                     m_audioPullBuf;
+    std::vector<float>                     m_audioTapBuf;    // the tap's frames, every device channel
+    std::vector<float>                     m_audioPullBuf;   // the recorded channels of them
 
     // Lifecycle / synchronisation
     std::atomic<bool>                      m_running{ false };
@@ -839,8 +867,10 @@ std::wstring Utf8ToWide(const std::string& s)
 namespace SonicPi {
 
 bool startSessionRecording(void* hwndPtr, const std::string& filePath,
-                           bool showCursor, shm_audio_buffer* audioSlot)
+                           bool showCursor, shm_audio_buffer_reader audio,
+                           std::function<void(const std::string&)> onFailed)
 {
+    (void)onFailed;   // every failure here is synchronous: a false return
     if (!hwndPtr) {
         RECORDER_LOG("null HWND");
         return false;
@@ -860,7 +890,7 @@ bool startSessionRecording(void* hwndPtr, const std::string& filePath,
         g_recorder.reset();
     }
     auto rec = std::make_unique<SonicPiSessionRecorder>();
-    if (!rec->Start(hwnd, Utf8ToWide(filePath), showCursor, audioSlot)) {
+    if (!rec->Start(hwnd, Utf8ToWide(filePath), showCursor, std::move(audio))) {
         return false;
     }
     g_recorder = std::move(rec);

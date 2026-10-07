@@ -145,6 +145,7 @@ set(EDITOR_SOURCES
     ${QTAPP_ROOT}/widgets/completionpopup.cpp
     ${QTAPP_ROOT}/widgets/completionpopup.h
     ${QTAPP_ROOT}/widgets/findpopup.cpp
+    ${QTAPP_ROOT}/widgets/chevronbutton.cpp
     ${QTAPP_ROOT}/widgets/findpopup.h
     ${QTAPP_ROOT}/widgets/editortoolbar.cpp
     ${QTAPP_ROOT}/widgets/editortoolbar.h
@@ -170,6 +171,9 @@ set(QT_SOURCES
     ${QTAPP_ROOT}/widgets/devicelistwidget.cpp
     ${QTAPP_ROOT}/widgets/devicelistwidget.h
     ${QTAPP_ROOT}/widgets/chevronbutton.h
+    ${QTAPP_ROOT}/model/helppanelmodel.h
+    ${QTAPP_ROOT}/model/sidecolumnmodel.h
+    ${QTAPP_ROOT}/widgets/awaydock.h
     ${QTAPP_ROOT}/widgets/logpanel.cpp
     ${QTAPP_ROOT}/widgets/logpanel.h
     ${QTAPP_ROOT}/widgets/metricspanel.cpp
@@ -319,7 +323,17 @@ elseif(APPLE)
   SET (SOURCES ${SOURCES} ${QTAPP_ROOT}/platform/capture_target.mm)
   SET (SOURCES ${SOURCES} ${QTAPP_ROOT}/platform/syphon_publisher.mm)
   SET (SOURCES ${SOURCES} ${QTAPP_ROOT}/platform/recorder.mm)
+  SET (SOURCES ${SOURCES} ${QTAPP_ROOT}/platform/objc_guard.mm)
+  SET (SOURCES ${SOURCES} ${QTAPP_ROOT}/platform/objc_guard.h)
+  SET (SOURCES ${SOURCES} ${QTAPP_ROOT}/platform/recorder_limits.h)
+  SET (SOURCES ${SOURCES} ${QTAPP_ROOT}/platform/recorder_audio_mix.h)
+  SET (SOURCES ${SOURCES} ${QTAPP_ROOT}/platform/recorder_settings.h)
 
+  SET (SOURCES ${SOURCES} ${QTAPP_ROOT}/platform/objc_guard.mm)
+  SET (SOURCES ${SOURCES} ${QTAPP_ROOT}/platform/objc_guard.h)
+  SET (SOURCES ${SOURCES} ${QTAPP_ROOT}/platform/recorder_limits.h)
+  SET (SOURCES ${SOURCES} ${QTAPP_ROOT}/platform/recorder_audio_mix.h)
+  SET (SOURCES ${SOURCES} ${QTAPP_ROOT}/platform/recorder_settings.h)
   # Syphon-Framework — vendored, server-side Metal subset only (no GL,
   # no client). Compiled into the app binary as ARC Objective-C.
   set(SYPHON_DIR ${APP_ROOT}/external/Syphon-Framework)
@@ -349,7 +363,11 @@ elseif(APPLE)
     PROPERTIES COMPILE_FLAGS "-fobjc-arc")
   set_source_files_properties(${QTAPP_ROOT}/platform/recorder.mm
     PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+  set_source_files_properties(${QTAPP_ROOT}/platform/objc_guard.mm
+    PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 endif()
+  set_source_files_properties(${QTAPP_ROOT}/platform/objc_guard.mm
+    PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 
 set(ALL_SOURCES ${QT_SOURCES} ${SOURCES} ${EDITOR_SOURCES} ${OLD_API_SOURCES} ${NEW_API_SOURCES} ${GRAPHICS_SOURCES})
 
