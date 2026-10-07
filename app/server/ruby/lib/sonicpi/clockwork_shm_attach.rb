@@ -175,7 +175,7 @@ module SonicPi
     # Untested here: this machine is not Windows. Kept to the shape of
     # shm_attach::receive's Windows branch, one call per line.
     module Win32
-      GENERIC_READ  = 0x80000000
+      GENERIC_READ  = 0x80000000   # a DWORD past a signed int: passed as TYPE_UINT, or Fiddle raises on Windows
       OPEN_EXISTING = 3
       FILE_MAP_READ = 4
       ERROR_PIPE_BUSY = 231
@@ -191,10 +191,7 @@ module SonicPi
       def self.receive(endpoint)
         name = endpoint.start_with?("\\\\.\\pipe\\") ? endpoint : "\\\\.\\pipe\\#{endpoint}"
         wide = (name + "\0").encode("UTF-16LE")
-        # dwDesiredAccess is a DWORD, and must be declared wider than
-        # Fiddle::TYPE_INT: on 64-bit Windows that marshals as a signed 32 bit
-        # C long, which cannot hold GENERIC_READ (0x80000000).
-        create = fn("CreateFileW", [Fiddle::TYPE_VOIDP, Fiddle::TYPE_LONG_LONG, Fiddle::TYPE_INT, Fiddle::TYPE_VOIDP,
+        create = fn("CreateFileW", [Fiddle::TYPE_VOIDP, Fiddle::TYPE_UINT, Fiddle::TYPE_INT, Fiddle::TYPE_VOIDP,
                                     Fiddle::TYPE_INT, Fiddle::TYPE_INT, Fiddle::TYPE_VOIDP], Fiddle::TYPE_VOIDP)
         wait   = fn("WaitNamedPipeW", [Fiddle::TYPE_VOIDP, Fiddle::TYPE_INT], Fiddle::TYPE_INT)
         last   = fn("GetLastError", [], Fiddle::TYPE_INT)
