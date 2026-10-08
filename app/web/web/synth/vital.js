@@ -71,6 +71,14 @@ export function vitalToPreset(vital, fallbackName = 'Imported Vital') {
     if (target && typeof s[source] === 'number') put(target, s[source]);
   }
 
+  // macros: both engines have four, one parameter each, so they map straight across
+  for (let m = 1; m <= 4; m++) {
+    const v = s[`macro${m}`];
+    if (typeof v === 'number') put(`macro${m}.value`, v);
+    const name = vital?.[`macro${m}`];
+    if (typeof name === 'string' && name) report.macros = [...(report.macros ?? []), `${m}=${name}`];
+  }
+
   // oscillator basics that exist in both
   for (let o = 1; o <= 3; o++) {
     if (typeof s[`osc_${o}_level`] === 'number') put(`osc${o}.level`, s[`osc_${o}_level`]);
