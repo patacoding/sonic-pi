@@ -45,7 +45,7 @@ function handleMidi(...a) {
   } else if (/program_change|program/i.test(path)) {
     const [, program] = nums; const patch = patchByProgram(program);
     entry.mapped = { program, patch: patch?.name ?? null };
-    if (patch) applyPatch(part, program);
+    if (patch) { parts.silence(part); applyPatch(part, program); }   // a new instrument must not inherit the old one's sound
   } else if (/control|cc/i.test(path)) {
     const [, cc, value] = nums;
     const id = CC_MAP[cc];
@@ -64,7 +64,7 @@ let readerStarted = false;
 
 function panic(reason = "stop") {
   const names = parts.list();
-  for (const n of names) parts.allNotesOff(n);
+  for (const n of names) parts.silence(n);        // release the voices AND drop the gain briefly: no stuck sound survives
   readerStarted = false;    // the app's Stop kills the reader too (it is one of its synths): do not claim otherwise
   if (names.length) say(`${reason} — all notes off on ${names.join(", ")}; start a reader again to be heard`);
   return names.length;
@@ -186,6 +186,6 @@ globalThis.sonicPiSynth = api;
 globalThis.sonicPiParts = {
   list: parts.list, has: parts.has, engineOf: parts.engineOf, ensure: parts.ensurePart, state: parts.state,
   noteOn: parts.noteOn, noteOff: parts.noteOff, setParam: parts.setParam, allNotesOff: parts.allNotesOff,
-  free: parts.free, outState: parts.outState, cap: parts.capOf, attachToEngine: parts.attachToEngine, detach: parts.detach,
+  free: parts.free, silence: parts.silence, outState: parts.outState, cap: parts.capOf, attachToEngine: parts.attachToEngine, detach: parts.detach,
 };
 export { api as synthHost };

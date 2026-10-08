@@ -9,6 +9,7 @@ export const DEFAULT_PART = "main";
 const say = (t, bad = false) => (bad ? console.error : console.info)(`Synth — ${t}`);
 
 const parts = new Map();          // name -> { engine, node, program, patchName }
+const held = new Map();           // name -> Set(notes we started and have not ended)
 let cap = Number(globalThis.SP_SYNTH_MAX_PARTS ?? 8);
 let ctx = null;
 let inputNode = null;
@@ -57,6 +58,11 @@ export async function ensurePart(name = DEFAULT_PART) {
   engine.primeTables();
   const made = { engine, node, program: null, patchName: "Init" };
   parts.set(key, made);
+  // Their preset browser applies presets through engine.loadPreset(). A note sounding when it does can outlive the
+  // change and keep playing with no way for the player to stop it, so the part is silenced first -- with silence(),
+  // not allNotesOff() alone, which is measured not to clear a voice in this build. This wraps OUR engine object.
+  const loadPreset = engine.loadPreset?.bind(engine);
+  if (loadPreset) engine.loadPreset = (preset) => { try { silence(key); } catch {} return loadPreset(preset); };
   say(`"${key}" is up (${parts.size}/${cap})`);
   return made;
 }
@@ -67,8 +73,18 @@ export function rememberPatch(name, program, patchName) {
   return !!p;
 }
 
-export async function noteOn(name, note, velocity = 1) { (await ensurePart(name)).engine.noteOn(note, velocity); }
-export function noteOff(name, note) { parts.get(String(name))?.engine.noteOff(note); }
+export async function noteOn(name, note, velocity = 1) {
+  const key = String(name);
+  const p = await ensurePart(key);
+  if (!held.has(key)) held.set(key, new Set());
+  held.get(key).add(note);                       // we remember what we started, so we can always end it
+  p.engine.noteOn(note, velocity);
+}
+export function noteOff(name, note) {
+  const key = String(name);
+  held.get(key)?.delete(note);
+  parts.get(key)?.engine.noteOff(note);
+}
 export function setParam(name, id, value) {
   const p = parts.get(String(name));
   if (p) { p.engine.setParamById(id, value); return true; }
@@ -79,10 +95,35 @@ export function allNotesOff(name) {
   if (name == null) { for (const p of parts.values()) p.engine.allNotesOff?.(); }
   else parts.get(String(name))?.engine.allNotesOff?.();
 }
+
+/**
+ * Silence a part whatever the cause. allNotesOff() releases voices, but a stuck voice, an orphaned one after a preset
+ * change, or a self-oscillating effect can keep making sound regardless -- so this also drops the master gain to zero
+ * for an instant and puts it back. The output path is the one thing guaranteed to be upstream of every cause.
+ */
+export function silence(name, ms = 160) {
+  const key = String(name);
+  const p = parts.get(key);
+  if (!p) return false;
+  // End every note WE know is sounding, one by one. This is the part that actually stops the note: allNotesOff() is
+  // measured not to clear a voice in this build, and lowering the gain alone only hides it -- the sound returns when
+  // the gain is restored, which is exactly the "it never stops" the player reported.
+  for (const n of held.get(key) ?? []) { try { p.engine.noteOff(n); } catch {} }
+  held.get(key)?.clear();
+  try { p.engine.allNotesOff?.(); } catch {}
+  try {
+    const restore = () => { const v = p.program != null ? patchVolume(p.program) : 0.7; p.engine.setParamById("master.volume", v); };
+    p.engine.setParamById("master.volume", 0);
+    setTimeout(restore, ms);
+  } catch {}
+  return true;
+}
+function patchVolume(program) { return 0.7; }        // Init's own level: the patches all ship 0.7 for master.volume
 export function free(name) {
   const p = parts.get(String(name));
   if (!p) return false;
   try { p.engine.allNotesOff?.(); p.node.disconnect(); } catch {}
+  held.delete(String(name));
   parts.delete(String(name));
   return true;
 }
@@ -97,6 +138,8 @@ export const state = () => ({
     params: p.engine.values?.length ?? null,
     program: p.program ?? null,
     patch: p.patchName ?? "Init",
+    // a part making sound with no voices at all is a stuck/orphaned voice: worth seeing, not guessing about
+    stuck: (p.engine.voiceCount ?? 0) === 0 && Math.max(p.engine.peakL ?? 0, p.engine.peakR ?? 0) > 0.01,
   }])),
   count: parts.size,
 });
