@@ -31,6 +31,10 @@ const STYLE = `
     gap: 8px; padding: 16px; text-align: center; }
   #synth-sgr-host { flex: 1 1 auto; min-height: 0; position: relative; overflow: hidden; display: none; }
   #synth-frame { position: absolute; left: 0; top: 0; width: 1280px; height: 1200px; border: 0; transform-origin: top left; }
+  /* collapsed by default: these are notes and a diagnostic, and collapsed they give the editor their room */
+  #synth-help { flex: 0 0 auto; border: 1px solid var(--WindowBorder); border-radius: 8px; padding: 4px 6px; }
+  #synth-help > summary { cursor: pointer; font: 11px/1.6 system-ui, sans-serif; opacity: .75; }
+  #synth-help:not([open]) > *:not(summary) { display: none; }
   #synth-guide { white-space: pre-wrap; font: 11px/1.4 ui-monospace, monospace; opacity: .85; max-height: 7em; overflow: auto; }
   #synth-midi { font: 11px/1.4 ui-monospace, monospace; opacity: .7; max-height: 4em; overflow: auto; }
 `;
@@ -58,8 +62,10 @@ export function createSynthWindow(api) {
           <button id="synth-enable-2" data-role="enable">Enable Soundgineer</button></div>
         <div id="synth-sgr-host"><iframe id="synth-frame" title="Soundgineer editor"></iframe></div>
       </div></div>
-    <h4>how the music addresses it</h4><div id="synth-guide"></div>
-    <h4>recent MIDI</h4><div id="synth-midi"></div>`;
+    <details id="synth-help"><summary>how the music addresses it · recent MIDI</summary>
+      <h4>how the music addresses it</h4><div id="synth-guide"></div>
+      <h4>recent MIDI</h4><div id="synth-midi"></div>
+    </details>`;
   document.body.appendChild(win);
 
   const status = (t, bad = false) => { const el = win.querySelector("#synth-status"); el.textContent = t ?? ""; el.style.color = bad ? "#f66" : ""; };
