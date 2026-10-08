@@ -2,7 +2,7 @@
 // editor. Nothing of Sonic Pi's UI is touched: this element covers the page, it never rearranges it, and no state of
 // ours is persisted.
 import { createEditorPool } from "./editors.js";
-console.info("Synth build: window.js b1009e");
+console.info("Synth build: window.js b100a0");
 
 const STYLE = `
   #synth-btn { position: fixed; right: 0; top: calc(50% + 6.3em); z-index: 101; writing-mode: vertical-rl; height: 5.4em;
@@ -18,6 +18,8 @@ const STYLE = `
   #synth-window h4 { margin: 0; font: 600 12px/1 system-ui, sans-serif; opacity: .8; }
   #synth-bar { display: flex; align-items: center; gap: 8px; cursor: move; user-select: none; }
   /* the build stamp must never be squeezed out by the buttons: no wrapping, no shrinking, and it sits before the spacer */
+  /* what the last import did: visible, and never overwritten by the paint loop */
+  #synth-last-import { flex: 0 0 auto; white-space: nowrap; font: 11px/1.6 ui-monospace, monospace; opacity: .85; max-width: 42ch; overflow: hidden; text-overflow: ellipsis; }
   #synth-build-stamp { flex: 0 0 auto; white-space: nowrap; font: 11px/1.6 ui-monospace, monospace; opacity: .75; }
   #synth-bar button { cursor: pointer; }
   #synth-bar .spacer { flex: 1 1 auto; }
@@ -132,10 +134,21 @@ export function createSynthWindow(api) {
       // localStorage, so a preset that only lives in the engine is invisible and is lost on reload.
       try {
         const KEY = "soundgineer.presets.v1";
-        const list = JSON.parse(localStorage.getItem(KEY) ?? "[]");
-        const kept = Array.isArray(list) ? list.filter((x) => x && x.name !== preset.name) : [];
+        // A library that cannot be parsed, or that holds entries with no name, makes THEIR reader return an empty list
+        // -- which means the User group never appears and no amount of writing helps. So repair it while saving.
+        let list = [];
+        let repaired = false;
+        try {
+          const raw = localStorage.getItem(KEY);
+          const parsed = raw ? JSON.parse(raw) : [];
+          if (Array.isArray(parsed)) list = parsed.filter((x) => x && typeof x.name === "string");
+          else repaired = true;
+          if (Array.isArray(parsed) && list.length !== parsed.length) repaired = true;
+        } catch { repaired = true; }
+        const kept = list.filter((x) => x.name !== preset.name);
         kept.push(preset);
         localStorage.setItem(KEY, JSON.stringify(kept));
+        if (repaired) console.warn("Synth — your preset library had entries that could not be used; it was rewritten with the valid ones (" + kept.length + ")");
         console.info(`Synth — saved "${preset.name}" to your preset library (${kept.length} user presets); it is in the preset dropdown of the "${selected}" editor`);
         // read it back the way the editor's browser does, so a library their reader cannot parse is visible immediately
         try {
@@ -179,6 +192,10 @@ export function createSynthWindow(api) {
         }
       }
       console.info(`Synth — ${file.name} applied: ${judged.mapped} parameter(s)${judged.unknown ? ", " + judged.unknown + " dropped" : ""}`);
+      try {
+        const el = win.querySelector("#synth-last-import");
+        if (el) el.textContent = `imported "${preset.name}" → ${selected} · library ${JSON.parse(localStorage.getItem("soundgineer.presets.v1") ?? "[]").length} · view rebuilt`;
+      } catch { /* cosmetic */ }
     } catch (e) {
       console.error("Synth — the import stopped unexpectedly: " + (e?.message ?? e));
     } finally {
@@ -199,10 +216,13 @@ export function createSynthWindow(api) {
     const bar = win.querySelector("#synth-bar") ?? win.firstElementChild;
     const stamp = document.createElement("span");
     stamp.id = "synth-build-stamp";
-    stamp.textContent = " build b1009e";
+    stamp.textContent = " build b100a0";
     stamp.style.cssText = "font:10px/1 ui-monospace,monospace;opacity:.6;margin-left:6px";
     const spacer = bar?.querySelector(".spacer");
-    if (bar) { if (spacer) bar.insertBefore(stamp, spacer); else bar.appendChild(stamp); }
+    const last = document.createElement("span");
+    last.id = "synth-last-import";
+    last.title = "what the last Vital import did";
+    if (bar) { if (spacer) { bar.insertBefore(last, spacer); bar.insertBefore(stamp, spacer); } else { bar.appendChild(last); bar.appendChild(stamp); } }
   } catch { /* cosmetic */ }
   // one document per channel, built once; switching only shows another one (see editors.js). No LRU: with a handful of
   // channels, destroying and rebuilding views is the churn we are trying to eliminate.

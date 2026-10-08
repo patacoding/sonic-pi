@@ -6,7 +6,7 @@
 // so an engine can always be re-derived from the data and can never drift.
 import { SynthEngine } from "./vendor/soundgineer.js";
 import { PARAMS } from "./vendor/soundgineer-params.js";   // index -> param id, for the writes their knobs make
-console.info("Synth build: store.js b1009e");
+console.info("Synth build: store.js b100a0");
 
 const say = (t, bad = false) => (bad ? console.error : console.info)(`Synth — ${t}`);
 const PARTS_KEY = "sonicpi.synth.preset.v1";     // our record: channel -> patch name
