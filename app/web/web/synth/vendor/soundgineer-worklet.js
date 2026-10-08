@@ -1,6 +1,5 @@
-"use strict";
 (() => {
-  // vendor/soundgineer/src/shared/params.ts
+  // node_modules/soundgineer/src/shared/params.ts
   var FILTER_TYPES = ["LP 12", "LP 24", "HP 12", "HP 24", "BP 12", "BP 24", "Notch", "Comb", "Formant"];
   var SUB_SHAPES = ["Sine", "Triangle", "Saw", "Square"];
   var NOISE_TYPES = ["White", "Pink", "Sample"];
@@ -173,7 +172,7 @@
     return a;
   }
 
-  // vendor/soundgineer/src/shared/messages.ts
+  // node_modules/soundgineer/src/shared/messages.ts
   var MOD_SOURCES = [
     ...Array.from({ length: 6 }, (_, i) => ({ id: `env${i + 1}`, name: `Env ${i + 1}`, perVoice: true, bipolar: false })),
     ...Array.from({ length: 8 }, (_, i) => ({ id: `lfo${i + 1}`, name: `LFO ${i + 1}`, perVoice: true, bipolar: false })),
@@ -216,10 +215,10 @@
     return points[points.length - 1].y;
   }
 
-  // vendor/soundgineer/src/shared/wavetable-gen.ts
+  // node_modules/soundgineer/src/shared/wavetable-gen.ts
   var NUM_MIPS = 11;
 
-  // vendor/soundgineer/src/worklet/dsp.ts
+  // node_modules/soundgineer/src/worklet/dsp.ts
   var WavetableData = class {
     frameSize;
     numFrames;
@@ -526,7 +525,7 @@
     return 440 * Math.pow(2, (note - 69) / 12);
   }
 
-  // vendor/soundgineer/src/worklet/voice.ts
+  // node_modules/soundgineer/src/worklet/voice.ts
   function idx(id) {
     return paramIndex(id);
   }
@@ -977,7 +976,7 @@
     }
   };
 
-  // vendor/soundgineer/src/worklet/effects.ts
+  // node_modules/soundgineer/src/worklet/effects.ts
   function flush(x) {
     return Math.abs(x) < 1e-20 ? 0 : x;
   }
@@ -1310,7 +1309,7 @@
     }
   };
 
-  // vendor/soundgineer/src/worklet/processor.ts
+  // node_modules/soundgineer/src/worklet/processor.ts
   var BLOCK = 128;
   var SCOPE_SIZE = 1024;
   var FX_IDX = {

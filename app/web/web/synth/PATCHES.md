@@ -1,22 +1,23 @@
-# Patches to the vendored Soundgineer
+# Soundgineer — where it comes from and what we changed
 
-Ledger of every change we make to upstream's source (plan §4.2, rule R6). Rules: new files by default; a change to
-an upstream file is at most ten lines, additive only, tagged `SP-EXT`, and written the way we would submit it as a
-pull request; never reorder or renumber the parameter table; protocol extensions stay backward compatible. All
-hunks are found with one grep: `grep -rn 'SP-EXT' vendor/soundgineer/src`.
+**来源（C 机制，单一正源）**
 
-| # | File | What | Lines | Upstream status | Covered by |
-|---|---|---|---|---|---|
-| 1 | `vendor/soundgineer/src/audio/engine.ts` | `start()` accepts an injected `AudioContext` and, when one is injected, leaves output routing to the host (Sonic Pi connects the node into `engine.node.input`). Called with no argument, behaviour is unchanged. | 5 | pending (PR-able: general-purpose host support) | M1 probe: audible through the engine, `with_fx`, Recorder |
-| 2 | `vendor/soundgineer/src/audio/engine.ts` | `get audioNode()` — hands the worklet node to the host instead of it reaching into private state. | 4 | pending (PR-able) | M1 probe: the node is connected and produces peaks |
+| 项 | 值 |
+|---|---|
+| 仓库 | `github.com/patacoding/soundgineer`（fork，分支 `sp-integration`） |
+| 依赖声明 | `app/web/package.json`：`"soundgineer": "github:patacoding/soundgineer#<sha>"` |
+| 钉版本 | `app/web/package-lock.json` 里的 commit SHA（无需手工维护 pin 文件） |
+| 构建源 | `node_modules/soundgineer/src`（由 `scripts/build-soundgineer.mjs` 打包进 `web/synth/vendor/`） |
 
-## Withdrawn
+**变更流程**：改 fork → 推 fork → 更新依赖 SHA（`npm install github:patacoding/soundgineer#<新 sha>`）→ 重建 → 跑探针
+（`tools/soundgineer-probe/{link,editor}.mjs`）。**没有本地副本，也不需要同步脚本。**
 
-An attempt to give notes a delay in frames inside the worklet (a "waiting room" so a note could be held until a
-target frame) was **reverted**: scheduling belongs to Sonic Pi. Sonic Pi decides when a performance signal is sent
--- that is what its internal scheduler is for -- and this instrument is not inside Sonic Pi: it receives note-on,
-note-off and parameter changes and sounds them. Holding notes here would be moving Sonic Pi's responsibility into
-the instrument, and it produced two failures in a row (a note that fired immediately, then one that never fired) for
-a requirement nobody had asked for.
+**fork 里的 SP-EXT 改动**
 
-Upstream commit this copy is pinned to: see `vendor/soundgineer/UPSTREAM-COMMIT.txt`.
+| # | 文件 | 内容 |
+|---|---|---|
+| 1 | `src/audio/engine.ts` / 宿主接口 | 宿主钩子（参数表与引擎的对外接口） |
+| 2 | `src/ui/presets.ts` | 用户预设**按引擎作用域**（`engine.__sgrScope`）存取：一个通道保存不再覆盖别的通道；旧条目无 scope 视为 `default`，不丢 |
+| 3 | `src/ui/enveditor.ts` | ENV **图上直接拖**：9 个手柄（D/A/H/D/R 横向、sustain 纵向、A/D/R 曲线上下），全部经 `engine.setParam(index, normalized)` 写入 —— DSP / worklet / 参数注册表零改动 |
+
+**构建自包含检查（与来源无关，仍然必要）**：`soundgineer-worklet.js` 必须**不含** `import` / `fetch` / `importScripts`，否则构建失败。

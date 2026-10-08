@@ -1,4 +1,4 @@
-// vendor/soundgineer/src/shared/params.ts
+// node_modules/soundgineer/src/shared/params.ts
 var FILTER_TYPES = ["LP 12", "LP 24", "HP 12", "HP 24", "BP 12", "BP 24", "Notch", "Comb", "Formant"];
 var SUB_SHAPES = ["Sine", "Triangle", "Saw", "Square"];
 var NOISE_TYPES = ["White", "Pink", "Sample"];
@@ -167,7 +167,7 @@ function formatValue(d, n) {
   return Math.abs(v) < 10 ? v.toFixed(2) : v.toFixed(0);
 }
 
-// vendor/soundgineer/src/shared/messages.ts
+// node_modules/soundgineer/src/shared/messages.ts
 var MOD_SOURCES = [
   ...Array.from({ length: 6 }, (_, i) => ({ id: `env${i + 1}`, name: `Env ${i + 1}`, perVoice: true, bipolar: false })),
   ...Array.from({ length: 8 }, (_, i) => ({ id: `lfo${i + 1}`, name: `LFO ${i + 1}`, perVoice: true, bipolar: false })),
@@ -201,7 +201,7 @@ function evalLfoShape(points, phase) {
   return points[points.length - 1].y;
 }
 
-// vendor/soundgineer/src/ui/common.ts
+// node_modules/soundgineer/src/ui/common.ts
 function el(tag, className, text) {
   const e = document.createElement(tag);
   if (className) e.className = className;
@@ -245,7 +245,7 @@ function closePopup() {
   }
 }
 
-// vendor/soundgineer/src/ui/knob.ts
+// node_modules/soundgineer/src/ui/knob.ts
 var knobRegistry = /* @__PURE__ */ new Map();
 var Knob = class {
   constructor(engine, paramIndex2, size = 46, label) {
@@ -491,7 +491,7 @@ function animatedKnobs() {
   return [...knobRegistry.values()].filter((k) => k.animated);
 }
 
-// vendor/soundgineer/src/ui/controls.ts
+// node_modules/soundgineer/src/ui/controls.ts
 function paramSelect(engine, id) {
   const index = paramIndex(id);
   const def = PARAMS[index];
@@ -529,7 +529,7 @@ function knobRow(engine, ids, size = 46) {
   return row;
 }
 
-// vendor/soundgineer/src/ui/enveditor.ts
+// node_modules/soundgineer/src/ui/enveditor.ts
 function shape(t, c) {
   return Math.pow(t, Math.pow(2, c * 3));
 }
@@ -701,7 +701,7 @@ var EnvDisplay = class {
   }
 };
 
-// vendor/soundgineer/src/ui/lfoeditor.ts
+// node_modules/soundgineer/src/ui/lfoeditor.ts
 var HIT = 10;
 var LfoEditor = class {
   constructor(engine, lfo) {
@@ -902,7 +902,7 @@ var LfoEditor = class {
   }
 };
 
-// vendor/soundgineer/src/ui/matrix.ts
+// node_modules/soundgineer/src/ui/matrix.ts
 var MODDABLE = PARAMS.map((d, i) => ({ d, i })).filter(({ d }) => d.moddable);
 function destLabel(i) {
   const d = PARAMS[i];
@@ -988,7 +988,7 @@ var ModMatrix = class {
   }
 };
 
-// vendor/soundgineer/src/ui/fxrack.ts
+// node_modules/soundgineer/src/ui/fxrack.ts
 var FX_LABELS = {
   chorus: "CHORUS",
   phaser: "PHASER",
@@ -1061,7 +1061,7 @@ var FxRack = class {
   }
 };
 
-// vendor/soundgineer/src/shared/fft.ts
+// node_modules/soundgineer/src/shared/fft.ts
 function fft(re, im) {
   const n = re.length;
   if ((n & n - 1) !== 0) throw new Error("fft size must be a power of two");
@@ -1103,7 +1103,7 @@ function fft(re, im) {
   }
 }
 
-// vendor/soundgineer/src/ui/scope.ts
+// node_modules/soundgineer/src/ui/scope.ts
 var Scope = class {
   constructor(engine) {
     this.engine = engine;
@@ -1216,7 +1216,7 @@ var Scope = class {
   }
 };
 
-// vendor/soundgineer/src/ui/wt3d.ts
+// node_modules/soundgineer/src/ui/wt3d.ts
 var POINTS = 128;
 var VERT = `#version 300 es
 precision highp float;
@@ -1401,7 +1401,7 @@ var WavetableView = class {
   }
 };
 
-// vendor/soundgineer/src/ui/keyboard.ts
+// node_modules/soundgineer/src/ui/keyboard.ts
 var KEYMAP = {
   KeyA: 0,
   KeyW: 1,
@@ -1527,7 +1527,7 @@ var Keyboard = class {
   }
 };
 
-// vendor/soundgineer/src/ui/presets.ts
+// node_modules/soundgineer/src/ui/presets.ts
 var STORAGE_KEY = "soundgineer.presets.v1";
 function P(raw) {
   const out = {};
@@ -2800,7 +2800,7 @@ var PresetBrowser = class {
   }
 };
 
-// vendor/soundgineer/src/ui/midi.ts
+// node_modules/soundgineer/src/ui/midi.ts
 var MACRO_CCS = [20, 21, 22, 23];
 async function initMidi(engine, onStatus) {
   if (!("requestMIDIAccess" in navigator)) {
@@ -2857,7 +2857,7 @@ function handle(engine, data) {
   }
 }
 
-// vendor/soundgineer/src/ui/app.ts
+// node_modules/soundgineer/src/ui/app.ts
 function buildApp(engine, container) {
   engine.primeTables();
   const header = el("header");

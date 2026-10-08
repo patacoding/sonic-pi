@@ -13,7 +13,7 @@ import path from "node:path";
 import fs from "node:fs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const SRC = path.join(ROOT, "vendor/soundgineer/src");
+const SRC = path.resolve(ROOT, "node_modules/soundgineer/src")   // the fork, pinned by SHA in package.json + lockfile
 const OUT = path.join(ROOT, "web/synth/vendor");
 const WORKLET_NAME = "soundgineer-worklet.js";
 
