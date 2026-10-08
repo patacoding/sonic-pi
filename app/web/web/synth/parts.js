@@ -9,6 +9,26 @@ export const DEFAULT_PART = "main";
 const say = (t, bad = false) => (bad ? console.error : console.info)(`Synth — ${t}`);
 
 const parts = new Map();          // name -> { engine, node, program, patchName }
+let replicating = false;          // a guard: a replicated edit must not replicate again
+
+/**
+ * Channels that are on the same preset share their edits. Each channel has its own engine, so without this two parts on
+ * "Bass" would drift apart the moment one of them was tweaked -- which reads as "switching channels does not carry the
+ * parameters". Channels on a different preset are never touched.
+ */
+function replicateParam(sourceKey, apply) {
+  if (replicating) return;
+  const name = parts.get(sourceKey)?.presetName ?? null;
+  if (!name) return;
+  replicating = true;
+  try {
+    for (const [k, other] of parts) {
+      if (k === sourceKey || (other.presetName ?? null) !== name) continue;
+      try { apply(other.engine); } catch { /* that part may be mid-teardown */ }
+    }
+  } finally { replicating = false; }
+}
+
 const held = new Map();           // name -> Set(notes we started and have not ended)
 const PRESET_KEY = "sonicpi.synth.preset.v1";   // our own record: which preset each channel is playing
 
@@ -95,6 +115,12 @@ export async function ensurePart(name = DEFAULT_PART) {
   node.connect(inputNode);                                      // the engine's bus: with_fx, scope, Recorder
   engine.primeTables();
   const made = { engine, node, program: null, patchName: "Init" };
+  // their knobs write through setParam(index, normalized); our own code uses setParamById. Both are wrapped so an edit
+  // on one channel reaches every channel holding the same preset.
+  const rawSet = engine.setParam?.bind(engine);
+  if (rawSet) engine.setParam = (i, v, ...rest) => { const out = rawSet(i, v, ...rest); replicateParam(key, (e) => e.setParam?.(i, v)); return out; };
+  const rawSetById = engine.setParamById?.bind(engine);
+  if (rawSetById) engine.setParamById = (id, v, ...rest) => { const out = rawSetById(id, v, ...rest); replicateParam(key, (e) => e.setParamById?.(id, v)); return out; };
   parts.set(key, made);
   try { const nm = restorePreset(key, engine); if (nm) made.presetName = nm; } catch { /* first run: nothing to restore */ }
   // Their preset browser applies presets through engine.loadPreset(). A note sounding when it does can outlive the
