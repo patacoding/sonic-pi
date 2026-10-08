@@ -198,9 +198,13 @@ export function createSynthWindow(api) {
   function placeFrame() {
     const frame = win.querySelector("#synth-frame"), host = win.querySelector("#synth-sgr-host");
     const r = host.getBoundingClientRect();
-    const fit = Math.max(0.2, Math.min((r.width || 1280) / 1280, (r.height || 1060) / 1060));
+    // the frame's real box, never a second copy of the number: the CSS said 1200 while this said 1060, so at 100% the
+    // bottom of the editor -- the on-screen keyboard -- was scaled as if the frame were shorter and got clipped away
+    const DW = frame.offsetWidth || 1280;
+    const DH = frame.offsetHeight || 1200;
+    const fit = Math.max(0.2, Math.min((r.width || DW) / DW, (r.height || DH) / DH));
     const scale = fit * zoom;
-    const cw = 1280 * scale, ch = 1060 * scale;
+    const cw = DW * scale, ch = DH * scale;
     const cx = (r.width - cw) / 2, cy = (r.height - ch) / 2;
     const clampAxis = (v, content, room) => (content <= room ? (room - content) / 2 : Math.max(room - content, Math.min(v, 0)));
     const left = clampAxis(cx + pan.x, cw, r.width);
