@@ -13,7 +13,9 @@
 // Published as `window.sonicPiSynth`. Nothing here touches the app's DOM, and nothing is persisted.
 import { SynthEngine } from "./vendor/soundgineer.js";
 import * as parts from "./parts.js";
-import { patchByProgram, PATCHES, guide } from "./patches.js";   // several timbres at once: one instance per named part
+import { patchByProgram, PATCHES, guide } from "./patches.js";
+import { parseSynthDirective, numbers, strings } from "./directives.js";
+import { createSynthWindow } from "./window.js";   // several timbres at once: one instance per named part
 
 export const SYNTH_ENABLED = true;
 
@@ -241,5 +243,9 @@ api.parts = {
   state: parts.state,
 };
 globalThis.sonicPiParts = api.parts;
+// the window is ours: a button on the audio page and a popup that covers rather than rearranges (window.js)
+api.window = createSynthWindow({
+  state: parts.state, patches: () => PATCHES, guide, midiTrace: () => midiTrace.slice(),
+});
 globalThis.sonicPiSynth = api;
 export { api as synthHost };
