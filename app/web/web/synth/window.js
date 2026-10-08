@@ -88,7 +88,7 @@ export function createSynthWindow(api) {
   const vitalInput = document.createElement("input");
   vitalInput.id = "synth-vital-file";
   vitalInput.type = "file";
-  vitalInput.accept = ".vital,application/json";
+  vitalInput.accept = ".vital,.wav,.vitaltable,.vitallfo,application/json";
   vitalInput.multiple = true;
   vitalInput.style.display = "none";
   let vitalBtn = null;
@@ -104,24 +104,77 @@ export function createSynthWindow(api) {
     const files = [...(vitalInput.files ?? [])];
     vitalInput.value = "";
     if (!files.length) return;
-    const mod = await import("./vital.js").catch((e) => { console.error("Synth — could not load the converter:", e); return null; });
-    if (!mod) return;
-    for (const file of files) {
-      try {
-        const text = await file.text();                       // local read: the file never leaves the machine
-        const vital = JSON.parse(text);
-        const { preset, report } = mod.vitalToPreset(vital, file.name.replace(/\.vital$/i, ""));
-        const engine = api.engineOf?.(selected);
-        if (!engine) { console.warn("Synth — pick a channel with a preset first"); continue; }
-        engine.loadPreset(preset);
-        engine.__sgrPreset = "user:" + preset.name;            // tell the host which preset this engine now holds
-        await api.setPreset?.(selected, preset.name);
-        console.info("Synth — " + mod.describeReport(report));
-      } catch (e) {
-        console.error("Synth — " + file.name + " could not be converted: " + (e?.message ?? e));
+    const ok = [], skipped = [];
+    try {
+      const mod = await import("./vital.js").catch((e) => { console.error("Synth — the converter could not load:", e); return null; });
+      if (!mod) return;
+      const engine = api.engineOf?.(selected);
+      if (!engine) { console.warn("Synth — pick a channel first, then import"); return; }
+      const known = mod.knownParamIds();
+      const read = async (f) => (f.name.toLowerCase().endsWith(".wav") ? "" : await f.text());
+      // classify everything up front so the summary can explain what was ignored and why
+      const kinds = new Map();
+      for (const f of files) {
+        try { kinds.set(f, mod.classifyFile(f.name, await read(f))); }
+        catch (e) { kinds.set(f, { kind: "error", reason: "could not be read: " + (e?.message ?? e) }); }
       }
+      const of = (k) => files.filter((f) => kinds.get(f)?.kind === k);
+      // 1) the preset first: it may set oscN.wavetable itself
+      for (const f of of("vital")) {
+        try {
+          const vital = JSON.parse(await f.text());
+          const { preset, report } = mod.vitalToPreset(vital, f.name.replace(/\.vital$/i, ""));
+          const judged = mod.assessPreset(preset, known);
+          if (!judged.ok) { skipped.push(f.name + " — " + judged.note); continue; }
+          engine.loadPreset(preset);
+          engine.__sgrPreset = "user:" + preset.name;
+          await api.setPreset?.(selected, preset.name);
+          ok.push(f.name + " → " + mod.describeReport(report));
+          const refs = mod.wavetableRefs?.(vital) ?? [];
+          if (refs.length && !of("wav").length && !of("vitaltable").length) {
+            console.info("Synth — this preset points at wavetables: " + refs.map((r) => `osc${r.osc + 1}=${r.name}`).join(", ") +
+                         " — select those .wav/.vitaltable files too and they will be loaded");
+          }
+        } catch (e) { skipped.push(f.name + " — " + (e?.message ?? e)); }
+      }
+      // 2) then the tables: importing switches that oscillator to Custom and uploads
+      const tables = [...of("wav"), ...of("vitaltable")];
+      for (const [i, f] of tables.entries()) {
+        try {
+          let blob = f, name = f.name;
+          if (kinds.get(f).kind === "vitaltable") {
+            const { samples, frames, frameSize, sampleRate } = mod.vitalTableToSamples(JSON.parse(await f.text()));
+            if (!samples || !samples.length) throw new Error("the table has no audio in it");
+            blob = new Blob([mod.encodeWavFloat32(samples, sampleRate)], { type: "audio/wav" });
+            name = f.name.replace(/\.vitaltable$/i, "") + ".wav";
+            ok.push(`${f.name} → converted to wav (${frames} frames of ${frameSize})`);
+          }
+          await engine.importWavetableFile(Math.min(i, 2), new File([blob], name, { type: "audio/wav" }));
+          ok.push(f.name + " → osc" + (Math.min(i, 2) + 1));
+        } catch (e) { skipped.push(f.name + " — " + (e?.message ?? e)); }
+      }
+      // 3) and finally the LFO shapes
+      for (const [i, f] of of("vitallfo").entries()) {
+        try {
+          const points = mod.vitallfoToPoints(JSON.parse(await f.text()));
+          if (!points.length) throw new Error("the shape has no points");
+          engine.setLfoShape(Math.min(i, 7), points);
+          ok.push(f.name + " → LFO " + Math.min(i, 7) + " (" + points.length + " points)");
+        } catch (e) { skipped.push(f.name + " — " + (e?.message ?? e)); }
+      }
+      // anything that was classified as junk or unreadable
+      for (const f of files) {
+        const k = kinds.get(f);
+        if (k && (k.kind === "junk" || k.kind === "error")) skipped.push(f.name + " — " + (k.reason ?? "not usable"));
+      }
+    } catch (e) {
+      console.error("Synth — the import stopped unexpectedly: " + (e?.message ?? e));
+    } finally {
+      for (const line of ok) console.info("Synth — imported " + line);
+      for (const line of skipped) console.warn("Synth — skipped " + line);
+      console.info(`Synth — import finished: ${ok.length} used, ${skipped.length} skipped`);
+      paint();
     }
-    paint();
   });
   try { win.querySelector("#synth-help")?.appendChild(vitalBtn); win.appendChild(vitalInput); } catch { /* cosmetic */ }
   // A stamp you can SEE, in the title bar: "no change" arguments end when the running build is on screen.

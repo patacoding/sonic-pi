@@ -90,3 +90,103 @@ export function describeReport(report) {
   const parts = Object.entries(groups).sort().map(([k, n]) => `${k} ${n}`);
   return `${report.name}: ${report.mappedCount} parameters mapped (${parts.join(', ')}), ${report.total} in the file`;
 }
+
+
+// ── other Vital file types (all read locally, none of it leaves the machine) ─────────────────────────────
+
+/** The wavetable names a preset points at (settings.wavetables is present in every preset we surveyed). */
+export function wavetableRefs(vital) {
+  const list = vital?.settings?.wavetables;
+  if (!Array.isArray(list)) return [];
+  return list.map((w, i) => ({ osc: i, name: typeof w === 'string' ? w : String(w?.name ?? `table ${i + 1}`) })).filter((w) => w.name);
+}
+
+/** A .vitallfo shape -> the point list this engine's setLfoShape expects (each point is {x, y}). */
+export function vitallfoToPoints(lfo) {
+  const pts = Array.isArray(lfo?.points) ? lfo.points : [];
+  const powers = Array.isArray(lfo?.powers) ? lfo.powers : [];
+  const points = [];
+  for (let i = 0, k = 0; i + 1 < pts.length; i += 2, k++) {
+    const power = Number.isFinite(powers[k]) ? Math.min(1, Math.max(-1, powers[k])) : 0;   // LfoPoint is {x, y, power}
+    points.push({ x: clamp01(pts[i]), y: clamp01(pts[i + 1]), power });
+  }
+  return points;
+}
+
+/** Encode mono float32 samples as a RIFF/WAVE file, 32-bit float, which is the simplest lossless choice here. */
+export function encodeWavFloat32(samples, sampleRate = 44100) {
+  const n = samples.length;
+  const buf = new ArrayBuffer(44 + n * 4);
+  const view = new DataView(buf);
+  const str = (off, t) => { for (let i = 0; i < t.length; i++) view.setUint8(off + i, t.charCodeAt(i)); };
+  str(0, 'RIFF'); view.setUint32(4, 36 + n * 4, true); str(8, 'WAVE');
+  str(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 3, true); view.setUint16(22, 1, true);   // 3 = IEEE float
+  view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 4, true); view.setUint16(32, 4, true); view.setUint16(34, 32, true);
+  str(36, 'data'); view.setUint32(40, n * 4, true);
+  for (let i = 0; i < n; i++) view.setFloat32(44 + i * 4, samples[i], true);
+  return new Uint8Array(buf);
+}
+
+/**
+ * A .vitaltable -> wav samples in 2048-sample frames.
+ * The audio is base64 int16 PCM (verified against three files: int16 reads sanely, float32 does not), at the file's own
+ * sample rate, and its length is a whole number of seconds rather than a whole number of frames -- window_size is the
+ * original analysis window and is not integral -- so we frame it ourselves.
+ */
+export function vitalTableToSamples(table, frameSize = 2048) {
+  const b64 = table?.groups?.[0]?.components?.[0]?.audio_file;
+  if (typeof b64 !== 'string' || !b64) return { samples: null, reason: 'no audio_file in this .vitaltable' };
+  const bin = atob(b64);
+  const n = Math.floor(bin.length / 2);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const lo = bin.charCodeAt(i * 2), hi = bin.charCodeAt(i * 2 + 1);
+    const v = ((hi << 8) | lo) << 16 >> 16;                      // little-endian int16
+    out[i] = v / 32768;
+  }
+  const frames = Math.floor(n / frameSize);
+  const usable = frames * frameSize;
+  return { samples: out.subarray(0, usable), frames, frameSize, sampleRate: table?.groups?.[0]?.components?.[0]?.audio_sample_rate ?? 44100 };
+}
+
+
+// ── fault tolerance: what a file is, and why it could not be used ────────────────────────────────────────
+
+/**
+ * Decide what a selected file is, without trusting the extension alone (and rejecting the macOS metadata files that
+ * litter these folders -- they are about half of every Vital directory we surveyed).
+ */
+export function classifyFile(name, text) {
+  const n = String(name ?? '');
+  const base = n.split('/').pop() ?? n;
+  if (base.startsWith('._') || base.startsWith('.')) return { kind: 'junk', reason: 'a hidden/metadata file, not a preset' };
+  if (/^\.(vital|vitaltable|vitallfo)$/i.test(base.slice(base.lastIndexOf('.')))) {
+    /* falls through to content checks below */
+  }
+  const ext = (base.match(/\.[a-z0-9]+$/i) ?? [''])[0].toLowerCase();
+  if (ext === '.wav') return text ? { kind: 'wav' } : { kind: 'wav' };
+  if (!text) return { kind: 'error', reason: 'the file is empty' };
+  const head = text.slice(0, 200).replace(/^\uFEFF/, '').trimStart();
+  if (!head.startsWith('{')) {
+    if (/^RIFF/.test(head)) return { kind: 'wav' };
+    return { kind: 'error', reason: 'not JSON and not a WAV -- this does not look like a Vital file' };
+  }
+  let data;
+  try { data = JSON.parse(text); } catch (e) { return { kind: 'error', reason: 'JSON could not be parsed (' + String(e.message).slice(0, 60) + ')' }; }
+  if (data && data.settings) return { kind: 'vital' };
+  if (data && data.groups) return { kind: 'vitaltable' };
+  if (data && (data.points || data.num_points)) return { kind: 'vitallfo' };
+  if (data && data.settings === undefined) return { kind: 'error', reason: 'JSON, but it has no "settings" -- not a Vital preset' };
+  return { kind: 'error', reason: 'unrecognised JSON shape' };
+}
+
+/** Judge a converted preset before it is applied, so a bad conversion is reported rather than silently half-applied. */
+export function assessPreset(preset, knownIds) {
+  const ids = knownIds ?? knownParamIds();
+  const keys = Object.keys(preset?.params ?? {});
+  const unknown = keys.filter((k) => !ids.has(k));
+  const good = keys.filter((k) => ids.has(k));
+  if (!keys.length) return { ok: false, mapped: 0, unknown: 0, note: 'it contains no parameters this engine knows -- probably a very different Vital version' };
+  return { ok: good.length > 0, mapped: good.length, unknown: unknown.length,
+           note: unknown.length ? unknown.length + ' parameter(s) were dropped (not in this engine)' : '' };
+}
