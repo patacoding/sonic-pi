@@ -57,7 +57,14 @@ export const engineOf = (name) => parts.get(String(name))?.engine ?? null;
 // business (its own scheduler), not ours. See docs/plan/soundgineer-multipart-argument.md 5.8.
 export async function noteOn(name, note, velocity = 1) { (await ensurePart(name)).engine.noteOn(note, velocity); }
 export function noteOff(name, note) { parts.get(String(name))?.engine.noteOff(note); }
-export function setParam(name, id, value) { parts.get(String(name))?.engine.setParamById(id, value); }
+// A parameter may arrive for a channel that has not played yet (a program change or a CC before the first note), so
+// it creates the part instead of dropping the message -- measured: a CC to an uncreated channel did nothing at all.
+export function setParam(name, id, value) {
+  const p = parts.get(String(name));
+  if (p) { p.engine.setParamById(id, value); return true; }
+  ensurePart(name).then((made) => made.engine.setParamById(id, value)).catch(() => {});
+  return true;
+}
 export function allNotesOff(name) {
   if (name == null) { for (const p of parts.values()) p.engine.allNotesOff?.(); }
   else parts.get(String(name))?.engine.allNotesOff?.();
