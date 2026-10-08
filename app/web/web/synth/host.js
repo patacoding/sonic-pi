@@ -159,6 +159,41 @@ function handleMidi(...a) {
 }
 
 const midiTrace = [];
+/**
+ * Watch the app's public engine boundary instead of asking upstream for a hook.
+ *
+ * Everything the music does reaches the engine as OSC through `window.sonicPi.engine.sendOSC` -- including the MIDI
+ * it emits -- so wrapping that one public method gives us the performance signals with no edit to any upstream file.
+ * Nothing else of ours touches the app: remove this layer and the synth is gone, which is the point.
+ */
+function installEngineObserver() {
+  const wrap = () => {
+    const e = globalThis.sonicPi?.engine;
+    if (!e || typeof e.sendOSC !== "function" || e.__sgrObserved) return;
+    const original = e.sendOSC.bind(e);
+    e.sendOSC = (msg, ...rest) => {
+      try {
+        const address = msg?.address ?? msg?.path ?? (Array.isArray(msg) ? msg[0] : null);
+        const args = msg?.args ?? (Array.isArray(msg) ? msg.slice(1) : []);
+        if (address) observeOsc(String(address), args, msg?.time ?? null);
+      } catch (err) { console.error(`Synth — observing the engine threw: ${err?.message ?? err}`); }
+      return original(msg, ...rest);
+    };
+    e.__sgrObserved = true;
+    console.info("Synth — watching the engine's OSC for performance signals");
+  };
+  wrap();
+  setInterval(wrap, 2000);            // the engine is rebuilt on some runs; keep watching the current one
+}
+
+/** `/clockwork/midi/out/<kind> <port> <channel> <values…>` and friends -> the same mapping the direct hook used. */
+function observeOsc(address, args, time) {
+  const kind = address.includes("/midi/out/") ? address.split("/midi/out/")[1] : address;
+  const path = kind ? `/${kind}` : address;
+  if (!/note_on|note_off|control_change|program_change|pitch_bend|channel_pressure/i.test(path)) return false;
+  return handleMidi({ path, args, time });
+}
+
 const api = {
   get ready() { return !!sg; },
   get error() { return lastError; },
@@ -185,6 +220,7 @@ const api = {
   trace: () => trace.slice(),
   handleMidi,
   midiTrace: () => midiTrace.slice(),
+  watchEngine: installEngineObserver,
   /** What the window shows: how the music addresses this synth, and which number is which instrument. */
   guide,
   patches: () => PATCHES.map((p) => ({ ...p })),
