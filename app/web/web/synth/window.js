@@ -97,7 +97,7 @@ export function createSynthWindow(api) {
     vitalBtn.id = "synth-import-vital";
     vitalBtn.type = "button";
     vitalBtn.textContent = "Import Vital…";
-    vitalBtn.title = "Convert your own .vital files locally and load them into the selected channel";
+    vitalBtn.title = "Load ONE of your own .vital presets into the selected channel (you may select its .wav/.vitaltable/.vitallfo files alongside it)";
     vitalBtn.addEventListener("click", () => vitalInput.click());
   } catch { /* cosmetic */ }
   vitalInput.addEventListener("change", async () => {
@@ -119,8 +119,13 @@ export function createSynthWindow(api) {
         catch (e) { kinds.set(f, { kind: "error", reason: "could not be read: " + (e?.message ?? e) }); }
       }
       const of = (k) => files.filter((f) => kinds.get(f)?.kind === k);
+      // One preset per import: the supporting files may come together, but a second preset would only race the first.
+      const picked = mod.pickSinglePreset ? mod.pickSinglePreset(files) : { chosen: of("vital")[0] ?? null, ignored: of("vital").slice(1), count: of("vital").length };
+      if (picked.count > 1) {
+        console.warn(`Synth — ${picked.count} presets were selected; loading only "${picked.chosen?.name ?? "the first"}" (one at a time for now)`);
+      }
       // 1) the preset first: it may set oscN.wavetable itself
-      for (const f of of("vital")) {
+      for (const f of (picked.chosen ? [picked.chosen] : [])) {
         try {
           const vital = JSON.parse(await f.text());
           const { preset, report } = mod.vitalToPreset(vital, f.name.replace(/\.vital$/i, ""));
@@ -167,6 +172,7 @@ export function createSynthWindow(api) {
         const k = kinds.get(f);
         if (k && (k.kind === "junk" || k.kind === "error")) skipped.push(f.name + " — " + (k.reason ?? "not usable"));
       }
+      for (const f of picked.ignored) skipped.push(f.name + " — only one preset is loaded at a time; import it on its own");
     } catch (e) {
       console.error("Synth — the import stopped unexpectedly: " + (e?.message ?? e));
     } finally {

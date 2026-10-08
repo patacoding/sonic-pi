@@ -190,3 +190,17 @@ export function assessPreset(preset, knownIds) {
   return { ok: good.length > 0, mapped: good.length, unknown: unknown.length,
            note: unknown.length ? unknown.length + ' parameter(s) were dropped (not in this engine)' : '' };
 }
+
+
+/**
+ * One preset per import, for now.
+ *
+ * Supporting files (wavetables, LFO shapes) may be selected together with it, because they belong to that one preset --
+ * but applying several presets in a row only produces a race the player cannot see, so exactly one is chosen and the
+ * rest are named in the summary.
+ */
+export function pickSinglePreset(files) {
+  const list = [...(files ?? [])];
+  const presets = list.filter((f) => /\.vital$/i.test(String(f?.name ?? '')) && !String(f.name).split('/').pop().startsWith('.'));
+  return { chosen: presets[0] ?? null, ignored: presets.slice(1), count: presets.length };
+}
