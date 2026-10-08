@@ -115,6 +115,7 @@ const api = {
 api.window = createSynthWindow({
   state: parts.state, patches: () => PATCHES, guide, midiTrace: () => midiTrace.slice(),
   applyPatch, defaultProgram: DEFAULT_PROGRAM, link: linkState, enable, disable,
+  enabled: () => enabled,          // the window gates its editor on this; forgetting it made the editor never mount
   engineOf: parts.engineOf, ensurePart: (n) => parts.ensurePart(n).then(() => true),
 });
 

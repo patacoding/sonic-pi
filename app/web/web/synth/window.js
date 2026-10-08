@@ -115,19 +115,33 @@ export function createSynthWindow(api) {
     frame.style.left = Math.max(0, (r.width - 1280 * k) / 2) + "px";
     frame.style.top = Math.max(0, (r.height - 760 * k) / 2) + "px";
   }
+  let mountTries = 0;
   async function mountEditor() {
     const frame = win.querySelector("#synth-frame");
     if (!api.enabled?.()) return;
-    if (!frame.src) { frame.src = location.href.replace(/[^/]*$/, "") + "synth/soundgineer-frame.html"; await new Promise((r) => setTimeout(r, 500)); }
-    const engine = api.engineOf?.(selected);
-    if (!engine) { await api.ensurePart?.(selected); }
-    const e2 = api.engineOf?.(selected);
-    const w = frame.contentWindow;
-    if (!e2 || !w?.__mount) { setTimeout(mountEditor, 400); return; }
-    if (lastBuilt === selected) { fitFrame(); return; }
-    w.__mount(e2);
-    lastBuilt = selected;
-    fitFrame();
+    try {
+      if (!frame.src) {
+        frame.src = location.href.replace(/[^/]*$/, "") + "synth/soundgineer-frame.html";
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      let engine = api.engineOf?.(selected);
+      if (!engine) { await api.ensurePart?.(selected); engine = api.engineOf?.(selected); }
+      const w = frame.contentWindow;
+      if (!engine || !w?.__mount) {
+        if (++mountTries < 25) setTimeout(mountEditor, 400);            // their module and the engine both take a moment
+        else status(`the editor did not come up (engine ${!!engine}, frame ${!!w?.__mount})`, true);
+        return;
+      }
+      mountTries = 0;
+      if (lastBuilt === selected) { fitFrame(); return; }
+      const kids = w.__mount(engine);
+      lastBuilt = selected;
+      fitFrame();
+      status(`${selected}: editor built (${kids} sections) · out: ${api.link?.().out}`);
+    } catch (e) {
+      status(`the editor could not be built: ${e?.message ?? e}`, true);
+      console.error("Synth — mounting the editor failed", e);
+    }
   }
 
   let timer = 0;
