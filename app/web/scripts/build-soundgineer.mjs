@@ -49,5 +49,18 @@ for (const f of [WORKLET_NAME, "soundgineer.js", "soundgineer-params.js"]) {
   const imports = /\bimport\s*[({"]/.test(fs.readFileSync(p, "utf8")) && f !== WORKLET_NAME;
   console.log(`  ${f.padEnd(28)} ${kb.padStart(7)} KB${f === WORKLET_NAME ? "  (no imports)" : ""}`);
 }
+// The layer must stay self-contained: no runtime fetch, no remote script, no worker started from a URL. A future
+// upstream change that introduces one is caught here, rather than on a CDN by a player who hears nothing.
+const banned = /\b(fetch\s*\(|XMLHttpRequest|importScripts\s*\()/;
+for (const f of [WORKLET_NAME, "soundgineer.js", "soundgineer-params.js"]) {
+  const text = fs.readFileSync(path.join(OUT, f), "utf8");
+  if (banned.test(text)) {
+    console.error("  " + f + " reaches for the network at runtime -- our artifact must not");
+    process.exit(1);
+  }
+  const remote = [...text.matchAll(/https?:\/\/([^"'\s)]+)/g)].map((m) => m[1]).filter((h) => !/^www\.w3\.org/.test(h));
+  if (remote.length) console.log("  note: " + f + " mentions " + [...new Set(remote)].slice(0, 2).join(", ") + " (not a fetch)");
+}
+
 const wl = fs.readFileSync(path.join(OUT, WORKLET_NAME), "utf8");
 if (/^\s*import\s/m.test(wl)) { console.error("the worklet bundle contains an import -- addModule would fail"); process.exit(1); }
