@@ -24,9 +24,10 @@ const STYLE = `
     border-radius: 6px; padding: 3px 8px; }
   #synth-bar button[data-role="enable"] { border-color: #5a8; color: #5a8; }
   #synth-main { flex: 1 1 auto; min-height: 0; display: flex; gap: 8px; }
-  #synth-channels { flex: 0 0 190px; overflow: auto; border: 1px solid var(--WindowBorder); border-radius: 8px; }
+  #synth-channels { flex: 0 0 222px; overflow: auto; border: 1px solid var(--WindowBorder); border-radius: 8px; }
   #synth-channels table { width: 100%; border-collapse: collapse; font: 11px/1.5 ui-monospace, monospace; }
   #synth-channels th, #synth-channels td { text-align: left; padding: 2px 5px; border-bottom: 1px solid color-mix(in srgb, var(--WindowBorder) 50%, transparent); }
+  #synth-channels th:last-child, #synth-channels td:last-child { width: 1.6em; text-align: center; padding: 2px 2px; }
   #synth-channels tr.on { background: color-mix(in srgb, #5a8 25%, transparent); }
   #synth-channels tr.clickable { cursor: pointer; }
   #synth-stage { flex: 1 1 auto; min-width: 0; border: 1px solid var(--WindowBorder); border-radius: 8px;
@@ -174,7 +175,7 @@ export function createSynthWindow(api) {
         <td>${p?.preset ?? "—"}</td><td>${p?.voices ?? "—"}</td><td>${p ? (p.peak ?? 0).toFixed(2) : "—"}</td><td><button class="synth-row-clear" data-part="${part}" title="remove this channel's sound">×</button></td></tr>`);
     }
     win.querySelector("#synth-channels").innerHTML =
-      `<table><thead><tr><th>ch</th><th>part</th><th>preset</th><th>voi</th><th>peak</th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
+      `<table><thead><tr><th>ch</th><th>part</th><th>preset</th><th>voi</th><th>peak</th><th title="remove this channel's sound"></th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
     for (const tr of win.querySelectorAll("#synth-channels tr.clickable")) {
       tr.addEventListener("click", () => { selected = tr.dataset.part; builtEngine = null; builtFor = null; mountError = null; paint(); });
     }
