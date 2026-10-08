@@ -30,7 +30,12 @@ const STYLE = `
     display: flex; flex-direction: column; }
   #synth-gate { flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center;
     gap: 8px; padding: 16px; text-align: center; }
+  /* the stage clips: the editor may be zoomed past it, but nothing of it ever leaves the window */
   #synth-sgr-host { flex: 1 1 auto; min-height: 0; position: relative; overflow: hidden; display: none; }
+  #synth-pan-overlay { position: absolute; inset: 0; pointer-events: none; cursor: grab; }
+  #synth-sgr-host[data-pan="on"] #synth-pan-overlay { pointer-events: auto; }
+  #synth-sgr-host[data-pan="on"] { outline: 1px dashed var(--WindowBorder); }
+  #synth-zoom-val { font: 11px/1 ui-monospace, monospace; min-width: 3.2em; text-align: center; opacity: .8; }
   #synth-frame { position: absolute; left: 0; top: 0; width: 1280px; height: 1200px; border: 0; transform-origin: top left; }
   /* collapsed by default: these are notes and a diagnostic, and collapsed they give the editor their room */
   #synth-help { flex: 0 0 auto; border: 1px solid var(--WindowBorder); border-radius: 8px; padding: 4px 6px; }
@@ -46,6 +51,9 @@ export function createSynthWindow(api) {
   }
   let selected = "main", open = false, lastBuilt = null, mountError = null, mounting = false;
   let pos = null;            // where the player put the window, for this session only: never persisted
+  let zoom = 1;              // 1 = fitted to the stage; larger is allowed and simply clipped
+  let pan = { x: 0, y: 0 };
+  let panMode = false;
 
   const btn = document.createElement("button");
   btn.id = "synth-btn"; btn.type = "button"; btn.textContent = "Synth"; btn.title = "the synth (Ctrl/Cmd+Alt+N)";
@@ -55,6 +63,7 @@ export function createSynthWindow(api) {
   const win = document.createElement("div");
   win.id = "synth-window"; win.setAttribute("role", "dialog"); win.setAttribute("aria-label", "Synth");
   win.innerHTML = `<div id="synth-bar"><h4>Synth</h4><span id="synth-status"></span><span class="spacer"></span>
+      <button id="synth-zoom-out" title="smaller">−</button><span id="synth-zoom-val">100%</span><button id="synth-zoom-in" title="bigger">+</button><button id="synth-pan" title="drag the editor around inside this window">pan</button><button id="synth-fit" title="fit and re-centre">fit</button>
       <button id="synth-reader">start a reader</button><button id="synth-panic">all notes off</button>
       <button id="synth-close">close</button></div>
     <div id="synth-main"><div id="synth-channels"></div>
@@ -62,7 +71,7 @@ export function createSynthWindow(api) {
         <div id="synth-gate"><strong>Soundgineer is off</strong>
           <div id="synth-gate-why">Enabling runs nothing. It waits for the app's engine and attaches the instruments to it the moment it exists — press <strong>Run</strong> when you are ready, and your music starts as it always does.</div>
           <button id="synth-enable-2" data-role="enable">Enable Soundgineer</button></div>
-        <div id="synth-sgr-host"><iframe id="synth-frame" title="Soundgineer editor"></iframe></div>
+        <div id="synth-sgr-host"><iframe id="synth-frame" title="Soundgineer editor"></iframe><div id="synth-pan-overlay" title="drag to move the editor"></div></div>
       </div></div>
     <details id="synth-help"><summary>how the music addresses it · recent MIDI</summary>
       <h4>how the music addresses it</h4><div id="synth-guide"></div>
@@ -72,6 +81,27 @@ export function createSynthWindow(api) {
 
   const status = (t, bad = false) => { const el = win.querySelector("#synth-status"); el.textContent = t ?? ""; el.style.color = bad ? "#f66" : ""; };
   win.querySelector("#synth-close").addEventListener("click", () => set(false));
+  const setZoom = (z) => { zoom = Math.max(0.5, Math.min(2, z)); placeFrame(); };
+  win.querySelector("#synth-zoom-in").addEventListener("click", () => setZoom(zoom * 1.25));
+  win.querySelector("#synth-zoom-out").addEventListener("click", () => setZoom(zoom / 1.25));
+  win.querySelector("#synth-fit").addEventListener("click", () => { zoom = 1; pan = { x: 0, y: 0 }; placeFrame(); });
+  win.querySelector("#synth-pan").addEventListener("click", (e) => {
+    panMode = !panMode;
+    win.querySelector("#synth-sgr-host").dataset.pan = panMode ? "on" : "off";
+    e.currentTarget.setAttribute("aria-pressed", String(panMode));
+  });
+  {
+    const overlay = win.querySelector("#synth-pan-overlay");
+    overlay.addEventListener("pointerdown", (e) => {
+      const x0 = e.clientX, y0 = e.clientY, p0 = { ...pan };
+      overlay.setPointerCapture?.(e.pointerId);
+      const move = (ev) => { pan = { x: p0.x + (ev.clientX - x0), y: p0.y + (ev.clientY - y0) }; placeFrame(); };
+      const up = (ev) => { overlay.removeEventListener("pointermove", move); overlay.removeEventListener("pointerup", up); try { overlay.releasePointerCapture(ev.pointerId) } catch {} };
+      overlay.addEventListener("pointermove", move);
+      overlay.addEventListener("pointerup", up);
+      e.preventDefault();
+    });
+  }
   win.querySelector("#synth-reader").addEventListener("click", async () => {
     const ok = await api.startReader?.();
     status(ok ? "reader running" : "the reader did not start", !ok);
@@ -163,6 +193,25 @@ export function createSynthWindow(api) {
     } catch { /* the frame may be mid-navigation */ }
   }
 
+  /** Scale and offset, clamped so the stage is never left with a gap when the editor is larger than it. */
+  function placeFrame() {
+    const frame = win.querySelector("#synth-frame"), host = win.querySelector("#synth-sgr-host");
+    const r = host.getBoundingClientRect();
+    const fit = Math.max(0.2, Math.min((r.width || 1280) / 1280, (r.height || 1060) / 1060));
+    const scale = fit * zoom;
+    const cw = 1280 * scale, ch = 1060 * scale;
+    const cx = (r.width - cw) / 2, cy = (r.height - ch) / 2;
+    const clampAxis = (v, content, room) => (content <= room ? (room - content) / 2 : Math.max(room - content, Math.min(v, 0)));
+    const left = clampAxis(cx + pan.x, cw, r.width);
+    const top = clampAxis(cy + pan.y, ch, r.height);
+    pan = { x: left - (r.width - cw) / 2, y: top - (r.height - ch) / 2 };
+    frame.style.transform = `scale(${scale})`;
+    frame.style.left = `${Math.round(left)}px`;
+    frame.style.top = `${Math.round(top)}px`;
+    const val = win.querySelector("#synth-zoom-val"); if (val) val.textContent = `${Math.round(zoom * 100)}%`;
+    return { scale, left, top, cw, ch };
+  }
+
   function fitFrame() {
     const frame = win.querySelector("#synth-frame"), host = win.querySelector("#synth-sgr-host");
     const r = host.getBoundingClientRect();
@@ -234,5 +283,5 @@ export function createSynthWindow(api) {
 
   startDrag(win.querySelector("#synth-bar"));
   document.body.dataset.synth = "closed";
-  return { el: win, button: btn, open: () => open, set, selected: () => selected, paint, mountEditor, position: () => (pos ? { ...pos } : null) };
+  return { el: win, button: btn, open: () => open, set, selected: () => selected, paint, mountEditor, position: () => (pos ? { ...pos } : null), zoom: () => zoom, setZoom, pan: () => ({ ...pan }), placeFrame };
 }
