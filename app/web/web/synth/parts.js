@@ -222,6 +222,11 @@ function syncFromEditor(key, p) {
   try {
     const v = p?.engine?.__sgrPreset;
     if (typeof v !== "string" || !v) return;
+    // Adopt only what the EDITOR has CHANGED. Polling the same value on every state() used to overwrite a preset name
+    // set deliberately (by a restore, or by another channel's shared edit), which silently switched the "same preset
+    // shares edits" rule off.
+    if (p.editorPreset === v) return;
+    p.editorPreset = v;
     const [kind, ...rest] = v.split(":");
     const name = kind === "factory" ? rest.join(":") : rest.slice(1).join(":");
     if (!name || p.presetName === name) return;
