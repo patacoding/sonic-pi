@@ -39,6 +39,7 @@ export function createSynthWindow(api) {
   }
   let selected = "main";
   let open = false;
+  let mounting = false;
 
   const btn = document.createElement("button");
   btn.id = "synth-btn"; btn.type = "button"; btn.textContent = "Synth"; btn.title = "the synth (Ctrl/Cmd+Alt+N)";
@@ -51,12 +52,40 @@ export function createSynthWindow(api) {
   win.innerHTML = `<div id="synth-bar"><h4>Synth</h4><span id="synth-status"></span><span class="spacer"></span>
       <button id="synth-reader">start a reader</button><button id="synth-close">close</button></div>
     <div id="synth-main"><div id="synth-channels"></div>
-      <div id="synth-stage"><div style="display:flex;gap:6px;align-items:center"><h4 id="synth-stage-title">stage</h4><select id="synth-patch"></select></div><div id="synth-stage-body"></div></div></div>
+      <div id="synth-stage"><div style="display:flex;gap:6px;align-items:center"><h4 id="synth-stage-title">stage</h4><select id="synth-patch"></select></div><div id="synth-stage-body">the editor loads here…</div><div id="synth-sgr-app"></div></div></div>
     <h4>how the music addresses it</h4><div id="synth-guide"></div>
     <h4>recent MIDI</h4><div id="synth-midi"></div>`;
   document.body.appendChild(win);
   win.querySelector("#synth-close").addEventListener("click", () => set(false));
   win.querySelector("#synth-reader").addEventListener("click", () => startReader());
+
+  // Their stylesheet is written for their own page (body, :root, and so on). Prefixing every selector with our
+  // window's id keeps it inside our popup, which is the rule this whole layer is under: cover, never restyle.
+  async function loadScopedCss() {
+    if (document.getElementById("synth-sgr-css")) return;
+    const res = await fetch("./vendor/soundgineer-ui.css");
+    const raw = await res.text();
+    const scoped = raw.replace(/(^|\})([^@}{]+)\{/g, (m, close, sel) =>
+      close + sel.split(",").map((one) => `#synth-window ${one.trim()}`).join(", ") + "{");
+    const style = document.createElement("style");
+    style.id = "synth-sgr-css"; style.textContent = scoped;
+    document.head.appendChild(style);
+  }
+
+  /** Their own editor, built on the engine of whichever channel is selected. */
+  async function mountSoundgineer() {
+    const host = document.getElementById("synth-sgr-app");
+    if (!host) return;
+    host.textContent = "";
+    try {
+      await loadScopedCss();
+      let engine = api.engineOf?.(selected);
+      if (!engine) { await api.ensurePart?.(selected); engine = api.engineOf?.(selected); }
+      if (!engine) { host.textContent = "the synth needs the app's engine: press Run on the audio page once, then reopen this window"; return; }
+      api.buildApp?.(engine, host);
+      host.dataset.built = selected;
+    } catch (e) { host.textContent = `the editor could not be built: ${e?.message ?? e}`; console.error(e); }
+  }
 
   async function startReader() {
     try {
@@ -90,8 +119,10 @@ export function createSynthWindow(api) {
     sel.innerHTML = patches.map((p) => `<option value="${p.n}"${p.n === cur ? " selected" : ""}>${p.n} ${p.name}</option>`).join("");
     sel.onchange = () => api.applyPatch?.(selected, Number(sel.value)).then(() => paint());
     win.querySelector("#synth-stage-body").textContent =
-      st.parts?.[selected] ? `voices ${st.parts[selected].voices}, peak ${(st.parts[selected].peak ?? 0).toFixed(3)}, ${st.parts[selected].params ?? "?"} parameters. The knobs, matrix and editors come next (U2).`
+      st.parts?.[selected] ? `voices ${st.parts[selected].voices} · peak ${(st.parts[selected].peak ?? 0).toFixed(3)} · patch ${st.parts[selected].patch ?? "—"}`
                            : "no instrument on this channel yet — it is created by its first program change, note or CC.";
+    const built = document.getElementById("synth-sgr-app")?.dataset.built;
+    if (open && built !== selected && !mounting) { mounting = true; mountSoundgineer().finally(() => { mounting = false; }); }
     win.querySelector("#synth-guide").textContent = api.guide?.() ?? "";
     win.querySelector("#synth-midi").textContent = (api.midiTrace?.() ?? []).slice(-6).map((e) => `${e.path} ${JSON.stringify(e.args)}${e.mapped ? " → " + JSON.stringify(e.mapped) : ""}`).join("\n");
     statusEl().textContent = `${names.length} instrument(s) · cap ${st.cap ?? "?"}`;
@@ -118,5 +149,5 @@ export function createSynthWindow(api) {
   }, true);
 
   document.body.dataset.synth = "closed";
-  return { el: win, button: btn, open: () => open, set, selected: () => selected, paint };
+  return { el: win, button: btn, open: () => open, set, selected: () => selected, paint, mountSoundgineer };
 }

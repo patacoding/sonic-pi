@@ -40,10 +40,16 @@ const shared = { bundle: true, target: "es2022", logLevel: "warning", sourcemap:
 await build({ ...shared, entryPoints: [path.join(SRC, "worklet/processor.ts")], outfile: path.join(OUT, WORKLET_NAME), format: "iife" });
 // the page side: what we import
 await build({ ...shared, entryPoints: [path.join(SRC, "audio/engine.ts")], outfile: path.join(OUT, "soundgineer.js"), format: "esm", plugins: [workerUrl] });
+// their own editor UI (buildApp(engine, container)) and the stylesheet it expects, so the window can host the real
+// interface instead of a placeholder. The CSS is scoped at load time by our window -- see window.js -- because it is
+// written for their whole page and we are not allowed to restyle anything of Sonic Pi's.
+await build({ ...shared, entryPoints: [path.join(SRC, "ui/app.ts")], outfile: path.join(OUT, "soundgineer-ui.js"), format: "esm" });
+await build({ ...shared, entryPoints: [path.join(SRC, "style.css")], outfile: path.join(OUT, "soundgineer-ui.css") });
+
 // the parameter table, so our adapter can address parameters by id without guessing
 await build({ ...shared, entryPoints: [path.join(SRC, "shared/params.ts")], outfile: path.join(OUT, "soundgineer-params.js"), format: "esm" });
 
-for (const f of [WORKLET_NAME, "soundgineer.js", "soundgineer-params.js"]) {
+for (const f of [WORKLET_NAME, "soundgineer.js", "soundgineer-params.js", "soundgineer-ui.js", "soundgineer-ui.css"]) {
   const p = path.join(OUT, f);
   const kb = (fs.statSync(p).size / 1024).toFixed(1);
   const imports = /\bimport\s*[({"]/.test(fs.readFileSync(p, "utf8")) && f !== WORKLET_NAME;
