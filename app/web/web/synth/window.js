@@ -80,6 +80,7 @@ export function createSynthWindow(api) {
 
   const status = (t, bad = false) => { const el = win.querySelector("#synth-status"); el.textContent = t ?? ""; el.style.color = bad ? "#f66" : ""; };
   win.querySelector("#synth-close").addEventListener("click", () => set(false));
+  win.querySelector("#synth-frame").addEventListener("load", () => allowNativeScrolling(win.querySelector("#synth-frame")));
   win.querySelector("#synth-frame").addEventListener("load", () => installRightDragPan(win.querySelector("#synth-frame")));
   win.querySelector("#synth-pan")?.addEventListener("click", (e) => {
     panMode = !panMode;
@@ -177,6 +178,20 @@ export function createSynthWindow(api) {
     });
   }
 
+  /**
+   * Let the frame scroll. Their stylesheet hides overflow on html and body, and that is exactly what stopped the
+   * browser's own gestures -- two-finger panning and zooming inside the editor -- from doing anything at all.
+   */
+  function allowNativeScrolling(frame) {
+    try {
+      const doc = frame.contentDocument;
+      if (!doc || doc.__sgrScroll) return;
+      doc.__sgrScroll = true;
+      doc.documentElement.style.setProperty("overflow", "auto", "important");
+      doc.body.style.setProperty("overflow", "auto", "important");
+    } catch { /* the frame is not ready yet */ }
+  }
+
   function syncEditorPreset() {
     try {
       const frame = win.querySelector("#synth-frame");
@@ -242,6 +257,7 @@ export function createSynthWindow(api) {
       // editing) the previous channel's parameters, which is exactly the reported bug.
       if (builtEngine === engine) { fitFrame(); return; }
       installRightDragPan(frame);
+      allowNativeScrolling(frame);
       const kids = w.__mount(engine);
       // the editor's own preset dropdown does not know which preset this engine is on (it is a fresh browser after a
       // remount), so it is set to what we recorded -- display only, no change event, nothing is re-applied
