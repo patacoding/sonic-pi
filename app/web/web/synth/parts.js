@@ -106,6 +106,14 @@ export async function ensurePart(name = DEFAULT_PART) {
   return made;
 }
 
+/** What the music selected with a program change. Separate from the library preset on purpose: running MIDI code must
+ *  not overwrite the patch a player chose in the editor. */
+export function rememberMidiPatch(name, patchName) {
+  const p = parts.get(String(name));
+  if (p) p.midiPatch = patchName;
+  return !!p;
+}
+
 export function rememberPreset(name, presetName, scope = null) {
   const p = parts.get(String(name));
   if (p) { p.presetName = presetName; p.presetScope = scope; }
@@ -218,6 +226,7 @@ export const state = () => ({
     program: p.program ?? null,
     patch: p.patchName ?? "Init",
     preset: p.presetName ?? null,
+    midiPatch: p.midiPatch ?? null,
     // a part making sound with no voices at all is a stuck/orphaned voice: worth seeing, not guessing about
     stuck: (p.engine.voiceCount ?? 0) === 0 && Math.max(p.engine.peakL ?? 0, p.engine.peakR ?? 0) > 0.01,
   }])),

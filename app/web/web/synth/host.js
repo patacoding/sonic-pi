@@ -23,7 +23,7 @@ export async function applyPatch(part, program) {
   if (!patch) { say(`there is no instrument numbered ${program}`, true); return false; }
   for (const [id, v] of Object.entries(patch.params)) made.engine.setParamById(id, v);
   parts.rememberPatch(part, patch.n, patch.name);
-  parts.rememberPreset(part, patch.name);      // the table shows what the music selected too
+  parts.rememberMidiPatch(part, patch.name);   // what the MUSIC asked for, kept apart from the player's library preset
   say(`"${part}" is playing ${patch.n} ${patch.name}`);
   return true;
 }
