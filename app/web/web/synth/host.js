@@ -269,14 +269,35 @@ api.window = createSynthWindow({
 // The app's engine boots on its first Run. Until then our own context keeps the window and its instruments usable;
 // when the engine appears we move onto it, which is what puts the sound into Sonic Pi's chain (with_fx, scope, the
 // Recorder). Polling is cheap and idempotent.
+// Being inside Sonic Pi means: the instruments are on the engine's context AND something reads its input bus. The
+// reader is retried rather than attempted once: it can only start when the engine is actually there, and a single
+// failure used to leave notes sounding into nothing.
+let readerStarted = false;
+async function startReaderUntilItTakes(tries = 10) {
+  for (let i = 0; i < tries && !readerStarted; i++) {
+    const s = globalThis.sonicPi?.session;
+    if (s?.run) {
+      try {
+        await s.run("synth :sound_in_stereo, sustain: 3600, amp: 1", { group: 0 });
+        readerStarted = true;
+        say("reader started — the synth is heard through the engine");
+        return true;
+      } catch (e) { /* the engine is not ready yet; try again */ }
+    }
+    await new Promise((r) => setTimeout(r, 700));
+  }
+  if (!readerStarted) say("could not start the reader yet — use the window's 'start a reader' button", true);
+  return readerStarted;
+}
+
 setInterval(async () => {
   const node = globalThis.sonicPi?.engine?.node?.input;
   if (!node?.context) return;
   if (parts.adoptAppContext(node.context)) {
     say("the synth is now inside the app's engine");
-    // and only now can a reader exist: the engine's bus was not there before
-    try { await globalThis.sonicPi?.session?.run?.("synth :sound_in_stereo, sustain: 3600, amp: 1", { group: 0 }); say("reader started (synth :sound_in_stereo)"); }
-    catch (e) { say(`could not start the reader: ${e?.message ?? e}`, true); }
+    startReaderUntilItTakes();
+  } else if (!readerStarted && parts.state().ownContext === false) {
+    startReaderUntilItTakes(2);                       // already on the engine's context but nothing reading: try again
   }
 }, 2000);
 
