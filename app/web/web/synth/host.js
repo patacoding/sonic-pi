@@ -13,7 +13,7 @@
 // Published as `window.sonicPiSynth`. Nothing here touches the app's DOM, and nothing is persisted.
 import { SynthEngine } from "./vendor/soundgineer.js";
 import * as parts from "./parts.js";
-import { parseSynthDirective, numbers, strings, COMMANDS } from "./directives.js";   // several timbres at once: one instance per named part
+import { patchByProgram, PATCHES, guide } from "./patches.js";   // several timbres at once: one instance per named part
 
 export const SYNTH_ENABLED = true;
 
@@ -140,8 +140,17 @@ function handleMidi(...a) {
   } else if (/note_off|noteoff/i.test(path)) {
     const [, note] = nums; entry.mapped = { command: "off", note };
     if (typeof note === "number") parts.noteOff(part, note);
+  } else if (/program_change|program/i.test(path)) {
+    const [, program] = nums;                             // [channel, program]
+    const patch = patchByProgram(program);
+    entry.mapped = { command: "patch", program, patch: patch?.name ?? null };
+    if (patch) { Promise.resolve(parts.ensurePart(part)).then(() => { for (const [id, v] of Object.entries(patch.params)) parts.setParam(part, id, v); }); }
   } else if (/control|cc/i.test(path)) {
-    entry.mapped = { command: "cc", nums };
+    const [, cc, value] = nums;                           // [channel, cc, value]
+    const PARAM_BY_CC = { 7: "master.volume", 74: "filter1.cutoff", 71: "filter1.resonance", 72: "env1.release", 73: "env1.attack" };
+    const id = PARAM_BY_CC[cc];
+    entry.mapped = { command: "cc", cc, value, param: id ?? null };
+    if (id && typeof value === "number") parts.setParam(part, id, value / 127);
   } else {
     entry.mapped = null;
   }
@@ -176,6 +185,9 @@ const api = {
   trace: () => trace.slice(),
   handleMidi,
   midiTrace: () => midiTrace.slice(),
+  /** What the window shows: how the music addresses this synth, and which number is which instrument. */
+  guide,
+  patches: () => PATCHES.map((p) => ({ ...p })),
 };
 
 // Multi-timbre: the music names the part explicitly, every time (`puts :synth, :bass, :note, 60`), so there is no
