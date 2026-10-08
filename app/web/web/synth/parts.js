@@ -50,6 +50,13 @@ export async function ensurePart(name = DEFAULT_PART) {
 }
 
 export const list = () => [...parts.keys()];
+
+/** Which patch a part is playing, for the window's table and selector. */
+export function rememberPatch(name, program, patchName) {
+  const p = parts.get(String(name));
+  if (p) { p.program = program; p.patchName = patchName; }
+  return !!p;
+}
 export const has = (name) => parts.has(String(name));
 export const engineOf = (name) => parts.get(String(name))?.engine ?? null;
 
@@ -86,6 +93,8 @@ export const state = () => ({
     voices: p.engine.voiceCount ?? 0,
     peak: Math.max(p.engine.peakL ?? 0, p.engine.peakR ?? 0),
     params: p.engine.values?.length ?? null,
+    program: p.program ?? null,
+    patch: p.patchName ?? "Init",
   }])),
   count: parts.size,
 });

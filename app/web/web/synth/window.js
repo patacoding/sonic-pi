@@ -51,7 +51,7 @@ export function createSynthWindow(api) {
   win.innerHTML = `<div id="synth-bar"><h4>Synth</h4><span id="synth-status"></span><span class="spacer"></span>
       <button id="synth-reader">start a reader</button><button id="synth-close">close</button></div>
     <div id="synth-main"><div id="synth-channels"></div>
-      <div id="synth-stage"><h4 id="synth-stage-title">stage</h4><div id="synth-stage-body"></div></div></div>
+      <div id="synth-stage"><div style="display:flex;gap:6px;align-items:center"><h4 id="synth-stage-title">stage</h4><select id="synth-patch"></select></div><div id="synth-stage-body"></div></div></div>
     <h4>how the music addresses it</h4><div id="synth-guide"></div>
     <h4>recent MIDI</h4><div id="synth-midi"></div>`;
   document.body.appendChild(win);
@@ -85,6 +85,10 @@ export function createSynthWindow(api) {
       tr.addEventListener("click", () => { selected = tr.dataset.part; paint(); });
     }
     win.querySelector("#synth-stage-title").textContent = `stage — ${selected}`;
+    const sel = win.querySelector("#synth-patch");
+    const cur = st.parts?.[selected]?.program ?? api.defaultProgram ?? 0;
+    sel.innerHTML = patches.map((p) => `<option value="${p.n}"${p.n === cur ? " selected" : ""}>${p.n} ${p.name}</option>`).join("");
+    sel.onchange = () => api.applyPatch?.(selected, Number(sel.value)).then(() => paint());
     win.querySelector("#synth-stage-body").textContent =
       st.parts?.[selected] ? `voices ${st.parts[selected].voices}, peak ${(st.parts[selected].peak ?? 0).toFixed(3)}, ${st.parts[selected].params ?? "?"} parameters. The knobs, matrix and editors come next (U2).`
                            : "no instrument on this channel yet — it is created by its first program change, note or CC.";

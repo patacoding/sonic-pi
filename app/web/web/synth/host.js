@@ -13,7 +13,7 @@
 // Published as `window.sonicPiSynth`. Nothing here touches the app's DOM, and nothing is persisted.
 import { SynthEngine } from "./vendor/soundgineer.js";
 import * as parts from "./parts.js";
-import { patchByProgram, PATCHES, guide } from "./patches.js";
+import { patchByProgram, PATCHES, guide, DEFAULT_PROGRAM } from "./patches.js";
 import { parseSynthDirective, numbers, strings } from "./directives.js";
 import { createSynthWindow } from "./window.js";   // several timbres at once: one instance per named part
 
@@ -64,6 +64,17 @@ async function boot() {
     }
   })();
   return booting;
+}
+
+/** Apply a patch (by program number) to a part: the same path for a MIDI program change and the window. */
+export async function applyPatch(part, program) {
+  const made = await parts.ensurePart(part);
+  const patch = patchByProgram(program);
+  if (!patch) { say(`there is no instrument numbered ${program} (see the window's list)`, true); return false; }
+  for (const [id, v] of Object.entries(patch.params)) made.engine.setParamById(id, v);
+  parts.rememberPatch(part, patch.n, patch.name);
+  say(`"${part}" is playing ${patch.n} ${patch.name}`);
+  return true;
 }
 
 const trace = [];      // the last few records as they arrived: the instrument for "what does a puts look like here"
@@ -146,7 +157,7 @@ function handleMidi(...a) {
     const [, program] = nums;                             // [channel, program]
     const patch = patchByProgram(program);
     entry.mapped = { command: "patch", program, patch: patch?.name ?? null };
-    if (patch) { Promise.resolve(parts.ensurePart(part)).then(() => { for (const [id, v] of Object.entries(patch.params)) parts.setParam(part, id, v); }); }
+    if (patch) applyPatch(part, program);
   } else if (/control|cc/i.test(path)) {
     const [, cc, value] = nums;                           // [channel, cc, value]
     const PARAM_BY_CC = { 7: "master.volume", 74: "filter1.cutoff", 71: "filter1.resonance", 72: "env1.release", 73: "env1.attack" };
@@ -226,6 +237,7 @@ const api = {
   /** What the window shows: how the music addresses this synth, and which number is which instrument. */
   guide,
   patches: () => PATCHES.map((p) => ({ ...p })),
+  applyPatch,
 };
 
 // Multi-timbre: the music names the part explicitly, every time (`puts :synth, :bass, :note, 60`), so there is no
@@ -246,6 +258,7 @@ globalThis.sonicPiParts = api.parts;
 // the window is ours: a button on the audio page and a popup that covers rather than rearranges (window.js)
 api.window = createSynthWindow({
   state: parts.state, patches: () => PATCHES, guide, midiTrace: () => midiTrace.slice(),
+  applyPatch, defaultProgram: DEFAULT_PROGRAM,
 });
 globalThis.sonicPiSynth = api;
 export { api as synthHost };
