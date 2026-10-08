@@ -27,6 +27,10 @@ const STYLE = `
   #synth-channels tr.clickable { cursor: pointer; }
   #synth-stage { flex: 1 1 auto; min-width: 0; border: 1px solid var(--WindowBorder); border-radius: 8px; padding: 8px;
     display: flex; flex-direction: column; gap: 6px; }
+  /* the mount point must FILL the stage: measured at height 0 before this, which is why the interface was invisible
+     even once it had been built */
+  #synth-sgr-app { flex: 1 1 auto; min-height: 420px; overflow: auto; border-radius: 6px; }
+  #synth-sgr-app > header { display: flex; align-items: center; gap: 10px; }
   #synth-guide { white-space: pre-wrap; font: 11px/1.4 ui-monospace, monospace; opacity: .85; max-height: 7.5em; overflow: auto; }
   #synth-midi { font: 11px/1.4 ui-monospace, monospace; opacity: .7; max-height: 4.5em; overflow: auto; }
 `;
@@ -139,7 +143,7 @@ export function createSynthWindow(api) {
     const w = Math.min(Math.round(vw * 0.92), 1280), h = Math.min(Math.round(vh * 0.86), 800);
     win.style.width = `${w}px`; win.style.height = `${h}px`;
     win.style.left = `${Math.round((vw - w) / 2)}px`; win.style.top = `${Math.round((vh - h) / 2)}px`;
-    if (open) { paint(); timer = setInterval(paint, 500); }
+    if (open) { paint(); mountSoundgineer(); timer = setInterval(paint, 500); }
     else { clearInterval(timer); timer = 0; }
     return true;
   }
