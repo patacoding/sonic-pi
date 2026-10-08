@@ -49,7 +49,6 @@ export function createSynthWindow(api) {
   const win = document.createElement("div");
   win.id = "synth-window"; win.setAttribute("role", "dialog"); win.setAttribute("aria-label", "Synth");
   win.innerHTML = `<div id="synth-bar"><h4>Synth</h4><span id="synth-status"></span><span class="spacer"></span>
-      <button id="synth-enable" data-role="enable">Enable Soundgineer</button>
       <button id="synth-reader">start a reader</button><button id="synth-panic">all notes off</button>
       <button id="synth-close">close</button></div>
     <div id="synth-main"><div id="synth-channels"></div>
@@ -73,14 +72,12 @@ export function createSynthWindow(api) {
     api.panic?.("manual");
     status("all notes off");
   });
-  for (const b of win.querySelectorAll('[data-role="enable"]')) {
-    b.addEventListener("click", async () => {
-      status("starting…");
-      const ok = await api.enable?.();
-      status(ok ? "enabled" : `could not enable: ${api.link?.().reason ?? "unknown"}`, !ok);
-      paint(); mountEditor();
-    });
-  }
+  win.querySelector("#synth-enable-2").addEventListener("click", async () => {
+    status("arming — this runs nothing");
+    const ok = await api.enable?.();
+    status(ok ? "enabled" : `waiting: ${api.link?.().state ?? "unknown"}`, !ok);
+    paint(); mountEditor();
+  });
 
   function paintTable() {
     const st = api.state?.() ?? { parts: {} };
@@ -108,7 +105,6 @@ export function createSynthWindow(api) {
     const on = !!link.enabled;
     gate.style.display = on ? "none" : "flex";
     host.style.display = on ? "block" : "none";
-    win.querySelectorAll('[data-role="enable"]').forEach((b) => { b.textContent = on ? "Disable" : "Enable Soundgineer"; });
   }
 
   function fitFrame() {
