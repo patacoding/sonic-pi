@@ -87,7 +87,11 @@ export function createEditorPool({ host, frameUrl, cap = 2, onStatus }) {
         say("rebuilding the view for " + part + " because its preset changed to " + String(stamp));
         try { ed.frame.remove(); } catch { /* already gone */ }
         entries.delete(part);
-        ed = undefined;
+        // THROTTLE: only destroy here and let the next call (the paint loop runs every 500ms) create the replacement. A
+        // burst of preset changes therefore rebuilds at most one document per tick, which keeps the number of live WebGL
+        // contexts from spiking -- while the previous channel's view stays on screen, so nothing blanks in the meantime.
+        order.splice(order.indexOf(part), 1);
+        return null;
       } else {
         ed.stamp = stamp;
         maybeMount(ed, part);
