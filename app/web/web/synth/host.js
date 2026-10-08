@@ -12,6 +12,7 @@
 //
 // Published as `window.sonicPiSynth`. Nothing here touches the app's DOM, and nothing is persisted.
 import { SynthEngine } from "./vendor/soundgineer.js";
+import * as parts from "./parts.js";   // several timbres at once: one instance per named part
 
 export const SYNTH_ENABLED = true;
 
@@ -86,5 +87,20 @@ const api = {
   params: () => sg?.values ?? null,
 };
 
+// Multi-timbre: the music names the part explicitly, every time (`puts :synth, :bass, :note, 60`), so there is no
+// "current part" to get out of step between live loops (docs/plan/soundgineer-multipart-argument.md §5.5).
+api.parts = {
+  ensure: (name) => parts.ensurePart(name).then(() => true),
+  list: parts.list,
+  has: parts.has,
+  engine: parts.engineOf,
+  noteOn: parts.noteOn,
+  noteOff: parts.noteOff,
+  setParam: parts.setParam,
+  allNotesOff: parts.allNotesOff,
+  free: parts.free,
+  state: parts.state,
+};
+globalThis.sonicPiParts = api.parts;
 globalThis.sonicPiSynth = api;
 export { api as synthHost };
