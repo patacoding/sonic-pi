@@ -11,10 +11,26 @@ export const SYNTH_ENABLED = true;      // the Soundgineer engine, wired in by w
 
 if (GFX_ENABLED) await import("./graphics/gfx-layer.js");
 
+// The music reaches us through the one hook the app already gives our layer (`window.sonicPiGfx.record`), so the
+// `:synth` lines arrive without a single further upstream edit. We wrap it rather than replace it: the graphics
+// side keeps everything it had.
+function forwardRecordsToSynth() {
+  const g = globalThis.sonicPiGfx;
+  if (!g || typeof g.record !== "function" || g.__synthForward) return false;
+  const original = g.record;
+  g.record = function (r, ...rest) {
+    try { globalThis.sonicPiSynth?.handleRecord?.(r); } catch (e) { console.error(`Synth — a record threw: ${e?.message ?? e}`); }
+    return original.call(this, r, ...rest);
+  };
+  g.__synthForward = true;
+  return true;
+}
+
 // ── our synthesiser: an independent engine of its own, connected into the app's input bus ─────────────────
 if (SYNTH_ENABLED) {
   try {
     const { synthHost } = await import("./synth/host.js");   // publishes window.sonicPiSynth
+    console.info(`Synth — records ${forwardRecordsToSynth() ? "are now reaching the synth" : "could not be forwarded (no hook yet)"}`);
     console.info(`Synth — layer loaded (${synthHost.ready ? "running" : "waiting for the engine's first Run"})`);
   } catch (e) {
     console.error(`Synth — the layer could not be loaded: ${e?.stack ?? e}`);

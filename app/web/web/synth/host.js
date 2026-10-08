@@ -12,7 +12,8 @@
 //
 // Published as `window.sonicPiSynth`. Nothing here touches the app's DOM, and nothing is persisted.
 import { SynthEngine } from "./vendor/soundgineer.js";
-import * as parts from "./parts.js";   // several timbres at once: one instance per named part
+import * as parts from "./parts.js";
+import { parseSynthDirective, numbers, strings, COMMANDS } from "./directives.js";   // several timbres at once: one instance per named part
 
 export const SYNTH_ENABLED = true;
 
@@ -63,6 +64,40 @@ async function boot() {
   return booting;
 }
 
+const trace = [];      // the last few records as they arrived: the instrument for "what does a puts look like here"
+
+/**
+ * A record from the app's music. We only read `:synth` lines, and we act on them immediately -- this instrument
+ * does not keep time (see the multipart argument, 5.8).
+ */
+function handleRecord(r) {
+  const text = typeof r === "string" ? r : (r?.text ?? r?.output ?? r?.message ?? "");
+  const d = parseSynthDirective(text);
+  if (!d) return false;
+  const entry = { at: Date.now(), clock: globalThis.sonicPi?.session?.clockNow?.() ?? null,
+                  fieldTime: typeof r === "object" && r ? (r.time ?? null) : null,
+                  kind: typeof r === "object" && r ? (r.kind ?? null) : null, text: String(text).slice(0, 80),
+                  part: d.part, command: d.command, args: numbers(d.args), strings: strings(d.args), error: d.error ?? null };
+  trace.push(entry); if (trace.length > 40) trace.shift();
+  if (d.error) { say(`the music asked for something I do not understand: ${d.error}`, true); return false; }
+  const n = numbers(d.args);
+  switch (d.command) {
+    case "note": parts.noteOn(d.part, n[0], n[1] ?? 1); break;
+    case "off": parts.noteOff(d.part, n[0]); break;
+    case "alloff": case "panic": parts.allNotesOff(n.length ? d.part : null); break;
+    case "param": { const id = strings(d.args)[0]; if (id == null || n[0] == null) return false;
+                    parts.setParam(d.part, id, n[n.length - 1]); break; }
+    case "mod": { const e = parts.engineOf(d.part); const src = strings(d.args)[0], dst = strings(d.args)[1];
+                  if (e && src && dst) e.addModRoute?.(src, dst, n[n.length - 1] ?? 0.25); break; }
+    case "fx": { const e = parts.engineOf(d.part); if (e) e.setFxOrder?.(n); break; }
+    case "gate": break;                       // reserved: not implemented, and it says so below rather than silently
+    case "free": parts.free(d.part); break;
+    default: break;
+  }
+  if (d.command === "gate") say("`:synth, …, :gate` is not implemented yet", true);
+  return true;
+}
+
 const api = {
   get ready() { return !!sg; },
   get error() { return lastError; },
@@ -85,6 +120,8 @@ const api = {
   /** By Soundgineer's own stable id (plan: native ids, so there is no mapping table of ours). */
   setParam: (id, value) => sg?.setParamById(id, value),
   params: () => sg?.values ?? null,
+  handleRecord,
+  trace: () => trace.slice(),
 };
 
 // Multi-timbre: the music names the part explicitly, every time (`puts :synth, :bass, :note, 60`), so there is no
