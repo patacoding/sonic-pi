@@ -264,9 +264,15 @@ api.window = createSynthWindow({
 // The app's engine boots on its first Run. Until then our own context keeps the window and its instruments usable;
 // when the engine appears we move onto it, which is what puts the sound into Sonic Pi's chain (with_fx, scope, the
 // Recorder). Polling is cheap and idempotent.
-setInterval(() => {
+setInterval(async () => {
   const node = globalThis.sonicPi?.engine?.node?.input;
-  if (node?.context && parts.adoptAppContext(node.context)) say("the synth is now inside the app's engine");
+  if (!node?.context) return;
+  if (parts.adoptAppContext(node.context)) {
+    say("the synth is now inside the app's engine");
+    // and only now can a reader exist: the engine's bus was not there before
+    try { await globalThis.sonicPi?.session?.run?.("synth :sound_in_stereo, sustain: 3600, amp: 1", { group: 0 }); say("reader started (synth :sound_in_stereo)"); }
+    catch (e) { say(`could not start the reader: ${e?.message ?? e}`, true); }
+  }
 }, 2000);
 
 globalThis.sonicPiSynth = api;

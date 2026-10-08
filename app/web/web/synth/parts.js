@@ -37,10 +37,17 @@ let appCtx = null;
 export function adoptAppContext(ctx) {                 // called when the app's engine finally appears
   if (!ctx || ctx === appCtx) return false;
   appCtx = ctx;
-  for (const n of [...parts.keys()]) free(n);           // parts are bound to a context; rebuild them on the new one
-  say("the app's engine is up — rebuilding the instruments on its context");
+  inputNode = globalThis.sonicPi?.engine?.node?.input ?? inputNode;
+  for (const [, p] of parts) {                          // move each instrument from our speakers onto the engine's bus
+    try { p.node.disconnect(); } catch {}
+    if (inputNode) { p.node.connect(inputNode); }
+  }
+  try { ctx.resume?.(); } catch {}
+  free("__never__");                                     // no-op guard, keeps the shape obvious
+  say("the app's engine is up — the instruments now play into its input bus");
   return true;
 }
+export const outState = () => (inputNode ? "engine bus" : ownCtx ? "speakers (our own context)" : "nowhere");
 export async function contextNow() {
   try { return (await waitForEngine(300)).context; } catch { /* no app engine yet */ }
   if (!ownCtx) { ownCtx = new AudioContext({ latencyHint: "interactive" }); say("using our own AudioContext until the app's engine is up (the UI works now; sound waits for Run)"); }
@@ -58,7 +65,9 @@ export async function ensurePart(name = DEFAULT_PART) {
   await engine.start({ ctx, connectToDestination: false });   // we route; every part goes into the engine's bus
   const node = engine.audioNode;
   if (!node) throw new Error(`part "${key}" got no node`);
-  if (inputNode) node.connect(inputNode);      // straight into the engine's bus; nothing to connect to before Run
+  if (inputNode) { node.connect(inputNode); }                    // the engine's bus: fx, scope, Recorder
+  else if (ownCtx === useCtx) { node.connect(useCtx.destination); }   // no engine yet: be audible, or the keyboard is silent
+
   engine.primeTables();
   const made = { engine, node, started: performance.now() };
   parts.set(key, made);

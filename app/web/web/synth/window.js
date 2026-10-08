@@ -142,7 +142,7 @@ export function createSynthWindow(api) {
     win.querySelector("#synth-guide").textContent = api.guide?.() ?? "";
     win.querySelector("#synth-midi").textContent = (api.midiTrace?.() ?? []).slice(-6).map((e) => `${e.path} ${JSON.stringify(e.args)}${e.mapped ? " → " + JSON.stringify(e.mapped) : ""}`).join("\n");
     const selPart = st.parts?.[selected];
-    statusEl().textContent = `${names.length} instrument(s) · ${selected} peak ${(selPart?.peak ?? 0).toFixed(3)} · reader ${readerTried ? "started" : "not started"}`;
+    statusEl().textContent = `${names.length} instrument(s) · ${selected} peak ${(selPart?.peak ?? 0).toFixed(3)} · out: ${api.outState?.() ?? "?"}`;
   }
 
   let timer = 0;
