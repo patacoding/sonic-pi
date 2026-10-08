@@ -90,21 +90,7 @@ class SynthProcessor extends AudioWorkletProcessor {
     this.port.postMessage({ type: 'ready' })
   }
 
-  // SP-EXT(begin): a note may ask to take effect a number of FRAMES FROM NOW (relative -- no absolute clock has to
-  // agree between the main thread and here). Without inFrames the behaviour is exactly as before.
-  private pending: { msg: ToWorklet; at: number }[] = []
-  private frames = 0
-  // SP-EXT(end)
   private handleMessage(msg: ToWorklet): void {
-    // SP-EXT(begin)
-    const inFrames = (msg as { inFrames?: number }).inFrames
-    if (inFrames != null) {
-      if (this.pending.length > 4096) this.pending.shift()
-      this.pending.push({ msg, at: this.frames + Math.max(0, Math.round(inFrames)) })
-      this.pending.sort((a, b) => a.at - b.at)
-      return
-    }
-    // SP-EXT(end)
     switch (msg.type) {
       case 'param':
         this.base[msg.index] = msg.value
@@ -314,12 +300,6 @@ class SynthProcessor extends AudioWorkletProcessor {
   }
 
   override process(_inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
-    // SP-EXT(begin): advance our own frame count and fire whatever is due (the render quantum is the block length)
-    this.frames += outputs[0]?.[0]?.length ?? 128
-    while (this.pending.length && this.pending[0].at <= this.frames) {
-      this.handleMessage(this.pending.shift()!.msg)
-    }
-    // SP-EXT(end)
     const out = outputs[0]
     const l = out[0]
     const r = out.length > 1 ? out[1] : out[0]

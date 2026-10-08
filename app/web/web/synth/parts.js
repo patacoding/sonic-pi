@@ -53,10 +53,10 @@ export const list = () => [...parts.keys()];
 export const has = (name) => parts.has(String(name));
 export const engineOf = (name) => parts.get(String(name))?.engine ?? null;
 
-// atFrame (optional): the engine-clock instant the note belongs to, as a worklet frame number. Omitted, it plays
-// now -- which is what the UI wants and what the music does not (the music has a time).
-export async function noteOn(name, note, velocity = 1, atFrame) { (await ensurePart(name)).engine.noteOn(note, velocity, atFrame); }
-export function noteOff(name, note, atFrame) { parts.get(String(name))?.engine.noteOff(note, atFrame); }
+// Sounding a note is immediate, always: this is an instrument, and WHEN a performance signal is sent is Sonic Pi's
+// business (its own scheduler), not ours. See docs/plan/soundgineer-multipart-argument.md 5.8.
+export async function noteOn(name, note, velocity = 1) { (await ensurePart(name)).engine.noteOn(note, velocity); }
+export function noteOff(name, note) { parts.get(String(name))?.engine.noteOff(note); }
 export function setParam(name, id, value) { parts.get(String(name))?.engine.setParamById(id, value); }
 export function allNotesOff(name) {
   if (name == null) { for (const p of parts.values()) p.engine.allNotesOff?.(); }

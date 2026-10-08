@@ -1379,19 +1379,7 @@
       this.port.onmessage = (e) => this.handleMessage(e.data);
       this.port.postMessage({ type: "ready" });
     }
-    // SP-EXT(begin): a note may ask to take effect a number of FRAMES FROM NOW (relative -- no absolute clock has to
-    // agree between the main thread and here). Without inFrames the behaviour is exactly as before.
-    pending = [];
-    frames = 0;
-    // SP-EXT(end)
     handleMessage(msg) {
-      const inFrames = msg.inFrames;
-      if (inFrames != null) {
-        if (this.pending.length > 4096) this.pending.shift();
-        this.pending.push({ msg, at: this.frames + Math.max(0, Math.round(inFrames)) });
-        this.pending.sort((a, b) => a.at - b.at);
-        return;
-      }
       switch (msg.type) {
         case "param":
           this.base[msg.index] = msg.value;
@@ -1590,10 +1578,6 @@
       }
     }
     process(_inputs, outputs) {
-      this.frames += outputs[0]?.[0]?.length ?? 128;
-      while (this.pending.length && this.pending[0].at <= this.frames) {
-        this.handleMessage(this.pending.shift().msg);
-      }
       const out = outputs[0];
       const l = out[0];
       const r = out.length > 1 ? out[1] : out[0];

@@ -692,15 +692,14 @@ var SynthEngine = class {
     this.post({ type: "fxOrder", order: this.fxOrder });
   }
   // ------------------------------------------------------------ performance
-  // SP-EXT: an optional delay in frames (PATCHES.md); omitted, this behaves exactly as before.
-  noteOn(note, velocity = 1, inFrames) {
+  noteOn(note, velocity = 1) {
     this.heldNotes.add(note);
-    this.post({ type: "noteOn", note, velocity, ...inFrames != null ? { inFrames } : {} });
+    this.post({ type: "noteOn", note, velocity });
     this.noteListeners.forEach((fn) => fn(note, true));
   }
-  noteOff(note, inFrames) {
+  noteOff(note) {
     this.heldNotes.delete(note);
-    this.post({ type: "noteOff", note, ...inFrames != null ? { inFrames } : {} });
+    this.post({ type: "noteOff", note });
     this.noteListeners.forEach((fn) => fn(note, false));
   }
   onNote(fn) {

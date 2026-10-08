@@ -246,16 +246,15 @@ export class SynthEngine {
 
   // ------------------------------------------------------------ performance
 
-  // SP-EXT: an optional delay in frames (PATCHES.md); omitted, this behaves exactly as before.
-  noteOn(note: number, velocity = 1, inFrames?: number): void {
+  noteOn(note: number, velocity = 1): void {
     this.heldNotes.add(note)
-    this.post({ type: 'noteOn', note, velocity, ...(inFrames != null ? { inFrames } : {}) })
+    this.post({ type: 'noteOn', note, velocity })
     this.noteListeners.forEach(fn => fn(note, true))
   }
 
-  noteOff(note: number, inFrames?: number): void {
+  noteOff(note: number): void {
     this.heldNotes.delete(note)
-    this.post({ type: 'noteOff', note, ...(inFrames != null ? { inFrames } : {}) })
+    this.post({ type: 'noteOff', note })
     this.noteListeners.forEach(fn => fn(note, false))
   }
 

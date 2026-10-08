@@ -54,10 +54,8 @@ export const DEFAULT_FX_ORDER: number[] = FX_IDS.map((_, i) => i)
 // -------------------------------------------------- main thread -> worklet
 export type ToWorklet =
   | { type: 'param'; index: number; value: number } // normalized 0..1
-  | { type: 'noteOn'; note: number; velocity: number } // SP-EXT: frames from now at which this note should take effect (optional; without it, immediately)
-  & { inFrames?: number }
-  | { type: 'noteOff'; note: number } // SP-EXT: frames from now at which this note should take effect (optional; without it, immediately)
-  & { inFrames?: number }
+  | { type: 'noteOn'; note: number; velocity: number }
+  | { type: 'noteOff'; note: number }
   | { type: 'sustain'; down: boolean }
   | { type: 'pitchBend'; value: number }   // -1..1
   | { type: 'modWheel'; value: number }    // 0..1
