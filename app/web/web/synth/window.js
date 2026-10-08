@@ -39,7 +39,7 @@ export function createSynthWindow(api) {
   if (!document.getElementById("synth-style")) {
     const s = document.createElement("style"); s.id = "synth-style"; s.textContent = STYLE; document.head.appendChild(s);
   }
-  let selected = "main", open = false, lastBuilt = null;
+  let selected = "main", open = false, lastBuilt = null, mountError = null, mounting = false;
 
   const btn = document.createElement("button");
   btn.id = "synth-btn"; btn.type = "button"; btn.textContent = "Synth"; btn.title = "the synth (Ctrl/Cmd+Alt+N)";
@@ -91,7 +91,7 @@ export function createSynthWindow(api) {
     win.querySelector("#synth-channels").innerHTML =
       `<table><thead><tr><th>ch</th><th>part</th><th>midi prog</th><th>voi</th><th>peak</th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
     for (const tr of win.querySelectorAll("#synth-channels tr.clickable")) {
-      tr.addEventListener("click", () => { selected = tr.dataset.part; lastBuilt = null; paint(); mountEditor(); });
+      tr.addEventListener("click", () => { selected = tr.dataset.part; lastBuilt = null; mountError = null; paint(); });
     }
   }
   function paint() {
@@ -100,11 +100,12 @@ export function createSynthWindow(api) {
     win.querySelector("#synth-midi").textContent = (api.midiTrace?.() ?? []).slice(-6)
       .map((e) => `${e.path} ch${e.channel} ${JSON.stringify(e.mapped)}`).join("\n");
     const link = api.link?.() ?? { state: "?" };
-    status(`link: ${link.state}${link.reason ? ` (${link.reason})` : ""} · ${link.instruments?.length ?? 0} instr · out: ${link.out}`);
+    status(`link: ${link.state}${link.reason ? ` (${link.reason})` : ""} · ${link.instruments?.length ?? 0} instr · out: ${link.out}${mountError ? ` · editor: ${mountError}` : ""}`, !!mountError);
     const gate = win.querySelector("#synth-gate"), host = win.querySelector("#synth-sgr-host");
     const on = !!link.enabled;
     gate.style.display = on ? "none" : "flex";
     host.style.display = on ? "block" : "none";
+    if (on && open && !mounting && lastBuilt !== selected) { mounting = true; mountEditor().finally(() => { mounting = false; }); }
   }
 
   function fitFrame() {
@@ -129,17 +130,17 @@ export function createSynthWindow(api) {
       const w = frame.contentWindow;
       if (!engine || !w?.__mount) {
         if (++mountTries < 25) setTimeout(mountEditor, 400);            // their module and the engine both take a moment
-        else status(`the editor did not come up (engine ${!!engine}, frame ${!!w?.__mount})`, true);
+        else mountError = `did not come up (engine ${!!engine}, frame ${!!w?.__mount})`;
         return;
       }
-      mountTries = 0;
+      mountTries = 0; mountError = null;
       if (lastBuilt === selected) { fitFrame(); return; }
       const kids = w.__mount(engine);
       lastBuilt = selected;
       fitFrame();
       status(`${selected}: editor built (${kids} sections) · out: ${api.link?.().out}`);
     } catch (e) {
-      status(`the editor could not be built: ${e?.message ?? e}`, true);
+      mountError = `could not be built: ${e?.message ?? e}`;
       console.error("Synth — mounting the editor failed", e);
     }
   }
