@@ -83,6 +83,41 @@ export function disable() {
   say("Soundgineer disabled — the instruments are released");
   return true;
 }
+/**
+ * Stop must reach us too. Our instruments are not nodes in Sonic Pi's tree, so when the app's Stop kills the music --
+ * a loop interrupted between note_on and note_off -- their notes hang and the synth keeps playing by itself. That is
+ * the leak: we are outside the thing being stopped, so we have to listen for it.
+ */
+export function panic(reason = "stop") {
+  const names = parts.list();
+  for (const n of names) parts.allNotesOff(n);
+  // The app's Stop also kills the reader (it is one of its own synths), so claiming "ready" afterwards would be a lie
+  // and the player would hear nothing with no explanation. Notes cleared, reader forgotten: press the button again.
+  readerStarted = false;
+  if (names.length) say(`${reason} — all notes off on ${names.join(", ")}; the reader was stopped too, start it again`);
+  return names.length;
+}
+
+function watchForStop() {
+  const stop = globalThis.sonicPi?.session?.stop;
+  if (typeof stop === "function" && !stop.__sgrWrapped) {
+    const wrapped = function (...a) { panic("stop"); return stop.apply(this, a); };
+    wrapped.__sgrWrapped = true;
+    globalThis.sonicPi.session.stop = wrapped;
+    say("listening for the app's Stop");
+  }
+  const b = document.getElementById("btn-stop");
+  if (b && !b.__sgrWrapped) { b.__sgrWrapped = true; b.addEventListener("click", () => panic("stop")); say("listening to the Stop button"); }
+}
+setTimeout(watchForStop, 1500);
+setInterval(watchForStop, 5000);          // the session is rebuilt on some runs; keep watching the current one
+
+/** The only way a reader is started: a second one would read the same bus twice. */
+export async function startReaderOnce() {
+  if (readerStarted) { say("a reader is already running"); return true; }
+  return startReader();
+}
+
 const linkState = () => ({ state: linkError ? "error" : !enabled ? "off" : !readerStarted ? "starting (no reader yet)" : "ready",
   reason: linkError, enabled, reader: readerStarted, out: parts.outState(), instruments: parts.list(), cap: parts.capOf() });
 
@@ -91,7 +126,7 @@ const api = {
   get error() { return linkError; },
   state: () => ({ ...parts.state(), enabled, reader: readerStarted, link: linkState().state }),
   link: linkState,
-  enable, disable, enabled: () => enabled,
+  enable, disable, enabled: () => enabled, panic, startReader: startReaderOnce,
   engineOf: parts.engineOf,
   ensurePart: (n) => parts.ensurePart(n).then(() => true),
   noteOn: (part, note, velocity = 1) => parts.noteOn(part ?? "main", note, velocity),
@@ -114,10 +149,16 @@ const api = {
 
 api.window = createSynthWindow({
   state: parts.state, patches: () => PATCHES, guide, midiTrace: () => midiTrace.slice(),
-  applyPatch, defaultProgram: DEFAULT_PROGRAM, link: linkState, enable, disable,
+  applyPatch, defaultProgram: DEFAULT_PROGRAM, link: linkState, enable, disable, panic, startReader: startReaderOnce,
   enabled: () => enabled,          // the window gates its editor on this; forgetting it made the editor never mount
   engineOf: parts.engineOf, ensurePart: (n) => parts.ensurePart(n).then(() => true),
 });
 
 globalThis.sonicPiSynth = api;
+// the instruments, for the window's neighbours and for the probes (the rewrite dropped this and broke both)
+globalThis.sonicPiParts = {
+  list: parts.list, has: parts.has, engineOf: parts.engineOf, ensure: parts.ensurePart, state: parts.state,
+  noteOn: parts.noteOn, noteOff: parts.noteOff, setParam: parts.setParam, allNotesOff: parts.allNotesOff,
+  free: parts.free, outState: parts.outState, cap: parts.capOf, attachToEngine: parts.attachToEngine, detach: parts.detach,
+};
 export { api as synthHost };

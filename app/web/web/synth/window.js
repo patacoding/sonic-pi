@@ -50,7 +50,7 @@ export function createSynthWindow(api) {
   win.id = "synth-window"; win.setAttribute("role", "dialog"); win.setAttribute("aria-label", "Synth");
   win.innerHTML = `<div id="synth-bar"><h4>Synth</h4><span id="synth-status"></span><span class="spacer"></span>
       <button id="synth-enable" data-role="enable">Enable Soundgineer</button>
-      <button id="synth-reader">start a reader</button>
+      <button id="synth-reader">start a reader</button><button id="synth-panic">all notes off</button>
       <button id="synth-close">close</button></div>
     <div id="synth-main"><div id="synth-channels"></div>
       <div id="synth-stage">
@@ -66,8 +66,12 @@ export function createSynthWindow(api) {
   const status = (t, bad = false) => { const el = win.querySelector("#synth-status"); el.textContent = t ?? ""; el.style.color = bad ? "#f66" : ""; };
   win.querySelector("#synth-close").addEventListener("click", () => set(false));
   win.querySelector("#synth-reader").addEventListener("click", async () => {
-    try { await globalThis.sonicPi?.session?.run?.("synth :sound_in_stereo, sustain: 3600, amp: 1", { group: 0 }); status("reader started"); }
-    catch (e) { status(`could not start the reader: ${e?.message ?? e}`, true); }
+    const ok = await api.startReader?.();
+    status(ok ? "reader running" : "the reader did not start", !ok);
+  });
+  win.querySelector("#synth-panic").addEventListener("click", () => {
+    api.panic?.("manual");
+    status("all notes off");
   });
   for (const b of win.querySelectorAll('[data-role="enable"]')) {
     b.addEventListener("click", async () => {
