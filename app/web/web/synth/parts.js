@@ -36,17 +36,22 @@ export const usingOwnContext = () => !!ownCtx && !appCtx;
 let appCtx = null;
 export function adoptAppContext(ctx) {                 // called when the app's engine finally appears
   if (!ctx || ctx === appCtx) return false;
+  // A node belongs to the context that made it: its output cannot be connected to a node of another context (that is
+  // the "different audio context" error). So the instruments are REBUILT on the engine's context, not rewired -- and
+  // the generation counter tells the window to hand the editor the new engines.
+  const prior = [...parts.entries()].map(([n, p]) => [n, p.program, p.patchName]);
+  for (const n of [...parts.keys()]) free(n);
   appCtx = ctx;
-  inputNode = globalThis.sonicPi?.engine?.node?.input ?? inputNode;
-  for (const [, p] of parts) {                          // move each instrument from our speakers onto the engine's bus
-    try { p.node.disconnect(); } catch {}
-    if (inputNode) { p.node.connect(inputNode); }
-  }
+  inputNode = globalThis.sonicPi?.engine?.node?.input ?? null;
   try { ctx.resume?.(); } catch {}
-  free("__never__");                                     // no-op guard, keeps the shape obvious
-  say("the app's engine is up — the instruments now play into its input bus");
+  gen++;
+  say(`the app's engine is up — instruments rebuilt on its context (generation ${generation})`);
+  globalThis.__sgrRebuild = prior;                      // the window re-applies the same programs after remounting
   return true;
 }
+export const generation = () => gen;
+let gen = 0;
+function bump() { gen++; }
 export const outState = () => (inputNode ? "engine bus" : ownCtx ? "speakers (our own context)" : "nowhere");
 export async function contextNow() {
   try { return (await waitForEngine(300)).context; } catch { /* no app engine yet */ }
@@ -65,11 +70,12 @@ export async function ensurePart(name = DEFAULT_PART) {
   await engine.start({ ctx, connectToDestination: false });   // we route; every part goes into the engine's bus
   const node = engine.audioNode;
   if (!node) throw new Error(`part "${key}" got no node`);
-  if (inputNode) { node.connect(inputNode); }                    // the engine's bus: fx, scope, Recorder
-  else if (ownCtx === useCtx) { node.connect(useCtx.destination); }   // no engine yet: be audible, or the keyboard is silent
+  if (inputNode && inputNode.context === useCtx) { node.connect(inputNode); }        // engine's bus: fx, scope, Recorder
+  else { node.connect(useCtx.destination); }                                          // no engine yet: audible through the speakers
 
   engine.primeTables();
-  const made = { engine, node, started: performance.now() };
+  const made = { engine, node, started: performance.now(), program: null, patchName: "Init" };
+  bump();
   parts.set(key, made);
   say(`part "${key}" is up (${parts.size} part(s), cap ${cap})`);
   return made;

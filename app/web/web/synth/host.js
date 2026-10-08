@@ -254,6 +254,11 @@ api.parts = {
   allNotesOff: parts.allNotesOff,
   free: parts.free,
   state: parts.state,
+  // exposed so the window and the probes can see where the sound goes and when the engines were rebuilt
+  generation: parts.generation,
+  outState: parts.outState,
+  ownContext: parts.usingOwnContext,
+  adoptAppContext: parts.adoptAppContext,
 };
 globalThis.sonicPiParts = api.parts;
 // the window is ours: a button on the audio page and a popup that covers rather than rearranges (window.js)

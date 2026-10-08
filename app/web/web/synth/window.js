@@ -44,6 +44,7 @@ export function createSynthWindow(api) {
   let selected = "main";
   let open = false;
   let mounting = false;
+  let lastGen = -1;
 
   const btn = document.createElement("button");
   btn.id = "synth-btn"; btn.type = "button"; btn.textContent = "Synth"; btn.title = "the synth (Ctrl/Cmd+Alt+N)";
