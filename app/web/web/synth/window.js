@@ -20,7 +20,7 @@ const STYLE = `
     background: color-mix(in srgb, var(--WindowBackground) 92%, transparent); border: 1px solid var(--WindowBorder);
     border-radius: 6px; padding: 3px 8px; }
   #synth-main { flex: 1 1 auto; min-height: 0; display: flex; gap: 8px; }
-  #synth-channels { flex: 0 0 250px; overflow: auto; border: 1px solid var(--WindowBorder); border-radius: 8px; }
+  #synth-channels { flex: 0 0 190px; overflow: auto; border: 1px solid var(--WindowBorder); border-radius: 8px; }
   #synth-channels table { width: 100%; border-collapse: collapse; font: 11px/1.5 ui-monospace, monospace; }
   #synth-channels th, #synth-channels td { text-align: left; padding: 2px 5px; border-bottom: 1px solid color-mix(in srgb, var(--WindowBorder) 50%, transparent); }
   #synth-channels tr.on { background: color-mix(in srgb, #5a8 25%, transparent); }
@@ -29,7 +29,7 @@ const STYLE = `
     display: flex; flex-direction: column; gap: 6px; }
   /* the mount point must FILL the stage: measured at height 0 before this, which is why the interface was invisible
      even once it had been built */
-  #synth-sgr-host { flex: 1 1 auto; min-height: 420px; width: 100%; border-radius: 6px; overflow: hidden; }
+  #synth-sgr-host { flex: 1 1 auto; min-height: 120px; width: 100%; border-radius: 6px; overflow: hidden; }
   #synth-guide { white-space: pre-wrap; font: 11px/1.4 ui-monospace, monospace; opacity: .85; max-height: 7.5em; overflow: auto; }
   #synth-midi { font: 11px/1.4 ui-monospace, monospace; opacity: .7; max-height: 4.5em; overflow: auto; }
 `;
@@ -90,13 +90,28 @@ export function createSynthWindow(api) {
       shadow.innerHTML = "";
       const style = document.createElement("style");
       style.textContent = await theirCss();
-      const mount = document.createElement("div");
-      mount.style.cssText = "width:100%;height:100%;display:flex;flex-direction:column;";
+      // Their editor is laid out for a page about this wide; give it exactly that and scale the whole thing down to
+      // the room we have, so its own layout is what its authors designed instead of a squeezed version of it.
+      const DW = 1280, DH = 760;
+      const box = document.createElement("div");
+      box.style.cssText = "position:relative;width:100%;height:100%;overflow:hidden;";
+      const canvas = document.createElement("div");
+      canvas.style.cssText = `position:absolute;left:0;top:0;width:${DW}px;height:${DH}px;transform-origin:top left;display:flex;flex-direction:column;`;
       const build = document.createElement("div");
       build.style.cssText = "flex:1 1 auto;min-height:0;";
-      mount.appendChild(build);
-      shadow.append(style, mount);
+      canvas.appendChild(build);
+      box.appendChild(canvas);
+      shadow.append(style, box);
+      const fit = () => {
+        const r = host.getBoundingClientRect();
+        const k = Math.max(0.2, Math.min((r.width || DW) / DW, (r.height || DH) / DH));
+        canvas.style.transform = `scale(${k})`;
+        canvas.style.left = Math.max(0, (r.width - DW * k) / 2) + "px";
+        canvas.style.top = Math.max(0, (r.height - DH * k) / 2) + "px";
+      };
       api.buildApp?.(engine, build);
+      fit();
+      if (!host.__fitBound) { host.__fitBound = true; addEventListener("resize", fit); }
       host.dataset.built = selected;
       status(`${selected}: editor built`);
     } catch (e) { status(`the editor could not be built: ${e?.message ?? e}`, true); console.error(e); }
