@@ -63,7 +63,6 @@ export function createSynthWindow(api) {
   const win = document.createElement("div");
   win.id = "synth-window"; win.setAttribute("role", "dialog"); win.setAttribute("aria-label", "Synth");
   win.innerHTML = `<div id="synth-bar"><h4>Synth</h4><span id="synth-status"></span><span class="spacer"></span>
-      <button id="synth-zoom-out" title="smaller">−</button><span id="synth-zoom-val">100%</span><button id="synth-zoom-in" title="bigger">+</button><button id="synth-fit" title="fit and re-centre">fit</button>
       <button id="synth-reader">start a reader</button><button id="synth-panic">all notes off</button>
       <button id="synth-close">close</button></div>
     <div id="synth-main"><div id="synth-channels"></div>
@@ -81,11 +80,7 @@ export function createSynthWindow(api) {
 
   const status = (t, bad = false) => { const el = win.querySelector("#synth-status"); el.textContent = t ?? ""; el.style.color = bad ? "#f66" : ""; };
   win.querySelector("#synth-close").addEventListener("click", () => set(false));
-  win.querySelector("#synth-frame").addEventListener("load", () => installRightDragPan(win.querySelector("#synth-frame")));
-  const setZoom = (z) => { zoom = Math.max(0.5, Math.min(2, z)); placeFrame(); };
-  win.querySelector("#synth-zoom-in").addEventListener("click", () => setZoom(zoom * 1.25));
-  win.querySelector("#synth-zoom-out").addEventListener("click", () => setZoom(zoom / 1.25));
-  win.querySelector("#synth-fit").addEventListener("click", () => { zoom = 1; pan = { x: 0, y: 0 }; placeFrame(); });
+  win.querySelector("#synth-frame").addEventListener("load", () => allowNativeScrolling(win.querySelector("#synth-frame")));
   win.querySelector("#synth-pan")?.addEventListener("click", (e) => {
     panMode = !panMode;
     win.querySelector("#synth-sgr-host").dataset.pan = panMode ? "on" : "off";
@@ -182,6 +177,17 @@ export function createSynthWindow(api) {
     });
   }
 
+  /** Let the frame scroll: their CSS hides overflow, which is what blocked native two-finger panning inside it. */
+  function allowNativeScrolling(frame) {
+    try {
+      const doc = frame.contentDocument;
+      if (!doc || doc.__sgrScroll) return;
+      doc.__sgrScroll = true;
+      doc.documentElement.style.setProperty("overflow", "auto", "important");
+      doc.body.style.setProperty("overflow", "auto", "important");
+    } catch { /* the frame is not ready */ }
+  }
+
   function syncEditorPreset() {
     try {
       const frame = win.querySelector("#synth-frame");
@@ -244,7 +250,7 @@ export function createSynthWindow(api) {
       }
       mountTries = 0; mountError = null;
       if (lastBuilt === selected) { fitFrame(); return; }
-      installRightDragPan(frame);
+      allowNativeScrolling(frame);
       const kids = w.__mount(engine);
       // the editor's own preset dropdown does not know which preset this engine is on (it is a fresh browser after a
       // remount), so it is set to what we recorded -- display only, no change event, nothing is re-applied
