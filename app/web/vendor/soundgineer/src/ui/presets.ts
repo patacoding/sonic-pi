@@ -2,6 +2,8 @@
 // export/import.
 
 import { paramDef, valueToNorm } from '../shared/params'
+// SP-EXT: presets are scoped per engine, because a host may run one engine per MIDI channel
+type Scoped = PresetData & { scope?: string }
 import type { SynthEngine, PresetData } from '../audio/engine'
 import { el } from './common'
 
@@ -548,16 +550,30 @@ const FACTORY: Partial<PresetData>[] = [
   }
 ]
 
-function loadUserPresets(): PresetData[] {
+function readAll(): Scoped[] {
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '[]') as PresetData[]
+    return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '[]') as Scoped[]
   } catch {
     return []
   }
 }
 
-function saveUserPresets(list: PresetData[]): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(list))
+// SP-EXT: a host may run one engine per MIDI channel, so a preset belongs to the engine that saved it. Without this,
+// saving "Bass" on channel 2 replaced "Bass" from channel 1 -- presets that appear to vanish.
+function scopeOf(engine: unknown): string {
+  const s = (engine as { __sgrScope?: string })?.__sgrScope
+  return typeof s === "string" && s ? s : "default"
+}
+
+function loadUserPresets(scope?: string): Scoped[] {
+  const all = readAll()
+  return scope == null ? all : all.filter((p) => (p.scope ?? "default") === scope)
+}
+
+function saveUserPresets(list: Scoped[], scope: string): void {
+  // merge, and replace only entries of the same scope and name
+  const keep = readAll().filter((p) => !((p.scope ?? "default") === scope && list.some((n) => n.name === p.name)))
+  localStorage.setItem(STORAGE_KEY, JSON.stringify([...keep, ...list]))
 }
 
 export class PresetBrowser {
@@ -574,9 +590,10 @@ export class PresetBrowser {
     save.addEventListener('click', () => {
       const name = prompt('Preset name?', 'My Patch')
       if (!name) return
-      const list = loadUserPresets().filter(p => p.name !== name)
-      list.push(this.engine.toPreset(name))
-      saveUserPresets(list)
+      const scope = scopeOf(this.engine)
+      const list = loadUserPresets(scope).filter(p => p.name !== name)
+      list.push({ ...this.engine.toPreset(name), scope })
+      saveUserPresets(list, scope)
       this.refresh(`user:${name}`)
     })
 
@@ -603,9 +620,10 @@ export class PresetBrowser {
       try {
         const preset = JSON.parse(await f.text()) as PresetData
         this.engine.loadPreset(preset)
-        const list = loadUserPresets().filter(p => p.name !== preset.name)
-        list.push(preset)
-        saveUserPresets(list)
+        const scope = scopeOf(this.engine)
+        const list = loadUserPresets(scope).filter(p => p.name !== preset.name)
+        list.push({ ...preset, scope })
+        saveUserPresets(list, scope)
         this.refresh(`user:${preset.name}`)
       } catch (err) {
         alert(`Could not load preset: ${err}`)
@@ -628,7 +646,7 @@ export class PresetBrowser {
       fGroup.appendChild(o)
     }
     this.select.appendChild(fGroup)
-    const users = loadUserPresets()
+    const users = loadUserPresets(scopeOf(this.engine))
     if (users.length) {
       const uGroup = el('optgroup') as HTMLOptGroupElement
       uGroup.label = 'User'
@@ -648,7 +666,7 @@ export class PresetBrowser {
     const preset =
       kind === 'factory'
         ? FACTORY.find(p => p.name === name)
-        : loadUserPresets().find(p => p.name === name)
+        : loadUserPresets(scopeOf(this.engine)).find(p => p.name === name)
     if (preset) this.engine.loadPreset(preset)
   }
 }

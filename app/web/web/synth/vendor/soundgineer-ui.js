@@ -541,6 +541,12 @@ var EnvDisplay = class {
     this.canvas = el("canvas");
     this.root.appendChild(this.canvas);
     this.cx = this.canvas.getContext("2d");
+    this.canvas.style.touchAction = "none";
+    this.canvas.style.cursor = "crosshair";
+    this.canvas.addEventListener("pointerdown", this.onDown);
+    this.canvas.addEventListener("pointermove", this.onMove);
+    this.canvas.addEventListener("pointerup", this.onUp);
+    this.canvas.addEventListener("pointercancel", this.onUp);
     new ResizeObserver(() => this.resize()).observe(this.root);
     for (let e = 1; e <= 6; e++) {
       for (const f of ["delay", "attack", "hold", "decay", "sustain", "release", "atk_curve", "dec_curve", "rel_curve"]) {
@@ -555,6 +561,61 @@ var EnvDisplay = class {
   cx;
   w = 0;
   h = 0;
+  // ── SP-EXT: direct editing ─────────────────────────────────────────────────────────────────────────────
+  handles = [];
+  drag = null;
+  setValue(field, value) {
+    const i = paramIndex(`env${this.env}.${field}`);
+    const v = Math.min(1, Math.max(0, valueToNorm(PARAMS[i], value)));
+    this.engine.setParam(i, v);
+    this.draw();
+  }
+  onDown = (e) => {
+    const r = this.canvas.getBoundingClientRect();
+    const px = e.clientX - r.left;
+    const py = e.clientY - r.top;
+    let best = null;
+    let bestD = 14;
+    for (const h of this.handles) {
+      const d = Math.hypot(h.x - px, h.y - py);
+      if (d < bestD) {
+        bestD = d;
+        best = h;
+      }
+    }
+    if (!best) return;
+    this.drag = { field: best.field, kind: best.kind, grabX: px };
+    this.canvas.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  };
+  onMove = (e) => {
+    if (!this.drag) return;
+    const r = this.canvas.getBoundingClientRect();
+    const px = e.clientX - r.left;
+    const py = e.clientY - r.top;
+    if (this.drag.kind === "level") {
+      this.setValue("sustain", Math.min(1, Math.max(0, 1 - (py - 5) / (this.h - 10 || 1))));
+    } else if (this.drag.kind === "curve") {
+      const c = Math.min(1, Math.max(-1, 1 - 2 * ((py - 5) / (this.h - 10 || 1))));
+      const field = this.drag.field;
+      if (field === "attack") this.setValue("atk_curve", c);
+      else if (field === "decay") this.setValue("dec_curve", c);
+      else this.setValue("rel_curve", c);
+    } else {
+      const cur = this.v(this.drag.field);
+      const perPx = (this.v("delay") + this.v("attack") + this.v("hold") + this.v("decay") + this.v("release")) / (this.w - 8 || 1);
+      this.setValue(this.drag.field, Math.max(5e-4, cur + (px - this.drag.grabX) * perPx));
+      this.drag.grabX = px;
+    }
+    e.preventDefault();
+  };
+  onUp = (e) => {
+    this.drag = null;
+    try {
+      this.canvas.releasePointerCapture(e.pointerId);
+    } catch {
+    }
+  };
   setEnv(env) {
     this.env = env;
     this.draw();
@@ -610,6 +671,24 @@ var EnvDisplay = class {
     c.closePath();
     c.fillStyle = "#ff9a3c15";
     c.fill();
+    const susX = X(del + atk + hold + dec + susTime / 2);
+    this.handles = [
+      { field: "delay", kind: "time", x: X(del), y: Y(0) },
+      { field: "attack", kind: "time", x: X(del + atk), y: Y(1) },
+      { field: "hold", kind: "time", x: X(del + atk + hold), y: Y(1) },
+      { field: "decay", kind: "time", x: X(del + atk + hold + dec), y: Y(sus) },
+      { field: "release", kind: "time", x: X(total), y: Y(0) },
+      { field: "sustain", kind: "level", x: susX, y: Y(sus) },
+      { field: "attack", kind: "curve", x: X(del + atk / 2), y: Y(shape(0.5, ac)) },
+      { field: "decay", kind: "curve", x: X(del + atk + hold + dec / 2), y: Y(sus + (1 - sus) * (1 - shape(0.5, -dc))) },
+      { field: "release", kind: "curve", x: X(del + atk + hold + dec + susTime + rel / 2), y: Y(sus * (1 - shape(0.5, -rc))) }
+    ];
+    c.fillStyle = "#ff9a3c";
+    for (const hd of this.handles) {
+      c.beginPath();
+      c.arc(hd.x, hd.y, 3.5, 0, Math.PI * 2);
+      c.fill();
+    }
     const live = this.engine.sourceValues[this.env - 1] ?? 0;
     if (live > 1e-3) {
       c.beginPath();
@@ -2615,15 +2694,24 @@ var FACTORY = [
     mods: [{ source: "env2", dest: "osc1.transpose", depth: 0.35, enabled: true }]
   }
 ];
-function loadUserPresets() {
+function readAll() {
   try {
     return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
   } catch {
     return [];
   }
 }
-function saveUserPresets(list) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+function scopeOf(engine) {
+  const s = engine?.__sgrScope;
+  return typeof s === "string" && s ? s : "default";
+}
+function loadUserPresets(scope) {
+  const all = readAll();
+  return scope == null ? all : all.filter((p2) => (p2.scope ?? "default") === scope);
+}
+function saveUserPresets(list, scope) {
+  const keep = readAll().filter((p2) => !((p2.scope ?? "default") === scope && list.some((n) => n.name === p2.name)));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify([...keep, ...list]));
 }
 var PresetBrowser = class {
   constructor(engine) {
@@ -2636,9 +2724,10 @@ var PresetBrowser = class {
     save.addEventListener("click", () => {
       const name = prompt("Preset name?", "My Patch");
       if (!name) return;
-      const list = loadUserPresets().filter((p2) => p2.name !== name);
-      list.push(this.engine.toPreset(name));
-      saveUserPresets(list);
+      const scope = scopeOf(this.engine);
+      const list = loadUserPresets(scope).filter((p2) => p2.name !== name);
+      list.push({ ...this.engine.toPreset(name), scope });
+      saveUserPresets(list, scope);
       this.refresh(`user:${name}`);
     });
     const exportBtn = el("button", "hdr-btn", "EXPORT");
@@ -2663,9 +2752,10 @@ var PresetBrowser = class {
       try {
         const preset = JSON.parse(await f.text());
         this.engine.loadPreset(preset);
-        const list = loadUserPresets().filter((p2) => p2.name !== preset.name);
-        list.push(preset);
-        saveUserPresets(list);
+        const scope = scopeOf(this.engine);
+        const list = loadUserPresets(scope).filter((p2) => p2.name !== preset.name);
+        list.push({ ...preset, scope });
+        saveUserPresets(list, scope);
         this.refresh(`user:${preset.name}`);
       } catch (err) {
         alert(`Could not load preset: ${err}`);
@@ -2689,7 +2779,7 @@ var PresetBrowser = class {
       fGroup.appendChild(o);
     }
     this.select.appendChild(fGroup);
-    const users = loadUserPresets();
+    const users = loadUserPresets(scopeOf(this.engine));
     if (users.length) {
       const uGroup = el("optgroup");
       uGroup.label = "User";
@@ -2705,7 +2795,7 @@ var PresetBrowser = class {
   load(key) {
     const [kind, ...rest] = key.split(":");
     const name = rest.join(":");
-    const preset = kind === "factory" ? FACTORY.find((p2) => p2.name === name) : loadUserPresets().find((p2) => p2.name === name);
+    const preset = kind === "factory" ? FACTORY.find((p2) => p2.name === name) : loadUserPresets(scopeOf(this.engine)).find((p2) => p2.name === name);
     if (preset) this.engine.loadPreset(preset);
   }
 };

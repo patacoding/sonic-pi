@@ -51,6 +51,9 @@ export async function ensurePart(name = DEFAULT_PART) {
   if (parts.size >= cap) throw new Error(`no room for "${key}": the cap is ${cap}`);
   if (!ctx || !inputNode) await attachToEngine();
   const engine = new SynthEngine();
+  // SP-EXT: tell the editor which channel this engine belongs to, so its saved presets stay its own (the upstream
+  // preset browser assumes one engine per page).
+  engine.__sgrScope = key;
   await engine.start({ ctx, connectToDestination: false });     // we route it, it must not hit the speakers
   const node = engine.audioNode;
   if (!node) throw new Error(`"${key}" got no node`);
