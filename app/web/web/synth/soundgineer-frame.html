@@ -2,23 +2,49 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <!-- Their stylesheet, unscoped and complete, inside a frame: it cannot reach Sonic Pi's page from here, which is a
-       stronger guarantee than prefixing selectors (that broke :root variables, body rules and @media blocks). -->
   <link rel="stylesheet" href="./vendor/soundgineer-ui.css" />
-  <style>html, body { margin: 0; height: 100%; background: transparent; } #app { height: 100%; }</style>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; }
+    /* Their interface is written for a whole page, so it gets a fixed design canvas and is scaled as ONE piece --
+       no inner scrolling, no reflowing their layout. */
+    #stage { position: absolute; transform-origin: top left; }
+    #app { width: 100%; height: 100%; }
+  </style>
 </head>
 <body>
-  <div id="app"></div>
+  <div id="stage"><div id="app"></div></div>
   <script type="module">
     import { buildApp } from "./vendor/soundgineer-ui.js";
+    const DW = 1280, DH = 760;                       // the size their editor is laid out for
+    const stage = document.getElementById("stage");
+    function fit() {
+      // Defensive: a frame measured before layout reports 0, and scale(0) makes the whole interface vanish.
+      const w = innerWidth || document.documentElement.clientWidth || DW;
+      const h = innerHeight || document.documentElement.clientHeight || DH;
+      const k = Math.max(0.25, Math.min(w / DW, h / DH));
+      stage.style.width = DW + "px";
+      stage.style.height = DH + "px";
+      stage.style.transform = `scale(${k})`;
+      stage.style.left = Math.max(0, (w - DW * k) / 2) + "px";
+      stage.style.top = Math.max(0, (h - DH * k) / 2) + "px";
+      return k;
+    }
     // the parent hands us the engine of whichever channel its table has selected
     window.__mount = (engine) => {
       const app = document.getElementById("app");
       app.textContent = "";
       buildApp(engine, app);
+      fit();
       return app.children.length;
     };
-    window.__mounted = () => document.getElementById("app").children.length;
+    window.__scale = () => Number(stage.style.transform.replace(/[^0-9.]/g, "")) || 0;
+    window.__diag = () => ({ inner: [innerWidth, innerHeight], scale: window.__scale(),
+      stage: [stage.style.width, stage.style.height], appKids: document.getElementById("app").children.length,
+      bodyH: document.body.getBoundingClientRect().height });
+    // re-fit for a second after load: the first measurement can happen before the frame is laid out
+    let n = 0; const t = setInterval(() => { fit(); if (++n > 8) clearInterval(t); }, 120);
+    addEventListener("resize", fit);
+    fit();
   </script>
 </body>
 </html>

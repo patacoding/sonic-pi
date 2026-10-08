@@ -55,7 +55,7 @@ export function createSynthWindow(api) {
   win.innerHTML = `<div id="synth-bar"><h4>Synth</h4><span id="synth-status"></span><span class="spacer"></span>
       <button id="synth-reader">start a reader</button><button id="synth-close">close</button></div>
     <div id="synth-main"><div id="synth-channels"></div>
-      <div id="synth-stage"><div style="display:flex;gap:6px;align-items:center"><h4 id="synth-stage-title">stage</h4><select id="synth-patch"></select></div><div id="synth-stage-body">the editor loads here…</div><iframe id="synth-frame" src="./soundgineer-frame.html" title="Soundgineer editor"></iframe></div></div>
+      <div id="synth-stage"><div style="display:flex;gap:6px;align-items:center"><h4 id="synth-stage-title">stage</h4><select id="synth-patch"></select></div><div id="synth-stage-body">the editor loads here…</div><iframe id="synth-frame" src="./synth/soundgineer-frame.html" title="Soundgineer editor"></iframe></div></div>
     <h4>how the music addresses it</h4><div id="synth-guide"></div>
     <h4>recent MIDI</h4><div id="synth-midi"></div>`;
   document.body.appendChild(win);
@@ -79,12 +79,24 @@ export function createSynthWindow(api) {
       const win = frame.contentWindow;
       if (!win?.__mount) { status("the editor frame is still loading — try again in a moment"); return; }
       const kids = win.__mount(engine);
+      win.dispatchEvent(new Event("resize"));      // make the design canvas fit the frame
       frame.dataset.built = selected;
       status(`${selected}: editor built (${kids} sections)`);
     } catch (e) {
       status(`the editor could not be built: ${e?.message ?? e}`, true);
       console.error(e);
     }
+  }
+
+  /** Nothing of ours is heard until something reads the engine's input bus; do it once, automatically. */
+  let readerTried = false;
+  async function ensureReader() {
+    if (readerTried) return;
+    readerTried = true;
+    try {
+      await globalThis.sonicPi?.session?.run?.("synth :sound_in_stereo, sustain: 3600, amp: 1", { group: 0 });
+      console.info("Synth — reader started automatically (synth :sound_in_stereo)");
+    } catch (e) { status(`could not start the reader: ${e?.message ?? e}`, true); }
   }
 
   async function startReader() {
@@ -125,7 +137,8 @@ export function createSynthWindow(api) {
     if (open && built !== selected && !mounting) { mounting = true; mountSoundgineer().finally(() => { mounting = false; }); }
     win.querySelector("#synth-guide").textContent = api.guide?.() ?? "";
     win.querySelector("#synth-midi").textContent = (api.midiTrace?.() ?? []).slice(-6).map((e) => `${e.path} ${JSON.stringify(e.args)}${e.mapped ? " → " + JSON.stringify(e.mapped) : ""}`).join("\n");
-    statusEl().textContent = `${names.length} instrument(s) · cap ${st.cap ?? "?"}`;
+    const selPart = st.parts?.[selected];
+    statusEl().textContent = `${names.length} instrument(s) · ${selected} peak ${(selPart?.peak ?? 0).toFixed(3)} · reader ${readerTried ? "started" : "not started"}`;
   }
 
   let timer = 0;
@@ -139,7 +152,7 @@ export function createSynthWindow(api) {
     const w = Math.min(Math.round(vw * 0.92), 1280), h = Math.min(Math.round(vh * 0.86), 800);
     win.style.width = `${w}px`; win.style.height = `${h}px`;
     win.style.left = `${Math.round((vw - w) / 2)}px`; win.style.top = `${Math.round((vh - h) / 2)}px`;
-    if (open) { paint(); mountSoundgineer(); timer = setInterval(paint, 500); }
+    if (open) { paint(); mountSoundgineer(); ensureReader(); timer = setInterval(paint, 500); }
     else { clearInterval(timer); timer = 0; }
     return true;
   }
