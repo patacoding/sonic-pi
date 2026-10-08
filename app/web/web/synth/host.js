@@ -8,7 +8,7 @@
 //   2. Nothing hangs. Our instruments are not nodes in Sonic Pi's tree, so the app's Stop cannot reach them; we listen
 //      for it and clear every note, and the reader is started exactly once.
 import { patchByProgram, PATCHES, guide, DEFAULT_PROGRAM } from "./patches.js";
-import * as parts from "./parts.js";
+import * as parts from "./store.js";   // the data layer, written from scratch
 import { createSynthWindow } from "./window.js";
 
 const say = (t, bad = false) => (bad ? console.error : console.info)(`Synth — ${t}`);
