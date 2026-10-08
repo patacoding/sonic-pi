@@ -56,7 +56,7 @@ export function createSynthWindow(api) {
   win.innerHTML = `<div id="synth-bar"><h4>Synth</h4><span id="synth-status"></span><span class="spacer"></span>
       <button id="synth-reader">start a reader</button><button id="synth-close">close</button></div>
     <div id="synth-main"><div id="synth-channels"></div>
-      <div id="synth-stage"><div style="display:flex;gap:6px;align-items:center"><h4 id="synth-stage-title">stage</h4><select id="synth-patch"></select></div><div id="synth-stage-body">the editor loads here…</div><div id="synth-sgr-host"><iframe id="synth-frame" title="Soundgineer editor"></iframe></div></div></div>
+      <div id="synth-stage"><div id="synth-stage-body"></div><div id="synth-sgr-host"><iframe id="synth-frame" title="Soundgineer editor"></iframe></div></div></div>
     <h4>how the music addresses it</h4><div id="synth-guide"></div>
     <h4>recent MIDI</h4><div id="synth-midi"></div>`;
   document.body.appendChild(win);
@@ -125,20 +125,14 @@ export function createSynthWindow(api) {
         <td>${p ? p.voices : "—"}</td><td>${p ? (p.peak ?? 0).toFixed(2) : "—"}</td></tr>`);
     }
     win.querySelector("#synth-channels").innerHTML =
-      `<table><thead><tr><th>ch</th><th>part</th><th>patch</th><th>voi</th><th>peak</th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
+      `<table><thead><tr><th>ch</th><th>part</th><th>midi prog</th><th>voi</th><th>peak</th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
     for (const tr of win.querySelectorAll("#synth-channels tr.clickable")) {
       tr.addEventListener("click", () => { selected = tr.dataset.part; paint(); });
     }
-    win.querySelector("#synth-stage-title").textContent = `stage — ${selected}`;
-    const sel = win.querySelector("#synth-patch");
-    const cur = st.parts?.[selected]?.program ?? api.defaultProgram ?? 0;
-    sel.innerHTML = patches.map((p) => `<option value="${p.n}"${p.n === cur ? " selected" : ""}>${p.n} ${p.name}</option>`).join("");
-    sel.onchange = () => api.applyPatch?.(selected, Number(sel.value)).then(() => paint());
-    win.querySelector("#synth-stage-body").textContent =
-      st.parts?.[selected] ? `voices ${st.parts[selected].voices} · peak ${(st.parts[selected].peak ?? 0).toFixed(3)} · patch ${st.parts[selected].patch ?? "—"}`
-                           : "no instrument on this channel yet — it is created by its first program change, note or CC.";
-    const built = document.getElementById("synth-frame")?.dataset.built;
-    if (open && built !== selected && !mounting) { mounting = true; mountSoundgineer().finally(() => { mounting = false; }); }
+    // The stage is the editor and nothing else: their interface already chooses presets, and the channel table
+    // already carries the numbers, so a title, a second patch list and a second reading of voices/peak were all
+    // duplicates of what is beside them.
+    win.querySelector("#synth-stage-body").textContent = st.parts?.[selected] ? "" : "";
     win.querySelector("#synth-guide").textContent = api.guide?.() ?? "";
     win.querySelector("#synth-midi").textContent = (api.midiTrace?.() ?? []).slice(-6).map((e) => `${e.path} ${JSON.stringify(e.args)}${e.mapped ? " → " + JSON.stringify(e.mapped) : ""}`).join("\n");
     const selPart = st.parts?.[selected];
