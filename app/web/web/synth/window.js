@@ -79,6 +79,15 @@ export function createSynthWindow(api) {
       <h4>recent MIDI</h4><div id="synth-midi"></div>
     </details>`;
   document.body.appendChild(win);
+  // A stamp you can SEE, in the title bar: "no change" arguments end when the running build is on screen.
+  try {
+    const bar = win.querySelector("#synth-bar") ?? win.firstElementChild;
+    const stamp = document.createElement("span");
+    stamp.id = "synth-build-stamp";
+    stamp.textContent = " build per-channel-views 2117";
+    stamp.style.cssText = "font:10px/1 ui-monospace,monospace;opacity:.6;margin-left:6px";
+    bar?.appendChild(stamp);
+  } catch { /* cosmetic */ }
   // one document per channel, built once; switching only shows another one (see editors.js). No LRU: with a handful of
   // channels, destroying and rebuilding views is the churn we are trying to eliminate.
   const pool = createEditorPool({

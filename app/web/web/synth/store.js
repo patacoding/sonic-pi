@@ -62,19 +62,26 @@ function patchData(patchName) {
   return patch;
 }
 
+/** Write straight into an engine, by index, bypassing every wrapper. Their setParamById() calls this.setParam(), so
+ *  rendering through the wrapped setter re-entered our own wrapper and hung the page on the first knob turn. */
+function rawWrite(ch, id, value) {
+  const i = PARAMS ? PARAMS.findIndex((p) => p.id === id) : -1;
+  if (i >= 0) { try { ch.rawSet?.(i, value); } catch { /* unknown id on that engine */ } }
+}
+
 /** Render the WHOLE patch into one channel's engine (creation, assignment, restore). Engine <- data, never engine <- engine. */
 function renderAll(channel) {
   if (!channel?.engine) return;
   const patch = patches.get(channel.patchName);
   if (!patch) return;
-  for (const [id, value] of patch.params) { try { channel.rawSetById?.(id, value); } catch { /* unknown id */ } }
+  for (const [id, value] of patch.params) rawWrite(channel, id, value);
 }
 
 /** Render ONE parameter to every channel that renders this patch. Called after the data has changed. */
 function renderParam(patchName, id, value) {
   for (const ch of channels.values()) {
     if (ch.patchName !== patchName || !ch.engine) continue;
-    try { ch.rawSetById?.(id, value); } catch { /* unknown id on that engine */ }
+    rawWrite(ch, id, value);
   }
 }
 
@@ -130,11 +137,6 @@ async function createEngine(ch) {
     const out = ch.rawSet(i, v, ...rest);
     const id = PARAMS?.[i]?.id ?? null;                            // their knobs write by index; the data is keyed by id
     if (id && ch.patchName) { const patch = patches.get(ch.patchName); if (patch) { patch.params.set(id, v); renderParam(ch.patchName, id, v); } }
-    return out;
-  };
-  if (ch.rawSetById) engine.setParamById = (id, v, ...rest) => {
-    const out = ch.rawSetById(id, v, ...rest);
-    if (ch.patchName) { const patch = patches.get(ch.patchName); if (patch) { patch.params.set(id, v); renderParam(ch.patchName, id, v); } }
     return out;
   };
   // their editor reports the preset it loaded via engine.__sgrPreset; adoptFromEditor() picks that up
