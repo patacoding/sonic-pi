@@ -13,7 +13,8 @@ const STYLE = `
     border-radius: 10px; font: 12px/1.45 system-ui, sans-serif; box-shadow: 0 8px 40px rgba(0,0,0,.45); }
   body[data-synth="open"] #synth-window { display: flex; }
   #synth-window h4 { margin: 0; font: 600 12px/1 system-ui, sans-serif; opacity: .8; }
-  #synth-bar { display: flex; align-items: center; gap: 8px; }
+  #synth-bar { display: flex; align-items: center; gap: 8px; cursor: move; user-select: none; }
+  #synth-bar button { cursor: pointer; }
   #synth-bar .spacer { flex: 1 1 auto; }
   #synth-bar button, #synth-reader { font: 11px/1 system-ui, sans-serif; color: var(--WindowForeground); cursor: pointer;
     background: color-mix(in srgb, var(--WindowBackground) 92%, transparent); border: 1px solid var(--WindowBorder);
@@ -44,6 +45,7 @@ export function createSynthWindow(api) {
     const s = document.createElement("style"); s.id = "synth-style"; s.textContent = STYLE; document.head.appendChild(s);
   }
   let selected = "main", open = false, lastBuilt = null, mountError = null, mounting = false;
+  let pos = null;            // where the player put the window, for this session only: never persisted
 
   const btn = document.createElement("button");
   btn.id = "synth-btn"; btn.type = "button"; btn.textContent = "Synth"; btn.title = "the synth (Ctrl/Cmd+Alt+N)";
@@ -117,6 +119,38 @@ export function createSynthWindow(api) {
     if (on && open && !mounting && lastBuilt !== selected) { mounting = true; mountEditor().finally(() => { mounting = false; }); }
   }
 
+  /** Never let the window be dragged somewhere it cannot be grabbed back from. */
+  function clampPos(p) {
+    const w = win.offsetWidth || 600, h = win.offsetHeight || 400;
+    const keepX = Math.min(140, w), keepY = 32;
+    const left = Math.max(keepX - w, Math.min(p.left, innerWidth - keepX));
+    const top = Math.max(0, Math.min(p.top, innerHeight - keepY));
+    return { left: Math.round(left), top: Math.round(top) };
+  }
+
+  function startDrag(bar) {
+    bar.addEventListener("pointerdown", (e) => {
+      if (e.target.closest("button")) return;                  // buttons keep working
+      const r = win.getBoundingClientRect();
+      const dx = e.clientX - r.left, dy = e.clientY - r.top;
+      const move = (ev) => {
+        pos = clampPos({ left: ev.clientX - dx, top: ev.clientY - dy });
+        win.style.left = pos.left + "px"; win.style.top = pos.top + "px";
+      };
+      const up = (ev) => {
+        bar.removeEventListener("pointermove", move);
+        bar.removeEventListener("pointerup", up);
+        bar.removeEventListener("pointercancel", up);
+        try { bar.releasePointerCapture(ev.pointerId) } catch { /* nothing captured */ }
+      };
+      try { bar.setPointerCapture(e.pointerId) } catch { /* a synthetic pointer may refuse; the drag still works */ }
+      bar.addEventListener("pointermove", move);
+      bar.addEventListener("pointerup", up);
+      bar.addEventListener("pointercancel", up);
+      e.preventDefault();
+    });
+  }
+
   function syncEditorPreset() {
     try {
       const frame = win.querySelector("#synth-frame");
@@ -186,7 +220,9 @@ export function createSynthWindow(api) {
     const vw = innerWidth, vh = innerHeight;
     const w = Math.min(Math.round(vw * 0.92), 1280), h = Math.min(Math.round(vh * 0.86), 800);
     win.style.width = `${w}px`; win.style.height = `${h}px`;
-    win.style.left = `${Math.round((vw - w) / 2)}px`; win.style.top = `${Math.round((vh - h) / 2)}px`;
+    // centred first time, wherever the player put it afterwards
+    pos = clampPos(pos ?? { left: Math.round((vw - w) / 2), top: Math.round((vh - h) / 2) });
+    win.style.left = `${pos.left}px`; win.style.top = `${pos.top}px`;
     if (open) { paint(); mountEditor(); timer = setInterval(paint, 500); addEventListener("resize", fitFrame); }
     else { clearInterval(timer); timer = 0; removeEventListener("resize", fitFrame); }
     return true;
@@ -196,6 +232,7 @@ export function createSynthWindow(api) {
     else if ((e.ctrlKey || e.metaKey) && e.altKey && (e.key === "n" || e.key === "N")) { e.preventDefault(); e.stopPropagation(); set(!open); }
   }, true);
 
+  startDrag(win.querySelector("#synth-bar"));
   document.body.dataset.synth = "closed";
-  return { el: win, button: btn, open: () => open, set, selected: () => selected, paint, mountEditor };
+  return { el: win, button: btn, open: () => open, set, selected: () => selected, paint, mountEditor, position: () => (pos ? { ...pos } : null) };
 }
