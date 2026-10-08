@@ -30,7 +30,7 @@ const STYLE = `
   #synth-gate { flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center;
     gap: 8px; padding: 16px; text-align: center; }
   #synth-sgr-host { flex: 1 1 auto; min-height: 0; position: relative; overflow: hidden; display: none; }
-  #synth-frame { position: absolute; left: 0; top: 0; width: 1280px; height: 1060px; border: 0; transform-origin: top left; }
+  #synth-frame { position: absolute; left: 0; top: 0; width: 1280px; height: 1200px; border: 0; transform-origin: top left; }
   #synth-guide { white-space: pre-wrap; font: 11px/1.4 ui-monospace, monospace; opacity: .85; max-height: 7em; overflow: auto; }
   #synth-midi { font: 11px/1.4 ui-monospace, monospace; opacity: .7; max-height: 4em; overflow: auto; }
 `;
@@ -111,10 +111,10 @@ export function createSynthWindow(api) {
   function fitFrame() {
     const frame = win.querySelector("#synth-frame"), host = win.querySelector("#synth-sgr-host");
     const r = host.getBoundingClientRect();
-    const k = Math.max(0.2, Math.min((r.width || 1280) / 1280, (r.height || 1060) / 1060));
+    const k = Math.max(0.2, Math.min((r.width || 1280) / 1280, (r.height || 1200) / 1200));
     frame.style.transform = `scale(${k})`;
     frame.style.left = Math.max(0, (r.width - 1280 * k) / 2) + "px";
-    frame.style.top = Math.max(0, (r.height - 1060 * k) / 2) + "px";
+    frame.style.top = Math.max(0, (r.height - 1200 * k) / 2) + "px";
   }
   let mountTries = 0;
   async function mountEditor() {
