@@ -14,12 +14,12 @@
 // instant the same line's `synth`/`sample` lands on -- measured to 72 samples = 1.50 ms in
 // tools/synth-align-probe. See docs/web-synth-engine.md §7.
 
-import { createSynth } from "./synth.js";
+// SP-CLEANUP: dropped -- ./synth.js was removed with the paused synth layer (df67e7d3e)
 import { createTap } from "./synth-tap.js";
 import { parseSynthDirective, isSynthOrder, SYNTH_SIGIL, SYNTH_SIGIL_VERBOSE, SYNTH_COMMANDS } from "./synth-directive.js";
 import { createSynthEditor } from "./synth-ui.js";
-import { createSynthdefs } from "./synthdefs.js";
-import { createSynthdefPane } from "./synthdef-pane.js";
+// SP-CLEANUP: dropped -- ./synthdefs.js was removed with the paused synth layer (df67e7d3e)
+// SP-CLEANUP: dropped -- ./synthdef-pane.js was removed with the paused synth layer (df67e7d3e)
 
 export { SYNTH_SIGIL, SYNTH_SIGIL_VERBOSE, isSynthOrder, SYNTH_COMMANDS };
 
