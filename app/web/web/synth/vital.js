@@ -72,11 +72,12 @@ export function vitalToPreset(vital, fallbackName = 'Imported Vital') {
   }
 
   // macros: both engines have four, one parameter each, so they map straight across
+  // Vital puts the macro NAMES at the top level (macro1..4, strings) and the VALUES in settings.macro_control_1..4
   for (let m = 1; m <= 4; m++) {
-    const v = s[`macro${m}`];
-    if (typeof v === 'number') put(`macro${m}.value`, v);
+    const value = s[`macro_control_${m}`];
+    if (typeof value === 'number') put(`macro${m}.value`, value);
     const name = vital?.[`macro${m}`];
-    if (typeof name === 'string' && name) report.macros = [...(report.macros ?? []), `${m}=${name}`];
+    if (typeof name === 'string' && name && !/^macro\s*\d+$/i.test(name)) report.macros = [...(report.macros ?? []), `${m}=${name}`];
   }
 
   // oscillator basics that exist in both
