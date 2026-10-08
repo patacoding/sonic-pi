@@ -160,7 +160,15 @@ export function createSynthWindow(api) {
       paint();
     }
   });
-  try { win.querySelector("#synth-help")?.appendChild(vitalBtn); win.appendChild(vitalInput); } catch { /* cosmetic */ }
+  // VISIBLE: the title bar, next to the other window controls -- inside the collapsed help block it could not be seen.
+  try {
+    const bar = win.querySelector("#synth-bar");
+    const close = win.querySelector("#synth-close");
+    if (bar && vitalBtn) bar.insertBefore(vitalBtn, close ?? null);
+    if (bar && !bar.contains(vitalBtn)) bar.appendChild(vitalBtn);
+    win.appendChild(vitalInput);
+    vitalInput.style.display = "none";
+  } catch { /* cosmetic */ }
   // A stamp you can SEE, in the title bar: "no change" arguments end when the running build is on screen.
   try {
     const bar = win.querySelector("#synth-bar") ?? win.firstElementChild;
