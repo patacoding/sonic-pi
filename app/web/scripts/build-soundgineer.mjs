@@ -25,7 +25,10 @@ const workerUrl = {
   setup(b) {
     b.onResolve({ filter: /\?worker&url$/ }, () => ({ path: "worker-url", namespace: "sg-worker" }));
     b.onLoad({ filter: /.*/, namespace: "sg-worker" }, () => ({
-      contents: `export default "./${WORKLET_NAME}";`,
+      // resolve against THIS module's own URL, not the page's: the page lives at /web/code.html but the bundle is
+      // /web/synth/vendor/soundgineer.js, and addModule() resolves a bare relative path against the document
+      // (which is how the first attempt 404'd)
+      contents: `export default new URL("./${WORKLET_NAME}", import.meta.url).href;`,
       loader: "js",
     }));
   },

@@ -1,5 +1,5 @@
 // sg-worker:worker-url
-var worker_url_default = "./soundgineer-worklet.js";
+var worker_url_default = new URL("./soundgineer-worklet.js", import.meta.url).href;
 
 // vendor/soundgineer/src/shared/params.ts
 var FILTER_TYPES = ["LP 12", "LP 24", "HP 12", "HP 24", "BP 12", "BP 24", "Notch", "Comb", "Formant"];

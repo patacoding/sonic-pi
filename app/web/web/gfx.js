@@ -7,8 +7,19 @@
 //                  level 1  the Shadertoy page: documents, passes, channels, the values the music sends
 export const GFX_ENABLED = false;
 export const EDITOR_TAB = true;
+export const SYNTH_ENABLED = true;      // the Soundgineer engine, wired in by web/synth/host.js
 
 if (GFX_ENABLED) await import("./graphics/gfx-layer.js");
+
+// ── our synthesiser: an independent engine of its own, connected into the app's input bus ─────────────────
+if (SYNTH_ENABLED) {
+  try {
+    const { synthHost } = await import("./synth/host.js");   // publishes window.sonicPiSynth
+    console.info(`Synth — layer loaded (${synthHost.ready ? "running" : "waiting for the engine's first Run"})`);
+  } catch (e) {
+    console.error(`Synth — the layer could not be loaded: ${e?.stack ?? e}`);
+  }
+}
 
 if (EDITOR_TAB && !GFX_ENABLED) {
   // ── level 0: the canvas, with its button (preview / fullscreen / hidden) ─────────────────────────────────
