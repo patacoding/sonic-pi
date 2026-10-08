@@ -127,6 +127,19 @@ export function createSynthWindow(api) {
       const judged = mod.assessPreset(preset, mod.knownParamIds());
       if (!judged.ok) { console.warn(`Synth — ${file.name} was not applied: ${judged.note}`); return; }
       engine.loadPreset(preset);
+      // SAVE IT WHERE THE PLAYER CAN SEE IT: the editor's preset dropdown is built from their user library in
+      // localStorage, so a preset that only lives in the engine is invisible and gone on reload. This was the bug: the
+      // import worked but nothing appeared anywhere.
+      try {
+        const KEY = "soundgineer.presets.v1";
+        const list = JSON.parse(localStorage.getItem(KEY) ?? "[]");
+        const kept = Array.isArray(list) ? list.filter((p) => p && p.name !== preset.name) : [];
+        kept.push(preset);
+        localStorage.setItem(KEY, JSON.stringify(kept));
+        console.info(`Synth — saved "${preset.name}" to your preset library (${kept.length} user presets); it is in the preset dropdown of this channel's editor`);
+      } catch (e) {
+        console.warn("Synth — the preset was loaded but could not be saved to your library: " + (e?.message ?? e));
+      }
       engine.__sgrPreset = "user:" + preset.name;
       await api.setPreset?.(selected, preset.name);
       console.info("Synth — " + mod.describeReport(report));
