@@ -49,7 +49,7 @@ export function createSynthWindow(api) {
   if (!document.getElementById("synth-style")) {
     const s = document.createElement("style"); s.id = "synth-style"; s.textContent = STYLE; document.head.appendChild(s);
   }
-  let selected = "main", open = false, builtEngine = null, mountError = null, mounting = false;
+  let selected = "main", open = false, builtEngine = null, builtFor = null, mountError = null, mounting = false;
   let pos = null;            // where the player put the window, for this session only: never persisted
   let zoom = 1;              // 1 = fitted to the stage; larger is allowed and simply clipped
   let pan = { x: 0, y: 0 };
@@ -126,7 +126,7 @@ export function createSynthWindow(api) {
     win.querySelector("#synth-channels").innerHTML =
       `<table><thead><tr><th>ch</th><th>part</th><th>preset</th><th>voi</th><th>peak</th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
     for (const tr of win.querySelectorAll("#synth-channels tr.clickable")) {
-      tr.addEventListener("click", () => { selected = tr.dataset.part; builtEngine = null; mountError = null; paint(); });
+      tr.addEventListener("click", () => { selected = tr.dataset.part; builtEngine = null; builtFor = null; mountError = null; paint(); });
     }
   }
   function paint() {
@@ -143,7 +143,10 @@ export function createSynthWindow(api) {
     const on = !!link.enabled;
     gate.style.display = on ? "none" : "flex";
     host.style.display = on ? "block" : "none";
-    if (on && open && !mounting && builtEngine !== (api.engineOf?.(selected) ?? null)) { mounting = true; mountEditor().finally(() => { mounting = false; }); }
+    // A channel that has no engine yet has engineOf() === null, which matched the never-built state and skipped the
+    // mount for ever: the editor stayed on the previous channel, so a preset chosen for ch4 was written to main.
+    const wanted = api.engineOf?.(selected) ?? null;
+    if (on && open && !mounting && (builtFor !== selected || builtEngine !== wanted)) { mounting = true; mountEditor().finally(() => { mounting = false; }); }
   }
 
   /** Never let the window be dragged somewhere it cannot be grabbed back from. */
@@ -255,7 +258,7 @@ export function createSynthWindow(api) {
       mountTries = 0; mountError = null;
       // keyed on the ENGINE, not on the channel name: a name change with the same engine meant the editor kept showing (and
       // editing) the previous channel's parameters, which is exactly the reported bug.
-      if (builtEngine === engine) { fitFrame(); return; }
+      if (builtFor === selected && builtEngine === engine) { fitFrame(); return; }
       installRightDragPan(frame);
       allowNativeScrolling(frame);
       const kids = w.__mount(engine);
@@ -269,7 +272,7 @@ export function createSynthWindow(api) {
           if (opt) selEl.value = opt.value;
         }
       } catch {}
-      builtEngine = engine;
+      builtEngine = engine; builtFor = selected;
       fitFrame();
       status(`${selected}: editor built (${kids} sections) · out: ${api.link?.().out}`);
     } catch (e) {
