@@ -138,9 +138,25 @@ export function createSynthWindow(api) {
           // The preset carries its own wavetables: settings.wavetables has one entry per oscillator, with the samples
           // embedded. Take each base carrier and give it to that oscillator.
           const embedded = mod.vitalEmbeddedTables?.(vital) ?? [];
+          const external = mod.externalAudioRefs?.(vital) ?? [];
           for (const table of embedded) {
             if (!table.frames?.length) {
-              if (table.kind === "unsupported") skipped.push(`${f.name} osc${table.osc + 1} — its table is a Vital DSP chain (${table.type}) with no base waveform to take`);
+              // No base waveform inside the preset: either it referenced a file, or the chain is modifiers only.
+              const wanted = external.filter((r) => r.osc === table.osc);
+              const supplied = wanted.map((r) => ({ r, file: mod.matchLocalFile?.(r.name, files) })).find((x) => x.file);
+              if (supplied) {
+                try {
+                  const blob = supplied.file;
+                  await engine.importWavetableFile(Math.min(table.osc, 2), blob.name.toLowerCase().endsWith(".vitaltable")
+                    ? new File([new Blob([mod.encodeWavFloat32(mod.vitalTableToSamples(JSON.parse(await blob.text())).samples)], { type: "audio/wav" })], blob.name.replace(/\.vitaltable$/i, ".wav"))
+                    : blob);
+                  ok.push(`${f.name} osc${table.osc + 1} ← ${supplied.file.name} (the preset names it but does not carry it)`);
+                } catch (e) { skipped.push(`${f.name} osc${table.osc + 1} — ${supplied.file.name} could not be used: ${e?.message ?? e}`); }
+              } else if (wanted.length) {
+                skipped.push(`${f.name} osc${table.osc + 1} — it needs "${wanted.map((r) => r.name).join('", "')}", which is not inside the preset; select that file too and it will be used`);
+              } else {
+                skipped.push(`${f.name} osc${table.osc + 1} — its table is a Vital DSP chain (${table.type}) with no base waveform to take`);
+              }
               continue;
             }
             try {

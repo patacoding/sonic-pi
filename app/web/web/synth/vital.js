@@ -276,3 +276,44 @@ export function flattenFrames(frames, frameSize = 2048) {
   frames.forEach((f, i) => out.set(f.subarray(0, size), i * size));
   return out;
 }
+
+
+/**
+ * Any file a preset names instead of carrying.
+ *
+ * In the 300 presets we scanned there were none -- every Wave Source and Audio File Source carries its samples -- but
+ * Vital can reference an external sample, so this is the safety net: collect any path or file name found anywhere in
+ * the preset (nested wavetable objects included) together with the oscillator it belongs to, so a file the player
+ * selected can fill it in, and anything left unfilled can be reported by name instead of silently producing silence.
+ */
+export function externalAudioRefs(vital) {
+  const found = [];
+  const looksLikeAudio = /[^\\/]+\.(wav|aif|aiff|flac|mp3|vit|vitaltable)$/i;
+  const walk = (node, osc, keyPath) => {
+    if (Array.isArray(node)) { node.forEach((n, i) => walk(n, osc, keyPath)); return; }
+    if (!node || typeof node !== 'object') return;
+    if (typeof node.type === 'string' && node.type) {
+      const hasData = (typeof node.audio_file === 'string' && node.audio_file.length > 32) ||
+                      (node.keyframes ?? []).some((k) => typeof k?.wave_data === 'string' && k.wave_data.length > 32);
+      if (!hasData) {
+        for (const [k, v] of Object.entries(node)) {
+          if (typeof v === 'string' && looksLikeAudio.test(v.trim())) found.push({ osc, key: `${keyPath}.${k}`.replace(/^\./, ''), name: v.trim().split(/[\\/]/).pop() });
+        }
+      }
+    }
+    for (const [k, v] of Object.entries(node)) {
+      if (k === 'audio_file' || k === 'wave_data') continue;
+      walk(v, osc, `${keyPath}.${k}`);
+    }
+  };
+  (vital?.settings?.wavetables ?? []).forEach((entry, osc) => walk(entry, osc, `osc${osc + 1}`));
+  return found;
+}
+
+/** Match a named file against the files the player selected, by base name (case-insensitive, extension ignored). */
+export function matchLocalFile(name, files) {
+  const stem = (x) => String(x).split(/[\\/]/).pop().replace(/\.[a-z0-9]+$/i, '').toLowerCase();
+  const want = stem(name);
+  for (const f of files ?? []) if (stem(f.name) === want) return f;
+  return null;
+}
