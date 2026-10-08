@@ -53,8 +53,10 @@ export const list = () => [...parts.keys()];
 export const has = (name) => parts.has(String(name));
 export const engineOf = (name) => parts.get(String(name))?.engine ?? null;
 
-export async function noteOn(name, note, velocity = 1) { (await ensurePart(name)).engine.noteOn(note, velocity); }
-export function noteOff(name, note) { parts.get(String(name))?.engine.noteOff(note); }
+// atFrame (optional): the engine-clock instant the note belongs to, as a worklet frame number. Omitted, it plays
+// now -- which is what the UI wants and what the music does not (the music has a time).
+export async function noteOn(name, note, velocity = 1, atFrame) { (await ensurePart(name)).engine.noteOn(note, velocity, atFrame); }
+export function noteOff(name, note, atFrame) { parts.get(String(name))?.engine.noteOff(note, atFrame); }
 export function setParam(name, id, value) { parts.get(String(name))?.engine.setParamById(id, value); }
 export function allNotesOff(name) {
   if (name == null) { for (const p of parts.values()) p.engine.allNotesOff?.(); }
