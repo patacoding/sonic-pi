@@ -71,30 +71,41 @@ const trace = [];      // the last few records as they arrived: the instrument f
  * does not keep time (see the multipart argument, 5.8).
  */
 function handleRecord(r) {
-  const text = typeof r === "string" ? r : (r?.text ?? r?.output ?? r?.message ?? "");
-  const d = parseSynthDirective(text);
-  if (!d) return false;
+  // The record's real shape (measured, not assumed): kind, t, beat, thread, name, event, line, output...
+  // There is no field called `time`; `t` and `beat` are what the music knows about when it meant this.
+  const fields = (r && typeof r === "object") ? r : {};
+  const candidates = [fields.output, fields.text, fields.message, fields.value, fields.line, fields.name, fields.event,
+    ...Object.values(fields)].filter((v) => typeof v === "string");
+  let d = null, text = "";
+  for (const c of candidates) { const q = parseSynthDirective(c); if (q) { d = q; text = c; break; } }
+  // Record EVERY record we are handed, parsed or not: "nothing arrived" and "what arrived did not parse" are
+  // different problems, and the first version could not tell them apart (it recorded only on success).
+  if (!d) {
+    trace.push({ at: Date.now(), parsed: false, kind: fields.kind ?? null, keys: Object.keys(fields).slice(0, 12),
+                 strings: candidates.map((c) => String(c).slice(0, 40)).slice(0, 6), t: fields.t ?? null, beat: fields.beat ?? null });
+    if (trace.length > 40) trace.shift();
+    return false;
+  }
   const entry = { at: Date.now(), clock: globalThis.sonicPi?.session?.clockNow?.() ?? null,
-                  fieldTime: typeof r === "object" && r ? (r.time ?? null) : null,
-                  kind: typeof r === "object" && r ? (r.kind ?? null) : null, text: String(text).slice(0, 80),
-                  part: d.part, command: d.command, args: numbers(d.args), strings: strings(d.args), error: d.error ?? null };
+                  t: fields.t ?? null, beat: fields.beat ?? null, kind: fields.kind ?? null,
+                  thread: fields.thread ?? null, line: fields.line ?? null, event: fields.event ?? null,
+                  text: String(text).slice(0, 80),
+                  part: d.part ?? null, command: d.command ?? null, args: numbers(d.args), strings: strings(d.args),
+                  error: d.error ?? null };
   trace.push(entry); if (trace.length > 40) trace.shift();
   if (d.error) { say(`the music asked for something I do not understand: ${d.error}`, true); return false; }
-  const n = numbers(d.args);
+  const n = numbers(d.args), str = strings(d.args);
   switch (d.command) {
     case "note": parts.noteOn(d.part, n[0], n[1] ?? 1); break;
     case "off": parts.noteOff(d.part, n[0]); break;
     case "alloff": case "panic": parts.allNotesOff(n.length ? d.part : null); break;
-    case "param": { const id = strings(d.args)[0]; if (id == null || n[0] == null) return false;
-                    parts.setParam(d.part, id, n[n.length - 1]); break; }
-    case "mod": { const e = parts.engineOf(d.part); const src = strings(d.args)[0], dst = strings(d.args)[1];
-                  if (e && src && dst) e.addModRoute?.(src, dst, n[n.length - 1] ?? 0.25); break; }
+    case "param": if (str[0] != null && n.length) parts.setParam(d.part, str[0], n[n.length - 1]); break;
+    case "mod": { const e = parts.engineOf(d.part); if (e && str[0] && str[1]) e.addModRoute?.(str[0], str[1], n[n.length - 1] ?? 0.25); break; }
     case "fx": { const e = parts.engineOf(d.part); if (e) e.setFxOrder?.(n); break; }
-    case "gate": break;                       // reserved: not implemented, and it says so below rather than silently
     case "free": parts.free(d.part); break;
+    case "gate": say("`:synth, …, :gate` is not implemented yet", true); break;
     default: break;
   }
-  if (d.command === "gate") say("`:synth, …, :gate` is not implemented yet", true);
   return true;
 }
 
