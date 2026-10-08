@@ -137,23 +137,37 @@ export function createSynthWindow(api) {
           ok.push(f.name + " → " + mod.describeReport(report));
           // The preset carries its own wavetables: settings.wavetables has one entry per oscillator, with the samples
           // embedded. Take each base carrier and give it to that oscillator.
-          // DECOUPLED BY DESIGN: the preset brings its parameters, and its wavetables are the player's business.
-          // Every oscillator panel in the editor already has an Import button that takes a .wav (single-cycle or
-          // stacked frames), so a preset that depends on a particular table does not make this importer responsible for
-          // resolving it -- we only say which oscillators carry one. Selecting .wav/.vitaltable files here still works,
-          // it is simply no longer required.
+          // Wavetables: use what the preset CARRIES (an embedded Wave Source or Audio File Source), and hand back to
+          // the player only what it does not -- a table that is an external file path, or a chain of Vital DSP with no
+          // base waveform. Every oscillator panel in the editor already has an Import button for exactly that case.
           const embedded = mod.vitalEmbeddedTables?.(vital) ?? [];
-          const withTable = embedded.filter((x) => x.frames?.length);
-          const chains = embedded.filter((x) => !x.frames?.length && x.kind === "unsupported");
-          if (withTable.length) {
-            console.info("Synth — this preset carries wavetables for " + withTable.map((x) => "osc" + (x.osc + 1)).join(", ") +
-                         " (" + withTable.map((x) => x.frames.length + " frame(s) of " + x.frameSize).join("; ") + ")." +
-                         " Load them with the Import button on each oscillator panel (.wav, single-cycle or stacked frames)," +
-                         " or select the .wav/.vitaltable files together with this preset and they will be loaded for you.");
+          const external = mod.externalAudioRefs?.(vital) ?? [];
+          for (const table of embedded.filter((x) => x.frames?.length)) {
+            try {
+              const samples = mod.flattenFrames(table.frames, table.frameSize);
+              const name = `${preset.name} osc${table.osc + 1} (${table.kind === "wave" ? "Wave Source" : "Audio File Source"}).wav`;
+              const blob = new Blob([mod.encodeWavFloat32(samples, table.sampleRate ?? 44100)], { type: "audio/wav" });
+              await engine.importWavetableFile(Math.min(table.osc, 2), new File([blob], name, { type: "audio/wav" }));
+              ok.push(`${f.name} → osc${table.osc + 1} embedded table (${table.frames.length} frames of ${table.frameSize}${table.skipped?.length ? ", modifiers dropped: " + table.skipped.join(" > ") : ""})`);
+            } catch (e) { skipped.push(`${f.name} osc${table.osc + 1} — ${e?.message ?? e}`); }
           }
-          if (chains.length) {
-            skipped.push(f.name + " " + chains.map((x) => "osc" + (x.osc + 1)).join(", ") +
-                         " — its table is a Vital DSP chain (" + chains.map((x) => x.type).join(" > ") + ") with no base waveform to take; use the oscillator's Import button");
+          for (const table of embedded.filter((x) => !x.frames?.length)) {
+            const wanted = external.filter((r) => r.osc === table.osc);
+            const supplied = wanted.map((r) => ({ r, file: mod.matchLocalFile?.(r.name, files) })).find((x) => x.file);
+            if (supplied) {
+              try {
+                const blob = supplied.file;
+                const asWav = blob.name.toLowerCase().endsWith(".vitaltable")
+                  ? new File([new Blob([mod.encodeWavFloat32(mod.vitalTableToSamples(JSON.parse(await blob.text())).samples)], { type: "audio/wav" })], blob.name.replace(/\.vitaltable$/i, ".wav"))
+                  : blob;
+                await engine.importWavetableFile(Math.min(table.osc, 2), asWav);
+                ok.push(`${f.name} osc${table.osc + 1} ← ${supplied.file.name} (the preset names it but does not carry it)`);
+              } catch (e) { skipped.push(`${f.name} osc${table.osc + 1} — ${supplied.file.name} could not be used: ${e?.message ?? e}`); }
+            } else if (wanted.length) {
+              skipped.push(`${f.name} osc${table.osc + 1} — it needs "${wanted.map((r) => r.name).join('", "')}", which is not inside the preset; use the Import button on that oscillator panel (.wav)`);
+            } else {
+              skipped.push(`${f.name} osc${table.osc + 1} — its table is a Vital DSP chain (${table.type}) with no base waveform; use the Import button on that oscillator panel (.wav)`);
+            }
           }
         } catch (e) { skipped.push(f.name + " — " + (e?.message ?? e)); }
       }
