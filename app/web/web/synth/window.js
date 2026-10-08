@@ -2,7 +2,7 @@
 // editor. Nothing of Sonic Pi's UI is touched: this element covers the page, it never rearranges it, and no state of
 // ours is persisted.
 import { createEditorPool } from "./editors.js";
-console.info("Synth build: window.js b1009d");
+console.info("Synth build: window.js b1009e");
 
 const STYLE = `
   #synth-btn { position: fixed; right: 0; top: calc(50% + 6.3em); z-index: 101; writing-mode: vertical-rl; height: 5.4em;
@@ -137,6 +137,14 @@ export function createSynthWindow(api) {
         kept.push(preset);
         localStorage.setItem(KEY, JSON.stringify(kept));
         console.info(`Synth — saved "${preset.name}" to your preset library (${kept.length} user presets); it is in the preset dropdown of the "${selected}" editor`);
+        // read it back the way the editor's browser does, so a library their reader cannot parse is visible immediately
+        try {
+          const back = JSON.parse(localStorage.getItem(KEY) ?? "[]");
+          const userOnes = Array.isArray(back) ? back.filter((x) => x && typeof x.name === "string").length : -1;
+          console.info(`Synth — library reads back: ${userOnes} usable entries of ${Array.isArray(back) ? back.length : "?"}; the editor is being rebuilt for "${selected}"`);
+        } catch (e) {
+          console.warn("Synth — the library was written but cannot be read back (" + (e?.message ?? e) + "); the editor's User list will be empty until it is fixed");
+        }
       } catch (e) {
         console.warn("Synth — the preset was loaded but could not be saved to your library: " + (e?.message ?? e));
       }
@@ -191,7 +199,7 @@ export function createSynthWindow(api) {
     const bar = win.querySelector("#synth-bar") ?? win.firstElementChild;
     const stamp = document.createElement("span");
     stamp.id = "synth-build-stamp";
-    stamp.textContent = " build b1009d";
+    stamp.textContent = " build b1009e";
     stamp.style.cssText = "font:10px/1 ui-monospace,monospace;opacity:.6;margin-left:6px";
     const spacer = bar?.querySelector(".spacer");
     if (bar) { if (spacer) bar.insertBefore(stamp, spacer); else bar.appendChild(stamp); }
