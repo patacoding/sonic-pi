@@ -117,6 +117,15 @@ async function attachWhenPossible() {
 export async function enable() {
   if (enabled) return true;
   requested = true; linkError = null;
+  // Start the engine on purpose, inside this click, and run nothing: __sonicPiBootEngine is the app's own
+  // ensureSession (the path its onboarding tap uses). A browser only lets audio start inside a gesture, which is why
+  // this call happens here and not later.
+  if (!globalThis.sonicPi?.engine?.node?.input && typeof globalThis.__sonicPiBootEngine === "function") {
+    try { globalThis.__sonicPiBootEngine(); say("asked the app to boot its engine — no code is run"); }
+    catch (e) { say(`the engine boot call failed: ${e?.message ?? e}`, true); }
+  } else if (!globalThis.__sonicPiBootEngine) {
+    say("this build has no engine-boot hook: press Run once (that will also run your music)", true);
+  }
   if (await attachWhenPossible()) return true;
   say("Soundgineer is on, waiting for the app's engine. Press Run when you are ready — it will run your music as usual");
   for (let i = 0; i < 600 && requested && !enabled; i++) {

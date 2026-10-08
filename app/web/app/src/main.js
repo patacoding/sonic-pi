@@ -499,6 +499,9 @@ const loadWeight = (d) => (d?.type === "sample" ? (d.size ? Math.min(3, Math.max
 // A tap that heads for the code (Launch Sonic Pi, the Code tab) starts the engine while it is a tap: a browser only
 // lets audio start inside a gesture, and by the first Run it has booted, so that Run sounds at once
 function warmEngine() { if (!session) ensureSession().catch(() => {}); }
+// SP-EXT: a synthesiser add-on may bring the engine up on purpose. This runs no code: it is the same path the
+// onboarding tap uses, so enabling an add-on cannot start the user's buffer as a side effect.
+globalThis.__sonicPiBootEngine = () => ensureSession().catch(() => null);
 async function ensureSession() {
   if (session) return session;
   audioInGesture();   // now, in the press, before anything is awaited
