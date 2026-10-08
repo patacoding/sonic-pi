@@ -2,7 +2,7 @@
 // editor. Nothing of Sonic Pi's UI is touched: this element covers the page, it never rearranges it, and no state of
 // ours is persisted.
 import { createEditorPool } from "./editors.js";
-console.info("Synth build: window.js presets-final-1");
+console.info("Synth build: window.js b1009d");
 
 const STYLE = `
   #synth-btn { position: fixed; right: 0; top: calc(50% + 6.3em); z-index: 101; writing-mode: vertical-rl; height: 5.4em;
@@ -17,6 +17,8 @@ const STYLE = `
   body[data-synth="open"] #synth-window { display: flex; }
   #synth-window h4 { margin: 0; font: 600 12px/1 system-ui, sans-serif; opacity: .8; }
   #synth-bar { display: flex; align-items: center; gap: 8px; cursor: move; user-select: none; }
+  /* the build stamp must never be squeezed out by the buttons: no wrapping, no shrinking, and it sits before the spacer */
+  #synth-build-stamp { flex: 0 0 auto; white-space: nowrap; font: 11px/1.6 ui-monospace, monospace; opacity: .75; }
   #synth-bar button { cursor: pointer; }
   #synth-bar .spacer { flex: 1 1 auto; }
   #synth-bar button, #synth-reader { font: 11px/1 system-ui, sans-serif; color: var(--WindowForeground); cursor: pointer;
@@ -49,7 +51,6 @@ const STYLE = `
   #synth-midi { font: 11px/1.4 ui-monospace, monospace; opacity: .7; max-height: 4em; overflow: auto; }
 `;
 
-console.info("Synth build: window.js presets-final-1");
 
 export function createSynthWindow(api) {
   if (!document.getElementById("synth-style")) {
@@ -199,9 +200,10 @@ export function createSynthWindow(api) {
     const bar = win.querySelector("#synth-bar") ?? win.firstElementChild;
     const stamp = document.createElement("span");
     stamp.id = "synth-build-stamp";
-    stamp.textContent = " build presets-final-1";
+    stamp.textContent = " build b1009d";
     stamp.style.cssText = "font:10px/1 ui-monospace,monospace;opacity:.6;margin-left:6px";
-    bar?.appendChild(stamp);
+    const spacer = bar?.querySelector(".spacer");
+    if (bar) { if (spacer) bar.insertBefore(stamp, spacer); else bar.appendChild(stamp); }
   } catch { /* cosmetic */ }
   // one document per channel, built once; switching only shows another one (see editors.js). No LRU: with a handful of
   // channels, destroying and rebuilding views is the churn we are trying to eliminate.
