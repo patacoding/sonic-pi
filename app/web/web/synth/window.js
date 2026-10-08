@@ -105,6 +105,9 @@ export function createSynthWindow(api) {
     win.querySelector("#synth-guide").textContent = api.guide?.() ?? "";
     win.querySelector("#synth-midi").textContent = (api.midiTrace?.() ?? []).slice(-6)
       .map((e) => `${e.path} ch${e.channel} ${JSON.stringify(e.mapped)}`).join("\n");
+    // Keep the editor's own dropdown in step with what we recorded for this channel. Doing it only at mount time lost
+    // the race against their refresh(), which fills the list a moment later -- and the dropdown then read Init again.
+    syncEditorPreset();
     const link = api.link?.() ?? { state: "?" };
     status(`link: ${link.state}${link.reason ? ` (${link.reason})` : ""} · ${link.instruments?.length ?? 0} instr · out: ${link.out}${mountError ? ` · editor: ${mountError}` : ""}`, !!mountError);
     const gate = win.querySelector("#synth-gate"), host = win.querySelector("#synth-sgr-host");
@@ -112,6 +115,18 @@ export function createSynthWindow(api) {
     gate.style.display = on ? "none" : "flex";
     host.style.display = on ? "block" : "none";
     if (on && open && !mounting && lastBuilt !== selected) { mounting = true; mountEditor().finally(() => { mounting = false; }); }
+  }
+
+  function syncEditorPreset() {
+    try {
+      const frame = win.querySelector("#synth-frame");
+      const want = api.state?.().parts?.[selected]?.preset ?? null;
+      if (!want || !frame?.contentDocument) return;
+      const selEl = frame.contentDocument.querySelector("select.preset-select");
+      if (!selEl || selEl.options.length === 0) return;                 // their list is not built yet; the next paint retries
+      const opt = [...selEl.options].find((o) => o.value === `factory:${want}` || o.value.endsWith(`:${want}`) || o.textContent.trim() === want);
+      if (opt && selEl.value !== opt.value) selEl.value = opt.value;    // display only: no change event, nothing re-applied
+    } catch { /* the frame may be mid-navigation */ }
   }
 
   function fitFrame() {

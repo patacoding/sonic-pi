@@ -2649,7 +2649,8 @@ var PresetBrowser = class {
       const list = loadUserPresets(scope).filter((p2) => p2.name !== name);
       list.push({ ...this.engine.toPreset(name), scope });
       saveUserPresets(list, scope);
-      this.refresh(`user:${name}`);
+      this.engine.__sgrPreset = `user:${scope}:${name}`;
+      this.refresh(`user:${scope}:${name}`);
     });
     const exportBtn = el("button", "hdr-btn", "EXPORT");
     exportBtn.title = "Download patch as JSON";
@@ -2677,7 +2678,8 @@ var PresetBrowser = class {
         const list = loadUserPresets(scope).filter((p2) => p2.name !== preset.name);
         list.push({ ...preset, scope });
         saveUserPresets(list, scope);
-        this.refresh(`user:${preset.name}`);
+        this.engine.__sgrPreset = `user:${scope}:${preset.name}`;
+        this.refresh(`user:${scope}:${preset.name}`);
       } catch (err) {
         alert(`Could not load preset: ${err}`);
       }
@@ -2685,7 +2687,8 @@ var PresetBrowser = class {
     });
     importBtn.addEventListener("click", () => file.click());
     this.root.append(this.select, save, exportBtn, importBtn, file);
-    this.refresh("factory:Init");
+    const cur = this.engine.__sgrPreset;
+    this.refresh(cur ?? "factory:Init");
   }
   engine;
   root;
@@ -2724,7 +2727,10 @@ var PresetBrowser = class {
       const nm = parts.length > 2 ? parts.slice(2).join(":") : name;
       return readAll().find((p2) => p2.name === nm && (scope == null || (p2.scope ?? "default") === scope));
     })();
-    if (preset) this.engine.loadPreset(preset);
+    if (preset) {
+      this.engine.loadPreset(preset);
+      this.engine.__sgrPreset = key;
+    }
   }
 };
 

@@ -10,6 +10,32 @@ const say = (t, bad = false) => (bad ? console.error : console.info)(`Synth — 
 
 const parts = new Map();          // name -> { engine, node, program, patchName }
 const held = new Map();           // name -> Set(notes we started and have not ended)
+const PRESET_KEY = "sonicpi.synth.preset.v1";   // our own record: which preset each channel is playing
+
+/** Which preset a channel was left on, so a reload (or a rebuilt engine) does not silently fall back to Init. */
+function rememberedPreset(key) {
+  try { return (JSON.parse(localStorage.getItem(PRESET_KEY) ?? "{}"))[key] ?? null; } catch { return null; }
+}
+function rememberPresetChoice(key, kind, name) {
+  try {
+    const all = JSON.parse(localStorage.getItem(PRESET_KEY) ?? "{}");
+    all[key] = { kind, name };
+    localStorage.setItem(PRESET_KEY, JSON.stringify(all));
+  } catch { /* storage may be unavailable; the session still works */ }
+}
+/** Their list is the library; find the entry this channel was last on and hand it to the engine. */
+function restorePreset(key, engine) {
+  const want = rememberedPreset(key);
+  if (!want?.name) return null;
+  try {
+    const all = JSON.parse(localStorage.getItem("soundgineer.presets.v1") ?? "[]");
+    const hit = want.kind === "user"
+      ? all.find((p) => p.name === want.name && (p.scope ?? "default") === key)
+      : null;
+    if (hit) { engine.loadPreset(hit); return want.name; }
+  } catch { /* nothing to restore */ }
+  return want.name;                     // a factory preset is named the same in every build
+}
 let cap = Number(globalThis.SP_SYNTH_MAX_PARTS ?? 8);
 let ctx = null;
 let inputNode = null;
@@ -61,6 +87,7 @@ export async function ensurePart(name = DEFAULT_PART) {
   engine.primeTables();
   const made = { engine, node, program: null, patchName: "Init" };
   parts.set(key, made);
+  try { const nm = restorePreset(key, engine); if (nm) made.presetName = nm; } catch { /* first run: nothing to restore */ }
   // Their preset browser applies presets through engine.loadPreset(). A note sounding when it does can outlive the
   // change and keep playing with no way for the player to stop it, so the part is silenced first -- with silence(),
   // not allNotesOff() alone, which is measured not to clear a voice in this build. This wraps OUR engine object.
@@ -69,7 +96,11 @@ export async function ensurePart(name = DEFAULT_PART) {
     try { silence(key); } catch {}
     const out = loadPreset(preset);
     // the player picks presets in the editor itself, which our channel table would otherwise never hear about
-    try { const cur = parts.get(key); if (cur) { cur.presetName = preset?.name ?? null; cur.presetScope = preset?.scope ?? null; } } catch {}
+    try {
+      const cur = parts.get(key);
+      if (cur) { cur.presetName = preset?.name ?? null; cur.presetScope = preset?.scope ?? null; }
+      rememberPresetChoice(key, preset?.scope ? "user" : "factory", preset?.name ?? null);
+    } catch {}
     return out;
   };
   say(`"${key}" is up (${parts.size}/${cap})`);
@@ -143,12 +174,26 @@ export function free(name) {
   return true;
 }
 
+/** Pull the editor's own notion of the current preset, so a save it performs is reflected without it telling us. */
+function syncFromEditor(key, p) {
+  try {
+    const v = p?.engine?.__sgrPreset;
+    if (typeof v !== "string" || !v) return;
+    const [kind, ...rest] = v.split(":");
+    const name = kind === "factory" ? rest.join(":") : rest.slice(1).join(":");
+    if (!name || p.presetName === name) return;
+    p.presetName = name;
+    p.presetScope = kind === "factory" ? null : rest[0];
+    rememberPresetChoice(key, kind, name);
+  } catch { /* the engine may be mid-teardown */ }
+}
+
 export const state = () => ({
   context: ctx ? { sampleRate: ctx.sampleRate, state: ctx.state } : null,
   cap,
   out: outState(),
   parts: Object.fromEntries([...parts].map(([n, p]) => [n, {
-    voices: p.engine.voiceCount ?? 0,
+    voices: (syncFromEditor(n, p), p.engine.voiceCount ?? 0),
     peak: Math.max(p.engine.peakL ?? 0, p.engine.peakR ?? 0),
     params: p.engine.values?.length ?? null,
     program: p.program ?? null,
