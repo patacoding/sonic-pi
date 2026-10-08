@@ -83,6 +83,47 @@ export function createSynthWindow(api) {
       <h4>recent MIDI</h4><div id="synth-midi"></div>
     </details>`;
   document.body.appendChild(win);
+
+  // ── Import the player's own Vital presets, locally (nothing is uploaded; see docs/vital-presets-feasibility.md §8)
+  const vitalInput = document.createElement("input");
+  vitalInput.id = "synth-vital-file";
+  vitalInput.type = "file";
+  vitalInput.accept = ".vital,application/json";
+  vitalInput.multiple = true;
+  vitalInput.style.display = "none";
+  let vitalBtn = null;
+  try {
+    vitalBtn = document.createElement("button");
+    vitalBtn.id = "synth-import-vital";
+    vitalBtn.type = "button";
+    vitalBtn.textContent = "Import Vital…";
+    vitalBtn.title = "Convert your own .vital files locally and load them into the selected channel";
+    vitalBtn.addEventListener("click", () => vitalInput.click());
+  } catch { /* cosmetic */ }
+  vitalInput.addEventListener("change", async () => {
+    const files = [...(vitalInput.files ?? [])];
+    vitalInput.value = "";
+    if (!files.length) return;
+    const mod = await import("./vital.js").catch((e) => { console.error("Synth — could not load the converter:", e); return null; });
+    if (!mod) return;
+    for (const file of files) {
+      try {
+        const text = await file.text();                       // local read: the file never leaves the machine
+        const vital = JSON.parse(text);
+        const { preset, report } = mod.vitalToPreset(vital, file.name.replace(/\.vital$/i, ""));
+        const engine = api.engineOf?.(selected);
+        if (!engine) { console.warn("Synth — pick a channel with a preset first"); continue; }
+        engine.loadPreset(preset);
+        engine.__sgrPreset = "user:" + preset.name;            // tell the host which preset this engine now holds
+        await api.setPreset?.(selected, preset.name);
+        console.info("Synth — " + mod.describeReport(report));
+      } catch (e) {
+        console.error("Synth — " + file.name + " could not be converted: " + (e?.message ?? e));
+      }
+    }
+    paint();
+  });
+  try { win.querySelector("#synth-help")?.appendChild(vitalBtn); win.appendChild(vitalInput); } catch { /* cosmetic */ }
   // A stamp you can SEE, in the title bar: "no change" arguments end when the running build is on screen.
   try {
     const bar = win.querySelector("#synth-bar") ?? win.firstElementChild;
