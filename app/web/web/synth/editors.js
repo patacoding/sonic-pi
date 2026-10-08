@@ -171,5 +171,17 @@ export function createEditorPool({ host, frameUrl, cap = 2, onStatus }) {
     }
   }
 
-  return { ensure, show, select, prepare, syncPreset, fit, active, list: () => [...entries.keys()], cap, count: () => entries.size };
+  /** Throw away one channel's document so it is rebuilt (and so its preset dropdown re-reads the library) on the next
+   *  tick. Needed after an import because the view only rebuilds on its own when the preset NAME changes: importing a
+   *  name that is already current left the old option list on screen. */
+  function reload(part) {
+    const ed = entries.get(part);
+    if (!ed) return false;
+    try { ed.frame.remove(); } catch { /* already gone */ }
+    entries.delete(part);
+    const i = order.indexOf(part); if (i !== -1) order.splice(i, 1);
+    return true;
+  }
+
+  return { ensure, reload, show, select, prepare, syncPreset, fit, active, list: () => [...entries.keys()], cap, count: () => entries.size };
 }
