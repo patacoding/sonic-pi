@@ -55,7 +55,7 @@ export function createSynthWindow(api) {
   const win = document.createElement("div");
   win.id = "synth-window"; win.setAttribute("role", "dialog"); win.setAttribute("aria-label", "Synth");
   win.innerHTML = `<div id="synth-bar"><h4>Synth</h4><span id="synth-status"></span><span class="spacer"></span>
-      <button id="synth-reader">start a reader</button><button id="synth-close">close</button></div>
+      <button id="synth-connect">connect to Sonic Pi</button><button id="synth-reader">start a reader</button><button id="synth-close">close</button></div>
     <div id="synth-main"><div id="synth-channels"></div>
       <div id="synth-stage"><div id="synth-stage-body"></div><div id="synth-sgr-host"><iframe id="synth-frame" title="Soundgineer editor"></iframe></div></div></div>
     <h4>how the music addresses it</h4><div id="synth-guide"></div>
@@ -63,6 +63,12 @@ export function createSynthWindow(api) {
   document.body.appendChild(win);
   win.querySelector("#synth-close").addEventListener("click", () => set(false));
   win.querySelector("#synth-reader").addEventListener("click", () => startReader());
+  win.querySelector("#synth-connect").addEventListener("click", async () => {
+    status("connecting — this runs the current buffer once");
+    await api.connectToEngine?.();
+    await startReader();          // and something must read the bus for anything to be heard
+    paint();
+  });
 
   /**
    * Their editor, in a frame sized to the design it was written for.
@@ -137,7 +143,9 @@ export function createSynthWindow(api) {
     win.querySelector("#synth-guide").textContent = api.guide?.() ?? "";
     win.querySelector("#synth-midi").textContent = (api.midiTrace?.() ?? []).slice(-6).map((e) => `${e.path} ${JSON.stringify(e.args)}${e.mapped ? " → " + JSON.stringify(e.mapped) : ""}`).join("\n");
     const selPart = st.parts?.[selected];
-    statusEl().textContent = `${names.length} instrument(s) · ${selected} peak ${(selPart?.peak ?? 0).toFixed(3)} · out: ${api.outState?.() ?? "?"}`;
+    const link = api.link?.() ?? null;
+    statusEl().textContent = link ? `link: ${link.state} · ${names.length} instr · peak ${(selPart?.peak ?? 0).toFixed(3)}`
+                                  : `${names.length} instrument(s) · peak ${(selPart?.peak ?? 0).toFixed(3)}`;
   }
 
   let timer = 0;

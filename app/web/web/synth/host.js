@@ -301,5 +301,35 @@ setInterval(async () => {
   }
 }, 2000);
 
+/**
+ * The link, described rather than guessed. Every failure this thread has hit is a state: no engine yet, on our own
+ * context, adopted but nothing reading the bus, or ready. Naming them is the first step to a predictable link.
+ */
+api.link = () => {
+  const engineUp = !!globalThis.sonicPi?.engine?.node?.input;
+  const st = parts.state();
+  const own = st.ownContext;
+  const names = parts.list();
+  const state = !engineUp ? (own ? "standalone (speakers)" : "starting")
+    : own ? "engine up, not adopted yet"
+      : !readerStarted ? "on the engine, no reader"
+        : names.length ? "ready" : "on the engine, no instrument yet";
+  return { state, engineUp, ownContext: own, out: parts.outState(), reader: readerStarted,
+           generation: parts.generation(), instruments: names, cap: st.cap };
+};
+
+/** Ask the app to boot its engine. This is the app's own Run, so it also runs the current buffer -- said, not hidden. */
+api.connectToEngine = async () => {
+  if (globalThis.sonicPi?.engine?.node?.input) return true;
+  say("pressing the app's Run so its engine exists — that also runs the current buffer, once");
+  document.getElementById("btn-run")?.click();
+  for (let i = 0; i < 20; i++) {
+    if (globalThis.sonicPi?.engine?.node?.input) { say("the app's engine is up"); return true; }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  say("the app's engine did not appear after Run — check the editor for an error", true);
+  return false;
+};
+
 globalThis.sonicPiSynth = api;
 export { api as synthHost };
