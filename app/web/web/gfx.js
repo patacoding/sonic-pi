@@ -40,7 +40,6 @@ if (SYNTH_ENABLED) {
   try {
     const { synthHost } = await import("./synth/host.js");   // publishes window.sonicPiSynth
     installRecordForwarding();
-    synthHost.watchEngine?.();          // performance signals come from the engine's public OSC boundary
     console.info(`Synth — layer loaded (${synthHost.ready ? "running" : "waiting for the engine's first Run"})`);
   } catch (e) {
     console.error(`Synth — the layer could not be loaded: ${e?.stack ?? e}`);
