@@ -49,7 +49,7 @@ export function createSynthWindow(api) {
   if (!document.getElementById("synth-style")) {
     const s = document.createElement("style"); s.id = "synth-style"; s.textContent = STYLE; document.head.appendChild(s);
   }
-  let selected = "main", open = false, lastBuilt = null, mountError = null, mounting = false;
+  let selected = "main", open = false, builtEngine = null, mountError = null, mounting = false;
   let pos = null;            // where the player put the window, for this session only: never persisted
   let zoom = 1;              // 1 = fitted to the stage; larger is allowed and simply clipped
   let pan = { x: 0, y: 0 };
@@ -63,6 +63,7 @@ export function createSynthWindow(api) {
   const win = document.createElement("div");
   win.id = "synth-window"; win.setAttribute("role", "dialog"); win.setAttribute("aria-label", "Synth");
   win.innerHTML = `<div id="synth-bar"><h4>Synth</h4><span id="synth-status"></span><span class="spacer"></span>
+      <button id="synth-zoom-out" title="smaller">−</button><span id="synth-zoom-val">100%</span><button id="synth-zoom-in" title="bigger">+</button><button id="synth-fit" title="fit and re-centre">fit</button>
       <button id="synth-reader">start a reader</button><button id="synth-panic">all notes off</button>
       <button id="synth-close">close</button></div>
     <div id="synth-main"><div id="synth-channels"></div>
@@ -80,7 +81,11 @@ export function createSynthWindow(api) {
 
   const status = (t, bad = false) => { const el = win.querySelector("#synth-status"); el.textContent = t ?? ""; el.style.color = bad ? "#f66" : ""; };
   win.querySelector("#synth-close").addEventListener("click", () => set(false));
-  win.querySelector("#synth-frame").addEventListener("load", () => allowNativeScrolling(win.querySelector("#synth-frame")));
+  win.querySelector("#synth-frame").addEventListener("load", () => installRightDragPan(win.querySelector("#synth-frame")));
+  const setZoom = (z) => { zoom = Math.max(0.5, Math.min(2, z)); placeFrame(); };
+  win.querySelector("#synth-zoom-in").addEventListener("click", () => setZoom(zoom * 1.25));
+  win.querySelector("#synth-zoom-out").addEventListener("click", () => setZoom(zoom / 1.25));
+  win.querySelector("#synth-fit").addEventListener("click", () => { zoom = 1; pan = { x: 0, y: 0 }; placeFrame(); });
   win.querySelector("#synth-pan")?.addEventListener("click", (e) => {
     panMode = !panMode;
     win.querySelector("#synth-sgr-host").dataset.pan = panMode ? "on" : "off";
@@ -125,7 +130,7 @@ export function createSynthWindow(api) {
     win.querySelector("#synth-channels").innerHTML =
       `<table><thead><tr><th>ch</th><th>part</th><th>preset</th><th>voi</th><th>peak</th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
     for (const tr of win.querySelectorAll("#synth-channels tr.clickable")) {
-      tr.addEventListener("click", () => { selected = tr.dataset.part; lastBuilt = null; mountError = null; paint(); });
+      tr.addEventListener("click", () => { selected = tr.dataset.part; builtEngine = null; mountError = null; paint(); });
     }
   }
   function paint() {
@@ -142,7 +147,7 @@ export function createSynthWindow(api) {
     const on = !!link.enabled;
     gate.style.display = on ? "none" : "flex";
     host.style.display = on ? "block" : "none";
-    if (on && open && !mounting && lastBuilt !== selected) { mounting = true; mountEditor().finally(() => { mounting = false; }); }
+    if (on && open && !mounting && builtEngine !== (api.engineOf?.(selected) ?? null)) { mounting = true; mountEditor().finally(() => { mounting = false; }); }
   }
 
   /** Never let the window be dragged somewhere it cannot be grabbed back from. */
@@ -175,17 +180,6 @@ export function createSynthWindow(api) {
       bar.addEventListener("pointercancel", up);
       e.preventDefault();
     });
-  }
-
-  /** Let the frame scroll: their CSS hides overflow, which is what blocked native two-finger panning inside it. */
-  function allowNativeScrolling(frame) {
-    try {
-      const doc = frame.contentDocument;
-      if (!doc || doc.__sgrScroll) return;
-      doc.__sgrScroll = true;
-      doc.documentElement.style.setProperty("overflow", "auto", "important");
-      doc.body.style.setProperty("overflow", "auto", "important");
-    } catch { /* the frame is not ready */ }
   }
 
   function syncEditorPreset() {
@@ -249,8 +243,10 @@ export function createSynthWindow(api) {
         return;
       }
       mountTries = 0; mountError = null;
-      if (lastBuilt === selected) { fitFrame(); return; }
-      allowNativeScrolling(frame);
+      // keyed on the ENGINE, not on the channel name: a name change with the same engine meant the editor kept showing (and
+      // editing) the previous channel's parameters, which is exactly the reported bug.
+      if (builtEngine === engine) { fitFrame(); return; }
+      installRightDragPan(frame);
       const kids = w.__mount(engine);
       // the editor's own preset dropdown does not know which preset this engine is on (it is a fresh browser after a
       // remount), so it is set to what we recorded -- display only, no change event, nothing is re-applied
@@ -262,7 +258,7 @@ export function createSynthWindow(api) {
           if (opt) selEl.value = opt.value;
         }
       } catch {}
-      lastBuilt = selected;
+      builtEngine = engine;
       fitFrame();
       status(`${selected}: editor built (${kids} sections) · out: ${api.link?.().out}`);
     } catch (e) {
