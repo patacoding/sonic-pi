@@ -51,10 +51,10 @@ function handleMidi(...a) {
     const [, note] = nums; entry.mapped = { note };
     if (typeof note === "number") parts.noteOff(part, note);
   } else if (/program_change|program/i.test(path)) {
-    const [, program] = nums; const patch = patchByProgram(program);
-    entry.mapped = { program, patch: patch?.name ?? null };
-    if (patch) { parts.silence(part); applyPatch(part, program); }   // a new instrument must not inherit the old one's sound
-  } else if (/control|cc/i.test(path) && !parts.armed(part)) {
+    // Deliberately inert: MIDI addresses and performs, presets belong to the player. A program change used to select
+    // one of our numbered patches, which coupled the two things this layer keeps apart.
+    entry.mapped = { ignored: "presets are chosen in the editor, not by MIDI" };
+  } else if (/control|cc/i.test(path) && !parts.armed(part)) {  } else if (/control|cc/i.test(path) && !parts.armed(part)) {
     entry.mapped = { ignored: "no preset chosen for this channel" };
   } else if (/control|cc/i.test(path)) {
     const [, cc, value] = nums;

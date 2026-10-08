@@ -18,19 +18,17 @@ export const patchByProgram = (n) => PATCHES.find((p) => p.n === Number(n)) ?? n
 
 /** What the UI shows: which number is which instrument, and how the music addresses it. */
 export function guide() {
-  const lines = PATCHES.map((p) => `  program ${String(p.n).padStart(2)}  ${p.name}`);
   return [
-    "Driving this synth from the music (MIDI, numbers on purpose):",
+    "The music addresses a channel; the sound belongs to the editor.",
     "",
-    "  midi_pc <channel>, <program>          pick the instrument for that channel",
-    "  midi_note_on <note>, <velocity>, channel: <channel>",
-    "  midi_note_off <note>, channel: <channel>",
-    "  midi_cc <cc>, <value>, channel: <channel>     (parameter map, see below)",
+    "  midi_note_on  <note>, <velocity>, channel: <n>     play a note on channel n",
+    "  midi_note_off <note>,              channel: <n>     release it",
+    "  midi_cc       <cc>, <value>,       channel: <n>     change a parameter",
     "",
-    "  channel = which instrument slot (0 -> main, n -> chN; 16 available)",
-    "  program = which patch:",
-    ...lines,
+    "  channel 0 is the main instrument, channel n is ch<n>.",
+    "A channel stays silent until you choose a preset for it in the editor above;",
+    "MIDI never chooses a sound (a program change is ignored on purpose).",
     "",
-    "  example:  midi_pc 1, 0  then  midi_note_on 40, 110, channel: 1",
+    "  cc 7 -> volume   71 -> resonance   72 -> release   73 -> attack   74 -> cutoff",
   ].join("\n");
 }

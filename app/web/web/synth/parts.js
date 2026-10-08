@@ -51,7 +51,7 @@ export const outState = () => (inputNode ? "engine bus" : "off");
  */
 export function armed(name) {
   const p = parts.get(String(name));
-  return !!(p && (p.presetName || p.midiPatch));
+  return !!(p && p.presetName);      // only a preset the player chose arms a channel
 }
 export const capOf = () => cap;
 
@@ -236,7 +236,6 @@ export const state = () => ({
     program: p.program ?? null,
     patch: p.patchName ?? "Init",
     preset: p.presetName ?? null,
-    midiPatch: p.midiPatch ?? null,
     // a part making sound with no voices at all is a stuck/orphaned voice: worth seeing, not guessing about
     stuck: (p.engine.voiceCount ?? 0) === 0 && Math.max(p.engine.peakL ?? 0, p.engine.peakR ?? 0) > 0.01,
   }])),

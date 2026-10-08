@@ -92,7 +92,7 @@ export function createSynthWindow(api) {
       const part = ch === 0 ? "main" : `ch${ch}`;
       const p = st.parts?.[part];
       rows.push(`<tr class="${part === selected ? "on" : ""} clickable" data-part="${part}"><td>${ch}</td><td>${part}</td>
-        <td>${p?.preset ?? (p?.midiPatch ? `midi: ${p.midiPatch}` : "—")}</td><td>${p?.voices ?? "—"}</td><td>${p ? (p.peak ?? 0).toFixed(2) : "—"}</td></tr>`);
+        <td>${p?.preset ?? "—"}</td><td>${p?.voices ?? "—"}</td><td>${p ? (p.peak ?? 0).toFixed(2) : "—"}</td></tr>`);
     }
     win.querySelector("#synth-channels").innerHTML =
       `<table><thead><tr><th>ch</th><th>part</th><th>preset</th><th>voi</th><th>peak</th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
