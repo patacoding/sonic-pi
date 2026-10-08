@@ -76,12 +76,21 @@ function handleRecord(r) {
   const fields = (r && typeof r === "object") ? r : {};
   const candidates = [fields.output, fields.text, fields.message, fields.value, fields.line, fields.name, fields.event,
     ...Object.values(fields)].filter((v) => typeof v === "string");
+  // One `output` record can carry SEVERAL lines (three puts in one run arrived as one record), so split by line
+  // and parse each: taking only the first line was why the other two directives silently did nothing.
   let d = null, text = "";
-  for (const c of candidates) { const q = parseSynthDirective(c); if (q) { d = q; text = c; break; } }
+  for (const c of candidates) {
+    for (const line of String(c).split(/\r?\n/)) {
+      const q = parseSynthDirective(line);
+      if (q) { d = q; text = line; break; }
+    }
+    if (d) break;
+  }
   // Record EVERY record we are handed, parsed or not: "nothing arrived" and "what arrived did not parse" are
   // different problems, and the first version could not tell them apart (it recorded only on success).
   if (!d) {
     trace.push({ at: Date.now(), parsed: false, kind: fields.kind ?? null, keys: Object.keys(fields).slice(0, 12),
+                 text: candidates.filter((c) => /synth/i.test(String(c))).map((c) => String(c).slice(0, 60)).join(" | ") || null,
                  strings: candidates.map((c) => String(c).slice(0, 40)).slice(0, 6), t: fields.t ?? null, beat: fields.beat ?? null });
     if (trace.length > 40) trace.shift();
     return false;
@@ -109,6 +118,38 @@ function handleRecord(r) {
   return true;
 }
 
+/**
+ * A performance signal on its way out to MIDI: `{ path, args, time }` (see midiSend in the app). Matching MIDI to
+ * timbres is the natural scheme -- channel is the part -- but the argument order is measured, not assumed, so this
+ * records what it sees before it acts on it.
+ */
+function handleMidi(...a) {
+  const r = a[0] ?? {};
+  const nums = (r.args ?? []).filter((x) => typeof x === "number");   // [channel, values…]
+  const entry = { at: Date.now(), clock: globalThis.sonicPi?.session?.clockNow?.() ?? null, path: r.path ?? null,
+                  args: (r.args ?? []).map((x) => (typeof x === "number" ? x : String(x).slice(0, 20))), time: r.time ?? null };
+  const path = String(r.path ?? "");
+  // The app documents the shape: "/clockwork/midi/out/<kind> <port> <channel> <values…>", so the first NUMBER is the
+  // channel -- which is the natural part selector (channel 0 -> main, channel n -> chN).
+  const channel = typeof nums[0] === "number" ? nums[0] : 0;
+  const part = channel <= 0 ? "main" : `ch${channel}`;
+  if (/note_on|noteon/i.test(path)) {
+    const [, note, velocity] = nums;                      // [channel, note, velocity]
+    entry.mapped = { command: "note", note, velocity };
+    if (typeof note === "number") parts.noteOn(part, note, typeof velocity === "number" ? velocity / 127 : 1);
+  } else if (/note_off|noteoff/i.test(path)) {
+    const [, note] = nums; entry.mapped = { command: "off", note };
+    if (typeof note === "number") parts.noteOff(part, note);
+  } else if (/control|cc/i.test(path)) {
+    entry.mapped = { command: "cc", nums };
+  } else {
+    entry.mapped = null;
+  }
+  midiTrace.push(entry); if (midiTrace.length > 40) midiTrace.shift();
+  return true;
+}
+
+const midiTrace = [];
 const api = {
   get ready() { return !!sg; },
   get error() { return lastError; },
@@ -133,6 +174,8 @@ const api = {
   params: () => sg?.values ?? null,
   handleRecord,
   trace: () => trace.slice(),
+  handleMidi,
+  midiTrace: () => midiTrace.slice(),
 };
 
 // Multi-timbre: the music names the part explicitly, every time (`puts :synth, :bass, :note, 60`), so there is no

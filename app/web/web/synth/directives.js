@@ -19,7 +19,17 @@ const bare = (t) => String(t).replace(/^:/, "").replace(/^"|"$/g, "");
  */
 export function parseSynthDirective(text) {
   const raw = String(text ?? "");
-  if (!/^\s*:?"?\s*synth\b/i.test(raw)) return null;                 // not ours
+  // The sigil is `sgr` (Soundgineer). Measured, not chosen by taste: the app suppresses an output record whose text
+  // begins with `synth` OR `sg` (both are names it reserves), so lines written with either never reach us at all --
+  // `puts :synth, …` and `puts :sg, …` produce no record, while `:sgr`, `:snd`, `:sgi`, `:synthx` and our own `:gfx`
+  // all do. Anything written with the old names is accepted here and reported as a sigil that cannot arrive.
+  const m = /^\s*:?"?\s*([A-Za-z_]\w*)\b/.exec(raw);
+  if (!m) return null;
+  const sigil = m[1].toLowerCase();
+  if (sigil === "synth" || sigil === "sg") {
+    return { error: `"${sigil}" cannot be used as a sigil: the app filters output that starts with it -- write :sgr instead` };
+  }
+  if (sigil !== "sgr" && sigil !== "soundgineer") return null;
   const words = tokenize(raw).filter((t) => t.kind !== "space");
   const parts = words.map(bare);
   if (parts.length < 2) return { error: "a :synth line needs at least a command" };
