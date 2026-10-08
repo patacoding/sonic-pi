@@ -23,6 +23,7 @@ export async function applyPatch(part, program) {
   if (!patch) { say(`there is no instrument numbered ${program}`, true); return false; }
   for (const [id, v] of Object.entries(patch.params)) made.engine.setParamById(id, v);
   parts.rememberPatch(part, patch.n, patch.name);
+  parts.rememberPreset(part, patch.name);      // the table shows what the music selected too
   say(`"${part}" is playing ${patch.n} ${patch.name}`);
   return true;
 }
@@ -186,6 +187,6 @@ globalThis.sonicPiSynth = api;
 globalThis.sonicPiParts = {
   list: parts.list, has: parts.has, engineOf: parts.engineOf, ensure: parts.ensurePart, state: parts.state,
   noteOn: parts.noteOn, noteOff: parts.noteOff, setParam: parts.setParam, allNotesOff: parts.allNotesOff,
-  free: parts.free, silence: parts.silence, outState: parts.outState, cap: parts.capOf, attachToEngine: parts.attachToEngine, detach: parts.detach,
+  free: parts.free, silence: parts.silence, rememberPreset: parts.rememberPreset, outState: parts.outState, cap: parts.capOf, attachToEngine: parts.attachToEngine, detach: parts.detach,
 };
 export { api as synthHost };

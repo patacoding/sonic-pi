@@ -65,9 +65,21 @@ export async function ensurePart(name = DEFAULT_PART) {
   // change and keep playing with no way for the player to stop it, so the part is silenced first -- with silence(),
   // not allNotesOff() alone, which is measured not to clear a voice in this build. This wraps OUR engine object.
   const loadPreset = engine.loadPreset?.bind(engine);
-  if (loadPreset) engine.loadPreset = (preset) => { try { silence(key); } catch {} return loadPreset(preset); };
+  if (loadPreset) engine.loadPreset = (preset) => {
+    try { silence(key); } catch {}
+    const out = loadPreset(preset);
+    // the player picks presets in the editor itself, which our channel table would otherwise never hear about
+    try { const cur = parts.get(key); if (cur) { cur.presetName = preset?.name ?? null; cur.presetScope = preset?.scope ?? null; } } catch {}
+    return out;
+  };
   say(`"${key}" is up (${parts.size}/${cap})`);
   return made;
+}
+
+export function rememberPreset(name, presetName, scope = null) {
+  const p = parts.get(String(name));
+  if (p) { p.presetName = presetName; p.presetScope = scope; }
+  return !!p;
 }
 
 export function rememberPatch(name, program, patchName) {
@@ -141,6 +153,7 @@ export const state = () => ({
     params: p.engine.values?.length ?? null,
     program: p.program ?? null,
     patch: p.patchName ?? "Init",
+    preset: p.presetName ?? null,
     // a part making sound with no voices at all is a stuck/orphaned voice: worth seeing, not guessing about
     stuck: (p.engine.voiceCount ?? 0) === 0 && Math.max(p.engine.peakL ?? 0, p.engine.peakR ?? 0) > 0.01,
   }])),

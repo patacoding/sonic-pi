@@ -1,4 +1,4 @@
-// node_modules/soundgineer/src/shared/params.ts
+// ../soundgineer/src/shared/params.ts
 var FILTER_TYPES = ["LP 12", "LP 24", "HP 12", "HP 24", "BP 12", "BP 24", "Notch", "Comb", "Formant"];
 var SUB_SHAPES = ["Sine", "Triangle", "Saw", "Square"];
 var NOISE_TYPES = ["White", "Pink", "Sample"];
@@ -167,7 +167,7 @@ function formatValue(d, n) {
   return Math.abs(v) < 10 ? v.toFixed(2) : v.toFixed(0);
 }
 
-// node_modules/soundgineer/src/shared/messages.ts
+// ../soundgineer/src/shared/messages.ts
 var MOD_SOURCES = [
   ...Array.from({ length: 6 }, (_, i) => ({ id: `env${i + 1}`, name: `Env ${i + 1}`, perVoice: true, bipolar: false })),
   ...Array.from({ length: 8 }, (_, i) => ({ id: `lfo${i + 1}`, name: `LFO ${i + 1}`, perVoice: true, bipolar: false })),
@@ -201,7 +201,7 @@ function evalLfoShape(points, phase) {
   return points[points.length - 1].y;
 }
 
-// node_modules/soundgineer/src/ui/common.ts
+// ../soundgineer/src/ui/common.ts
 function el(tag, className, text) {
   const e = document.createElement(tag);
   if (className) e.className = className;
@@ -245,7 +245,7 @@ function closePopup() {
   }
 }
 
-// node_modules/soundgineer/src/ui/knob.ts
+// ../soundgineer/src/ui/knob.ts
 var knobRegistry = /* @__PURE__ */ new Map();
 var Knob = class {
   constructor(engine, paramIndex2, size = 46, label) {
@@ -491,7 +491,7 @@ function animatedKnobs() {
   return [...knobRegistry.values()].filter((k) => k.animated);
 }
 
-// node_modules/soundgineer/src/ui/controls.ts
+// ../soundgineer/src/ui/controls.ts
 function paramSelect(engine, id) {
   const index = paramIndex(id);
   const def = PARAMS[index];
@@ -529,7 +529,7 @@ function knobRow(engine, ids, size = 46) {
   return row;
 }
 
-// node_modules/soundgineer/src/ui/enveditor.ts
+// ../soundgineer/src/ui/enveditor.ts
 function shape(t, c) {
   return Math.pow(t, Math.pow(2, c * 3));
 }
@@ -564,9 +564,9 @@ var EnvDisplay = class {
   // ── SP-EXT: direct editing ─────────────────────────────────────────────────────────────────────────────
   handles = [];
   drag = null;
-  setValue(field, value) {
+  setValue(field, value2) {
     const i = paramIndex(`env${this.env}.${field}`);
-    const v = Math.min(1, Math.max(0, valueToNorm(PARAMS[i], value)));
+    const v = Math.min(1, Math.max(0, valueToNorm(PARAMS[i], value2)));
     this.engine.setParam(i, v);
     this.draw();
   }
@@ -585,7 +585,10 @@ var EnvDisplay = class {
     }
     if (!best) return;
     this.drag = { field: best.field, kind: best.kind, grabX: px };
-    this.canvas.setPointerCapture(e.pointerId);
+    try {
+      this.canvas.setPointerCapture(e.pointerId);
+    } catch {
+    }
     e.preventDefault();
   };
   onMove = (e) => {
@@ -683,6 +686,7 @@ var EnvDisplay = class {
       { field: "decay", kind: "curve", x: X(del + atk + hold + dec / 2), y: Y(sus + (1 - sus) * (1 - shape(0.5, -dc))) },
       { field: "release", kind: "curve", x: X(del + atk + hold + dec + susTime + rel / 2), y: Y(sus * (1 - shape(0.5, -rc))) }
     ];
+    window.__sgrEnvHandles = this.handles.map((h2) => ({ field: h2.field, kind: h2.kind, x: h2.x, y: h2.y }));
     c.fillStyle = "#ff9a3c";
     for (const hd of this.handles) {
       c.beginPath();
@@ -701,7 +705,7 @@ var EnvDisplay = class {
   }
 };
 
-// node_modules/soundgineer/src/ui/lfoeditor.ts
+// ../soundgineer/src/ui/lfoeditor.ts
 var HIT = 10;
 var LfoEditor = class {
   constructor(engine, lfo) {
@@ -902,7 +906,7 @@ var LfoEditor = class {
   }
 };
 
-// node_modules/soundgineer/src/ui/matrix.ts
+// ../soundgineer/src/ui/matrix.ts
 var MODDABLE = PARAMS.map((d, i) => ({ d, i })).filter(({ d }) => d.moddable);
 function destLabel(i) {
   const d = PARAMS[i];
@@ -988,7 +992,7 @@ var ModMatrix = class {
   }
 };
 
-// node_modules/soundgineer/src/ui/fxrack.ts
+// ../soundgineer/src/ui/fxrack.ts
 var FX_LABELS = {
   chorus: "CHORUS",
   phaser: "PHASER",
@@ -1061,7 +1065,7 @@ var FxRack = class {
   }
 };
 
-// node_modules/soundgineer/src/shared/fft.ts
+// ../soundgineer/src/shared/fft.ts
 function fft(re, im) {
   const n = re.length;
   if ((n & n - 1) !== 0) throw new Error("fft size must be a power of two");
@@ -1103,7 +1107,7 @@ function fft(re, im) {
   }
 }
 
-// node_modules/soundgineer/src/ui/scope.ts
+// ../soundgineer/src/ui/scope.ts
 var Scope = class {
   constructor(engine) {
     this.engine = engine;
@@ -1216,7 +1220,7 @@ var Scope = class {
   }
 };
 
-// node_modules/soundgineer/src/ui/wt3d.ts
+// ../soundgineer/src/ui/wt3d.ts
 var POINTS = 128;
 var VERT = `#version 300 es
 precision highp float;
@@ -1401,7 +1405,7 @@ var WavetableView = class {
   }
 };
 
-// node_modules/soundgineer/src/ui/keyboard.ts
+// ../soundgineer/src/ui/keyboard.ts
 var KEYMAP = {
   KeyA: 0,
   KeyW: 1,
@@ -1527,7 +1531,7 @@ var Keyboard = class {
   }
 };
 
-// node_modules/soundgineer/src/ui/presets.ts
+// ../soundgineer/src/ui/presets.ts
 var STORAGE_KEY = "soundgineer.presets.v1";
 function P(raw) {
   const out = {};
@@ -2779,13 +2783,15 @@ var PresetBrowser = class {
       fGroup.appendChild(o);
     }
     this.select.appendChild(fGroup);
-    const users = loadUserPresets(scopeOf(this.engine));
+    const mine = scopeOf(this.engine);
+    const users = loadUserPresets();
     if (users.length) {
       const uGroup = el("optgroup");
       uGroup.label = "User";
       for (const p2 of users) {
         const o = el("option", void 0, p2.name);
-        o.value = `user:${p2.name}`;
+        o.value = `user:${p2.scope ?? "default"}:${p2.name}`;
+        o.textContent = (p2.scope ?? "default") === mine ? p2.name : `${p2.name}  (${p2.scope ?? "default"})`;
         uGroup.appendChild(o);
       }
       this.select.appendChild(uGroup);
@@ -2795,12 +2801,17 @@ var PresetBrowser = class {
   load(key) {
     const [kind, ...rest] = key.split(":");
     const name = rest.join(":");
-    const preset = kind === "factory" ? FACTORY.find((p2) => p2.name === name) : loadUserPresets(scopeOf(this.engine)).find((p2) => p2.name === name);
+    const preset = kind === "factory" ? FACTORY.find((p2) => p2.name === name) : (() => {
+      const parts = value.split(":");
+      const scope = parts.length > 2 ? parts[1] : void 0;
+      const nm = parts.length > 2 ? parts.slice(2).join(":") : name;
+      return readAll().find((p2) => p2.name === nm && (scope == null || (p2.scope ?? "default") === scope));
+    })();
     if (preset) this.engine.loadPreset(preset);
   }
 };
 
-// node_modules/soundgineer/src/ui/midi.ts
+// ../soundgineer/src/ui/midi.ts
 var MACRO_CCS = [20, 21, 22, 23];
 async function initMidi(engine, onStatus) {
   if (!("requestMIDIAccess" in navigator)) {
@@ -2857,7 +2868,7 @@ function handle(engine, data) {
   }
 }
 
-// node_modules/soundgineer/src/ui/app.ts
+// ../soundgineer/src/ui/app.ts
 function buildApp(engine, container) {
   engine.primeTables();
   const header = el("header");

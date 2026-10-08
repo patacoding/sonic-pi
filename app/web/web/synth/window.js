@@ -86,10 +86,10 @@ export function createSynthWindow(api) {
       const part = ch === 0 ? "main" : `ch${ch}`;
       const p = st.parts?.[part];
       rows.push(`<tr class="${part === selected ? "on" : ""} clickable" data-part="${part}"><td>${ch}</td><td>${part}</td>
-        <td>${p?.patch ?? "—"}</td><td>${p?.voices ?? "—"}</td><td>${p ? (p.peak ?? 0).toFixed(2) : "—"}</td></tr>`);
+        <td>${p?.preset ?? p?.patch ?? "—"}</td><td>${p?.voices ?? "—"}</td><td>${p ? (p.peak ?? 0).toFixed(2) : "—"}</td></tr>`);
     }
     win.querySelector("#synth-channels").innerHTML =
-      `<table><thead><tr><th>ch</th><th>part</th><th>midi prog</th><th>voi</th><th>peak</th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
+      `<table><thead><tr><th>ch</th><th>part</th><th>preset</th><th>voi</th><th>peak</th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
     for (const tr of win.querySelectorAll("#synth-channels tr.clickable")) {
       tr.addEventListener("click", () => { selected = tr.dataset.part; lastBuilt = null; mountError = null; paint(); });
     }
@@ -136,6 +136,16 @@ export function createSynthWindow(api) {
       mountTries = 0; mountError = null;
       if (lastBuilt === selected) { fitFrame(); return; }
       const kids = w.__mount(engine);
+      // the editor's own preset dropdown does not know which preset this engine is on (it is a fresh browser after a
+      // remount), so it is set to what we recorded -- display only, no change event, nothing is re-applied
+      try {
+        const want = api.state?.().parts?.[selected]?.preset ?? null;
+        const selEl = frame.contentDocument?.querySelector("select.preset-select");
+        if (want && selEl) {
+          const opt = [...selEl.options].find((o) => o.value === `factory:${want}` || o.value.endsWith(`:${want}`) || o.textContent.trim() === want);
+          if (opt) selEl.value = opt.value;
+        }
+      } catch {}
       lastBuilt = selected;
       fitFrame();
       status(`${selected}: editor built (${kids} sections) · out: ${api.link?.().out}`);
