@@ -88,8 +88,8 @@ export function createSynthWindow(api) {
   const vitalInput = document.createElement("input");
   vitalInput.id = "synth-vital-file";
   vitalInput.type = "file";
-  vitalInput.accept = ".vital,.wav,.vitaltable,.vitallfo,application/json";
-  vitalInput.multiple = true;
+  vitalInput.accept = ".vital,application/json";
+  vitalInput.multiple = false;   // ONE file: anything needing more than one is the player's business (see the doc)
   vitalInput.style.display = "none";
   let vitalBtn = null;
   try {
@@ -97,117 +97,64 @@ export function createSynthWindow(api) {
     vitalBtn.id = "synth-import-vital";
     vitalBtn.type = "button";
     vitalBtn.textContent = "Import Vital…";
-    vitalBtn.title = "Load ONE of your own .vital presets into the selected channel (you may select its .wav/.vitaltable/.vitallfo files alongside it)";
+    vitalBtn.title = "Load ONE of your own .vital presets into the selected channel. A preset that needs other files is yours to complete with the Import button in the oscillator panel.";
     vitalBtn.addEventListener("click", () => vitalInput.click());
   } catch { /* cosmetic */ }
   vitalInput.addEventListener("change", async () => {
-    const files = [...(vitalInput.files ?? [])];
+    // ONE file. The core of this flow is a single file going in and coming out as parameters (plus whatever wavetables
+    // that file carries inside it). A preset that depends on other files is not our problem to solve: the user
+    // completes it with the Import button that each oscillator panel already has.
+    const file = vitalInput.files?.[0] ?? null;
     vitalInput.value = "";
-    if (!files.length) return;
-    const ok = [], skipped = [];
+    if (!file) return;
     try {
       const mod = await import("./vital.js").catch((e) => { console.error("Synth — the converter could not load:", e); return null; });
       if (!mod) return;
       const engine = api.engineOf?.(selected);
       if (!engine) { console.warn("Synth — pick a channel first, then import"); return; }
-      const known = mod.knownParamIds();
-      const read = async (f) => (f.name.toLowerCase().endsWith(".wav") ? "" : await f.text());
-      // classify everything up front so the summary can explain what was ignored and why
-      const kinds = new Map();
-      for (const f of files) {
-        try { kinds.set(f, mod.classifyFile(f.name, await read(f))); }
-        catch (e) { kinds.set(f, { kind: "error", reason: "could not be read: " + (e?.message ?? e) }); }
+      const text = await file.text();
+      const kind = mod.classifyFile(file.name, text);
+      if (kind.kind !== "vital") {
+        console.warn(`Synth — ${file.name} is not a .vital preset (${kind.reason ?? kind.kind}). This importer takes one preset file; for a wavetable use the Import button on the oscillator panel.`);
+        return;
       }
-      const of = (k) => files.filter((f) => kinds.get(f)?.kind === k);
-      // One preset per import: the supporting files may come together, but a second preset would only race the first.
-      const picked = mod.pickSinglePreset ? mod.pickSinglePreset(files) : { chosen: of("vital")[0] ?? null, ignored: of("vital").slice(1), count: of("vital").length };
-      if (picked.count > 1) {
-        console.warn(`Synth — ${picked.count} presets were selected; loading only "${picked.chosen?.name ?? "the first"}" (one at a time for now)`);
-      }
-      // 1) the preset first: it may set oscN.wavetable itself
-      for (const f of (picked.chosen ? [picked.chosen] : [])) {
+      let vital;
+      try { vital = JSON.parse(text); }
+      catch (e) { console.error(`Synth — ${file.name} could not be parsed: ${e?.message ?? e}`); return; }
+      const { preset, report } = mod.vitalToPreset(vital, file.name.replace(/\.vital$/i, ""));
+      const judged = mod.assessPreset(preset, mod.knownParamIds());
+      if (!judged.ok) { console.warn(`Synth — ${file.name} was not applied: ${judged.note}`); return; }
+      engine.loadPreset(preset);
+      engine.__sgrPreset = "user:" + preset.name;
+      await api.setPreset?.(selected, preset.name);
+      console.info("Synth — " + mod.describeReport(report));
+      // 1) wavetables that are INSIDE this file: use them, so one file is complete
+      const embedded = mod.vitalEmbeddedTables?.(vital) ?? [];
+      for (const table of embedded.filter((x) => x.frames?.length)) {
         try {
-          const vital = JSON.parse(await f.text());
-          const { preset, report } = mod.vitalToPreset(vital, f.name.replace(/\.vital$/i, ""));
-          const judged = mod.assessPreset(preset, known);
-          if (!judged.ok) { skipped.push(f.name + " — " + judged.note); continue; }
-          engine.loadPreset(preset);
-          engine.__sgrPreset = "user:" + preset.name;
-          await api.setPreset?.(selected, preset.name);
-          ok.push(f.name + " → " + mod.describeReport(report));
-          // The preset carries its own wavetables: settings.wavetables has one entry per oscillator, with the samples
-          // embedded. Take each base carrier and give it to that oscillator.
-          // Wavetables: use what the preset CARRIES (an embedded Wave Source or Audio File Source), and hand back to
-          // the player only what it does not -- a table that is an external file path, or a chain of Vital DSP with no
-          // base waveform. Every oscillator panel in the editor already has an Import button for exactly that case.
-          const embedded = mod.vitalEmbeddedTables?.(vital) ?? [];
-          const external = mod.externalAudioRefs?.(vital) ?? [];
-          for (const table of embedded.filter((x) => x.frames?.length)) {
-            try {
-              const samples = mod.flattenFrames(table.frames, table.frameSize);
-              const name = `${preset.name} osc${table.osc + 1} (${table.kind === "wave" ? "Wave Source" : "Audio File Source"}).wav`;
-              const blob = new Blob([mod.encodeWavFloat32(samples, table.sampleRate ?? 44100)], { type: "audio/wav" });
-              await engine.importWavetableFile(Math.min(table.osc, 2), new File([blob], name, { type: "audio/wav" }));
-              ok.push(`${f.name} → osc${table.osc + 1} embedded table (${table.frames.length} frames of ${table.frameSize}${table.skipped?.length ? ", modifiers dropped: " + table.skipped.join(" > ") : ""})`);
-            } catch (e) { skipped.push(`${f.name} osc${table.osc + 1} — ${e?.message ?? e}`); }
-          }
-          for (const table of embedded.filter((x) => !x.frames?.length)) {
-            const wanted = external.filter((r) => r.osc === table.osc);
-            const supplied = wanted.map((r) => ({ r, file: mod.matchLocalFile?.(r.name, files) })).find((x) => x.file);
-            if (supplied) {
-              try {
-                const blob = supplied.file;
-                const asWav = blob.name.toLowerCase().endsWith(".vitaltable")
-                  ? new File([new Blob([mod.encodeWavFloat32(mod.vitalTableToSamples(JSON.parse(await blob.text())).samples)], { type: "audio/wav" })], blob.name.replace(/\.vitaltable$/i, ".wav"))
-                  : blob;
-                await engine.importWavetableFile(Math.min(table.osc, 2), asWav);
-                ok.push(`${f.name} osc${table.osc + 1} ← ${supplied.file.name} (the preset names it but does not carry it)`);
-              } catch (e) { skipped.push(`${f.name} osc${table.osc + 1} — ${supplied.file.name} could not be used: ${e?.message ?? e}`); }
-            } else if (wanted.length) {
-              skipped.push(`${f.name} osc${table.osc + 1} — it needs "${wanted.map((r) => r.name).join('", "')}", which is not inside the preset; use the Import button on that oscillator panel (.wav)`);
-            } else {
-              skipped.push(`${f.name} osc${table.osc + 1} — its table is a Vital DSP chain (${table.type}) with no base waveform; use the Import button on that oscillator panel (.wav)`);
-            }
-          }
-        } catch (e) { skipped.push(f.name + " — " + (e?.message ?? e)); }
+          const samples = mod.flattenFrames(table.frames, table.frameSize);
+          const name = `${preset.name} osc${table.osc + 1} (${table.kind === "wave" ? "Wave Source" : "Audio File Source"}).wav`;
+          const blob = new Blob([mod.encodeWavFloat32(samples, table.sampleRate ?? 44100)], { type: "audio/wav" });
+          await engine.importWavetableFile(Math.min(table.osc, 2), new File([blob], name, { type: "audio/wav" }));
+          console.info(`Synth — osc${table.osc + 1} ← its embedded table (${table.frames.length} frames of ${table.frameSize}${table.skipped?.length ? ", modifiers dropped: " + table.skipped.join(" > ") : ""})`);
+        } catch (e) { console.warn(`Synth — osc${table.osc + 1} embedded table could not be used: ${e?.message ?? e}`); }
       }
-      // 2) then the tables: importing switches that oscillator to Custom and uploads
-      const tables = [...of("wav"), ...of("vitaltable")];
-      for (const [i, f] of tables.entries()) {
-        try {
-          let blob = f, name = f.name;
-          if (kinds.get(f).kind === "vitaltable") {
-            const { samples, frames, frameSize, sampleRate } = mod.vitalTableToSamples(JSON.parse(await f.text()));
-            if (!samples || !samples.length) throw new Error("the table has no audio in it");
-            blob = new Blob([mod.encodeWavFloat32(samples, sampleRate)], { type: "audio/wav" });
-            name = f.name.replace(/\.vitaltable$/i, "") + ".wav";
-            ok.push(`${f.name} → converted to wav (${frames} frames of ${frameSize})`);
-          }
-          await engine.importWavetableFile(Math.min(i, 2), new File([blob], name, { type: "audio/wav" }));
-          ok.push(f.name + " → osc" + (Math.min(i, 2) + 1));
-        } catch (e) { skipped.push(f.name + " — " + (e?.message ?? e)); }
+      // 2) wavetables this file does NOT carry: hand them over, with the name so the user can find the file
+      const external = mod.externalAudioRefs?.(vital) ?? [];
+      for (const table of embedded.filter((x) => !x.frames?.length)) {
+        const wanted = external.filter((r) => r.osc === table.osc);
+        if (wanted.length) {
+          console.warn(`Synth — osc${table.osc + 1} needs "${wanted.map((r) => r.name).join('", "')}", which is not inside this preset. ` +
+                       "Load it yourself with the Import button on that oscillator panel (.wav).");
+        } else {
+          console.warn(`Synth — osc${table.osc + 1}'s table is a Vital DSP chain (${table.type}) with no base waveform inside this file. ` +
+                       "Load a wavetable yourself with the Import button on that oscillator panel.");
+        }
       }
-      // 3) and finally the LFO shapes
-      for (const [i, f] of of("vitallfo").entries()) {
-        try {
-          const points = mod.vitallfoToPoints(JSON.parse(await f.text()));
-          if (!points.length) throw new Error("the shape has no points");
-          engine.setLfoShape(Math.min(i, 7), points);
-          ok.push(f.name + " → LFO " + Math.min(i, 7) + " (" + points.length + " points)");
-        } catch (e) { skipped.push(f.name + " — " + (e?.message ?? e)); }
-      }
-      // anything that was classified as junk or unreadable
-      for (const f of files) {
-        const k = kinds.get(f);
-        if (k && (k.kind === "junk" || k.kind === "error")) skipped.push(f.name + " — " + (k.reason ?? "not usable"));
-      }
-      for (const f of picked.ignored) skipped.push(f.name + " — only one preset is loaded at a time; import it on its own");
+      console.info(`Synth — ${file.name} applied: ${judged.mapped} parameter(s)${judged.unknown ? ", " + judged.unknown + " dropped" : ""}`);
     } catch (e) {
       console.error("Synth — the import stopped unexpectedly: " + (e?.message ?? e));
     } finally {
-      for (const line of ok) console.info("Synth — imported " + line);
-      for (const line of skipped) console.warn("Synth — skipped " + line);
-      console.info(`Synth — import finished: ${ok.length} used, ${skipped.length} skipped`);
       paint();
     }
   });
