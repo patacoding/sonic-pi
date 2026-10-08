@@ -18,6 +18,7 @@
     // rebuilding their app per switch left their module-level knob registry holding dead canvases and leaked a WebGL
     // context every time, until Chrome evicted the oldest one (the Shadertoy preview) and it went black.
     let current = null;
+    let builds = 0;               // how many times their app was actually built: it must stay 1
     const subs = new Map();      // param index -> { fn, off }
     const notes = new Set();     // their onNote callbacks, so the keyboard follows the channel too
 
@@ -45,9 +46,11 @@
       return true;
     };
 
+    window.__builds = () => builds;
     window.__mount = (engine) => {
       if (current) return window.__focus(engine), document.getElementById("app").children.length;
       current = engine;
+      builds++;
       const app = document.getElementById("app");
       app.textContent = "";
       buildApp(view, app);
