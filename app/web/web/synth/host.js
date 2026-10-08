@@ -40,7 +40,7 @@ function handleMidi(...a) {
   if (/note_on|noteon/i.test(path) && !parts.armed(part)) {
     entry.mapped = { ignored: "no preset chosen for this channel" };
     midiTrace.push(entry); if (midiTrace.length > 60) midiTrace.shift();
-    if (!warned.has(part)) { warned.add(part); say(`"${part}" has no preset chosen — its MIDI is ignored until you pick one (or the music sends a program change)`, true); }
+    if (!warned.has(part)) { warned.add(part); console.warn(`Synth — "${part}" has no preset chosen — its MIDI is ignored until you pick one (or the music sends a program change)`); }
     return true;
   }
   if (/note_on|noteon/i.test(path)) {
