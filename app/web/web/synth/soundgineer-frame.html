@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <!-- Their stylesheet, unscoped and complete, inside a frame: it cannot reach Sonic Pi's page from here, which is a
+       stronger guarantee than prefixing selectors (that broke :root variables, body rules and @media blocks). -->
+  <link rel="stylesheet" href="./vendor/soundgineer-ui.css" />
+  <style>html, body { margin: 0; height: 100%; background: transparent; } #app { height: 100%; }</style>
+</head>
+<body>
+  <div id="app"></div>
+  <script type="module">
+    import { buildApp } from "./vendor/soundgineer-ui.js";
+    // the parent hands us the engine of whichever channel its table has selected
+    window.__mount = (engine) => {
+      const app = document.getElementById("app");
+      app.textContent = "";
+      buildApp(engine, app);
+      return app.children.length;
+    };
+    window.__mounted = () => document.getElementById("app").children.length;
+  </script>
+</body>
+</html>

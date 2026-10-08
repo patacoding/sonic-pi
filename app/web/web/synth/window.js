@@ -29,8 +29,7 @@ const STYLE = `
     display: flex; flex-direction: column; gap: 6px; }
   /* the mount point must FILL the stage: measured at height 0 before this, which is why the interface was invisible
      even once it had been built */
-  #synth-sgr-app { flex: 1 1 auto; min-height: 420px; overflow: auto; border-radius: 6px; }
-  #synth-sgr-app > header { display: flex; align-items: center; gap: 10px; }
+  #synth-frame { flex: 1 1 auto; min-height: 420px; width: 100%; border: 0; border-radius: 6px; background: transparent; }
   #synth-guide { white-space: pre-wrap; font: 11px/1.4 ui-monospace, monospace; opacity: .85; max-height: 7.5em; overflow: auto; }
   #synth-midi { font: 11px/1.4 ui-monospace, monospace; opacity: .7; max-height: 4.5em; overflow: auto; }
 `;
@@ -56,39 +55,36 @@ export function createSynthWindow(api) {
   win.innerHTML = `<div id="synth-bar"><h4>Synth</h4><span id="synth-status"></span><span class="spacer"></span>
       <button id="synth-reader">start a reader</button><button id="synth-close">close</button></div>
     <div id="synth-main"><div id="synth-channels"></div>
-      <div id="synth-stage"><div style="display:flex;gap:6px;align-items:center"><h4 id="synth-stage-title">stage</h4><select id="synth-patch"></select></div><div id="synth-stage-body">the editor loads here…</div><div id="synth-sgr-app"></div></div></div>
+      <div id="synth-stage"><div style="display:flex;gap:6px;align-items:center"><h4 id="synth-stage-title">stage</h4><select id="synth-patch"></select></div><div id="synth-stage-body">the editor loads here…</div><iframe id="synth-frame" src="./soundgineer-frame.html" title="Soundgineer editor"></iframe></div></div>
     <h4>how the music addresses it</h4><div id="synth-guide"></div>
     <h4>recent MIDI</h4><div id="synth-midi"></div>`;
   document.body.appendChild(win);
   win.querySelector("#synth-close").addEventListener("click", () => set(false));
   win.querySelector("#synth-reader").addEventListener("click", () => startReader());
 
-  // Their stylesheet is written for their own page (body, :root, and so on). Prefixing every selector with our
-  // window's id keeps it inside our popup, which is the rule this whole layer is under: cover, never restyle.
-  async function loadScopedCss() {
-    if (document.getElementById("synth-sgr-css")) return;
-    const res = await fetch("./vendor/soundgineer-ui.css");
-    const raw = await res.text();
-    const scoped = raw.replace(/(^|\})([^@}{]+)\{/g, (m, close, sel) =>
-      close + sel.split(",").map((one) => `#synth-window ${one.trim()}`).join(", ") + "{");
-    const style = document.createElement("style");
-    style.id = "synth-sgr-css"; style.textContent = scoped;
-    document.head.appendChild(style);
-  }
-
-  /** Their own editor, built on the engine of whichever channel is selected. */
+  /**
+   * Their own editor, built on the engine of whichever channel is selected -- inside an iframe.
+   *
+   * The frame is the isolation: their stylesheet is written for a whole page (`:root`, `body`, media queries) and
+   * prefixing selectors by hand broke it (the interface came out garbled), while an iframe keeps every rule, variable
+   * and layout to itself and cannot touch Sonic Pi's page even in principle.
+   */
   async function mountSoundgineer() {
-    const host = document.getElementById("synth-sgr-app");
-    if (!host) return;
-    host.textContent = "";
+    const frame = document.getElementById("synth-frame");
+    if (!frame) return;
     try {
-      await loadScopedCss();
       let engine = api.engineOf?.(selected);
       if (!engine) { await api.ensurePart?.(selected); engine = api.engineOf?.(selected); }
-      if (!engine) { host.textContent = "the synth needs the app's engine: press Run on the audio page once, then reopen this window"; return; }
-      api.buildApp?.(engine, host);
-      host.dataset.built = selected;
-    } catch (e) { host.textContent = `the editor could not be built: ${e?.message ?? e}`; console.error(e); }
+      if (!engine) { status("the synth needs the app's engine: press Run on the audio page once, then reopen this window", true); return; }
+      const win = frame.contentWindow;
+      if (!win?.__mount) { status("the editor frame is still loading — try again in a moment"); return; }
+      const kids = win.__mount(engine);
+      frame.dataset.built = selected;
+      status(`${selected}: editor built (${kids} sections)`);
+    } catch (e) {
+      status(`the editor could not be built: ${e?.message ?? e}`, true);
+      console.error(e);
+    }
   }
 
   async function startReader() {
@@ -125,7 +121,7 @@ export function createSynthWindow(api) {
     win.querySelector("#synth-stage-body").textContent =
       st.parts?.[selected] ? `voices ${st.parts[selected].voices} · peak ${(st.parts[selected].peak ?? 0).toFixed(3)} · patch ${st.parts[selected].patch ?? "—"}`
                            : "no instrument on this channel yet — it is created by its first program change, note or CC.";
-    const built = document.getElementById("synth-sgr-app")?.dataset.built;
+    const built = document.getElementById("synth-frame")?.dataset.built;
     if (open && built !== selected && !mounting) { mounting = true; mountSoundgineer().finally(() => { mounting = false; }); }
     win.querySelector("#synth-guide").textContent = api.guide?.() ?? "";
     win.querySelector("#synth-midi").textContent = (api.midiTrace?.() ?? []).slice(-6).map((e) => `${e.path} ${JSON.stringify(e.args)}${e.mapped ? " → " + JSON.stringify(e.mapped) : ""}`).join("\n");
