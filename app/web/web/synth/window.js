@@ -63,7 +63,7 @@ export function createSynthWindow(api) {
   const win = document.createElement("div");
   win.id = "synth-window"; win.setAttribute("role", "dialog"); win.setAttribute("aria-label", "Synth");
   win.innerHTML = `<div id="synth-bar"><h4>Synth</h4><span id="synth-status"></span><span class="spacer"></span>
-      <button id="synth-zoom-out" title="smaller">−</button><span id="synth-zoom-val">100%</span><button id="synth-zoom-in" title="bigger">+</button><button id="synth-pan" title="drag the editor around inside this window">pan</button><button id="synth-fit" title="fit and re-centre">fit</button>
+      <button id="synth-zoom-out" title="smaller">−</button><span id="synth-zoom-val">100%</span><button id="synth-zoom-in" title="bigger">+</button><button id="synth-fit" title="fit and re-centre">fit</button>
       <button id="synth-reader">start a reader</button><button id="synth-panic">all notes off</button>
       <button id="synth-close">close</button></div>
     <div id="synth-main"><div id="synth-channels"></div>
@@ -81,11 +81,12 @@ export function createSynthWindow(api) {
 
   const status = (t, bad = false) => { const el = win.querySelector("#synth-status"); el.textContent = t ?? ""; el.style.color = bad ? "#f66" : ""; };
   win.querySelector("#synth-close").addEventListener("click", () => set(false));
+  win.querySelector("#synth-frame").addEventListener("load", () => installRightDragPan(win.querySelector("#synth-frame")));
   const setZoom = (z) => { zoom = Math.max(0.5, Math.min(2, z)); placeFrame(); };
   win.querySelector("#synth-zoom-in").addEventListener("click", () => setZoom(zoom * 1.25));
   win.querySelector("#synth-zoom-out").addEventListener("click", () => setZoom(zoom / 1.25));
   win.querySelector("#synth-fit").addEventListener("click", () => { zoom = 1; pan = { x: 0, y: 0 }; placeFrame(); });
-  win.querySelector("#synth-pan").addEventListener("click", (e) => {
+  win.querySelector("#synth-pan")?.addEventListener("click", (e) => {
     panMode = !panMode;
     win.querySelector("#synth-sgr-host").dataset.pan = panMode ? "on" : "off";
     e.currentTarget.setAttribute("aria-pressed", String(panMode));
@@ -239,6 +240,7 @@ export function createSynthWindow(api) {
       }
       mountTries = 0; mountError = null;
       if (lastBuilt === selected) { fitFrame(); return; }
+      installRightDragPan(frame);
       const kids = w.__mount(engine);
       // the editor's own preset dropdown does not know which preset this engine is on (it is a fresh browser after a
       // remount), so it is set to what we recorded -- display only, no change event, nothing is re-applied
@@ -257,6 +259,32 @@ export function createSynthWindow(api) {
       mountError = `could not be built: ${e?.message ?? e}`;
       console.error("Synth — mounting the editor failed", e);
     }
+  }
+
+  /**
+   * Move the editor with the right mouse button while it is zoomed past the stage.
+   *
+   * The events have to be caught inside the frame: a pointer over an iframe belongs to that document, so the parent
+   * never sees it. Only button 2 is taken, so their left-button interactions are untouched, and the context menu is
+   * suppressed only so that it cannot interrupt a drag.
+   */
+  function installRightDragPan(frame) {
+    try {
+      const doc = frame.contentDocument;
+      if (!doc || doc.__sgrPan) return;
+      doc.__sgrPan = true;
+      doc.addEventListener("contextmenu", (e) => e.preventDefault());
+      doc.addEventListener("pointerdown", (e) => {
+        if (e.button !== 2) return;
+        const x0 = e.clientX, y0 = e.clientY, p0 = { ...pan };
+        const move = (ev) => { pan = { x: p0.x + (ev.clientX - x0), y: p0.y + (ev.clientY - y0) }; placeFrame(); };
+        const up = () => { doc.removeEventListener("pointermove", move, true); doc.removeEventListener("pointerup", up, true); doc.removeEventListener("pointercancel", up, true); };
+        doc.addEventListener("pointermove", move, true);
+        doc.addEventListener("pointerup", up, true);
+        doc.addEventListener("pointercancel", up, true);
+        e.preventDefault();
+      }, true);
+    } catch { /* the frame is not ready yet */ }
   }
 
   let timer = 0;
