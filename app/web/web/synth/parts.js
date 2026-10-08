@@ -29,9 +29,8 @@ function restorePreset(key, engine) {
   if (!want?.name) return null;
   try {
     const all = JSON.parse(localStorage.getItem("soundgineer.presets.v1") ?? "[]");
-    const hit = want.kind === "user"
-      ? all.find((p) => p.name === want.name && (p.scope ?? "default") === key)
-      : null;
+    // the library is shared, so a user preset is found by name -- the channel only remembers WHICH preset, never owns it
+    const hit = want.kind === "user" ? all.find((p) => p.name === want.name) : null;
     if (hit) { engine.loadPreset(hit); return want.name; }
   } catch { /* nothing to restore */ }
   return want.name;                     // a factory preset is named the same in every build

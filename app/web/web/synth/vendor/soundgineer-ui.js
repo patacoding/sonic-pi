@@ -2617,22 +2617,21 @@ var FACTORY = [
 ];
 function readAll() {
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
+    const all = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
+    const byName = /* @__PURE__ */ new Map();
+    for (const p2 of all) if (p2 && typeof p2.name === "string") byName.set(p2.name, p2);
+    return [...byName.values()];
   } catch {
     return [];
   }
 }
-function scopeOf(engine) {
-  const s = engine?.__sgrScope;
-  return typeof s === "string" && s ? s : "default";
+function loadUserPresets() {
+  return readAll();
 }
-function loadUserPresets(scope) {
-  const all = readAll();
-  return scope == null ? all : all.filter((p2) => (p2.scope ?? "default") === scope);
-}
-function saveUserPresets(list, scope) {
-  const keep = readAll().filter((p2) => !((p2.scope ?? "default") === scope && list.some((n) => n.name === p2.name)));
-  localStorage.setItem(STORAGE_KEY, JSON.stringify([...keep, ...list]));
+function saveUserPresets(list) {
+  const byName = new Map(readAll().map((p2) => [p2.name, p2]));
+  for (const p2 of list) byName.set(p2.name, p2);
+  localStorage.setItem(STORAGE_KEY, JSON.stringify([...byName.values()]));
 }
 var PresetBrowser = class {
   constructor(engine) {
@@ -2645,12 +2644,11 @@ var PresetBrowser = class {
     save.addEventListener("click", () => {
       const name = prompt("Preset name?", "My Patch");
       if (!name) return;
-      const scope = scopeOf(this.engine);
-      const list = loadUserPresets(scope).filter((p2) => p2.name !== name);
-      list.push({ ...this.engine.toPreset(name), scope });
-      saveUserPresets(list, scope);
-      this.engine.__sgrPreset = `user:${scope}:${name}`;
-      this.refresh(`user:${scope}:${name}`);
+      const list = loadUserPresets().filter((p2) => p2.name !== name);
+      list.push(this.engine.toPreset(name));
+      saveUserPresets(list);
+      this.engine.__sgrPreset = `user:${name}`;
+      this.refresh(`user:${name}`);
     });
     const exportBtn = el("button", "hdr-btn", "EXPORT");
     exportBtn.title = "Download patch as JSON";
@@ -2674,12 +2672,11 @@ var PresetBrowser = class {
       try {
         const preset = JSON.parse(await f.text());
         this.engine.loadPreset(preset);
-        const scope = scopeOf(this.engine);
-        const list = loadUserPresets(scope).filter((p2) => p2.name !== preset.name);
-        list.push({ ...preset, scope });
-        saveUserPresets(list, scope);
-        this.engine.__sgrPreset = `user:${scope}:${preset.name}`;
-        this.refresh(`user:${scope}:${preset.name}`);
+        const list = loadUserPresets().filter((p2) => p2.name !== preset.name);
+        list.push(preset);
+        saveUserPresets(list);
+        this.engine.__sgrPreset = `user:${preset.name}`;
+        this.refresh(`user:${preset.name}`);
       } catch (err) {
         alert(`Could not load preset: ${err}`);
       }
@@ -2703,15 +2700,14 @@ var PresetBrowser = class {
       fGroup.appendChild(o);
     }
     this.select.appendChild(fGroup);
-    const mine = scopeOf(this.engine);
     const users = loadUserPresets();
     if (users.length) {
       const uGroup = el("optgroup");
       uGroup.label = "User";
       for (const p2 of users) {
         const o = el("option", void 0, p2.name);
-        o.value = `user:${p2.scope ?? "default"}:${p2.name}`;
-        o.textContent = (p2.scope ?? "default") === mine ? p2.name : `${p2.name}  (${p2.scope ?? "default"})`;
+        o.value = `user:${p2.name}`;
+        o.textContent = p2.name;
         uGroup.appendChild(o);
       }
       this.select.appendChild(uGroup);
@@ -2721,12 +2717,7 @@ var PresetBrowser = class {
   load(key) {
     const [kind, ...rest] = key.split(":");
     const name = rest.join(":");
-    const preset = kind === "factory" ? FACTORY.find((p2) => p2.name === name) : (() => {
-      const parts = value.split(":");
-      const scope = parts.length > 2 ? parts[1] : void 0;
-      const nm = parts.length > 2 ? parts.slice(2).join(":") : name;
-      return readAll().find((p2) => p2.name === nm && (scope == null || (p2.scope ?? "default") === scope));
-    })();
+    const preset = kind === "factory" ? FACTORY.find((p2) => p2.name === name) : readAll().find((p2) => p2.name === name);
     if (preset) {
       this.engine.loadPreset(preset);
       this.engine.__sgrPreset = key;
