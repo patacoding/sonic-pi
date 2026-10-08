@@ -1,335 +1,122 @@
-// Our adapter: the only part of the synth integration that is ours.
-//
-// Soundgineer is the engine (vendor/soundgineer, built into ./vendor/); this file is the bridge between it and
-// Sonic Pi, and it does exactly four things:
-//
-//   1. waits for the app's engine (it boots lazily on the first Run) instead of guessing when it exists,
-//   2. starts Soundgineer ON THE ENGINE'S OWN AudioContext, so the two share one clock,
-//   3. connects its node into engine.node.input -- the input bus the app already provides for the microphone --
-//      so whatever the music reads with `synth :sound_in_stereo` gets with_fx, the mixer, the scope and the
-//      Recorder for free (the contract our injection probes already measure 3/3),
-//   4. leaves `connectToDestination` alone (we route; it must NOT also play straight to the speakers).
-//
-// Published as `window.sonicPiSynth`. Nothing here touches the app's DOM, and nothing is persisted.
-import { SynthEngine } from "./vendor/soundgineer.js";
-import * as parts from "./parts.js";
+// The bridge: MIDI from the app -> instruments -> the engine's input bus. Enabled on purpose, and only then.
 import { patchByProgram, PATCHES, guide, DEFAULT_PROGRAM } from "./patches.js";
-import { parseSynthDirective, numbers, strings } from "./directives.js";
+import * as parts from "./parts.js";
 import { createSynthWindow } from "./window.js";
-import { buildApp } from "./vendor/soundgineer-ui.js";   // several timbres at once: one instance per named part
-
-export const SYNTH_ENABLED = true;
 
 const say = (t, bad = false) => (bad ? console.error : console.info)(`Synth — ${t}`);
+const trace = [];        // every record the app handed us, parsed or not: the instrument for "did anything arrive"
+const midiTrace = [];    // every performance signal, mapped or not
 
-let sg = null;
-let inputNode = null;
-let booting = null;
-let lastError = null;
-
-/** The engine boots lazily on the first Run; wait for it rather than guessing when it exists. */
-async function waitForEngine(timeoutMs = 20000) {
-  const t0 = performance.now();
-  for (;;) {
-    const node = globalThis.sonicPi?.engine?.node?.input;
-    if (node?.context) return node;
-    if (performance.now() - t0 > timeoutMs) {
-      throw new Error("the app's engine never appeared -- has anything been Run yet?");
-    }
-    await new Promise((r) => setTimeout(r, 200));
-  }
-}
-
-async function boot() {
-  if (sg) return sg;
-  if (booting) return booting;
-  booting = (async () => {
-    try {
-      inputNode = await waitForEngine();
-      const ctx = inputNode.context;                        // THE ENGINE'S context: one clock, sample-accurate
-      sg = new SynthEngine();
-      await sg.start({ ctx, connectToDestination: false });  // we route it, it must not also hit the speakers
-      const node = sg.audioNode;
-      if (!node) throw new Error("the engine handed back no node");
-      node.connect(inputNode);
-      sg.primeTables();                                      // the built-in wavetables: something for a note to play
-      sg.setParamById("master.volume", 0.8);
-      lastError = null;
-      say(`connected into the engine's input bus (${ctx.sampleRate} Hz, ${inputNode.channelCount} channel(s))`);
-      return sg;
-    } catch (e) {
-      lastError = String(e?.message ?? e);
-      booting = null;
-      say(`${lastError} — nothing will be heard until this is fixed`, true);
-      return null;
-    }
-  })();
-  return booting;
-}
-
-/** Apply a patch (by program number) to a part: the same path for a MIDI program change and the window. */
 export async function applyPatch(part, program) {
   const made = await parts.ensurePart(part);
   const patch = patchByProgram(program);
-  if (!patch) { say(`there is no instrument numbered ${program} (see the window's list)`, true); return false; }
+  if (!patch) { say(`there is no instrument numbered ${program}`, true); return false; }
   for (const [id, v] of Object.entries(patch.params)) made.engine.setParamById(id, v);
   parts.rememberPatch(part, patch.n, patch.name);
   say(`"${part}" is playing ${patch.n} ${patch.name}`);
   return true;
 }
 
-const trace = [];      // the last few records as they arrived: the instrument for "what does a puts look like here"
-
-/**
- * A record from the app's music. We only read `:synth` lines, and we act on them immediately -- this instrument
- * does not keep time (see the multipart argument, 5.8).
- */
-function handleRecord(r) {
-  // The record's real shape (measured, not assumed): kind, t, beat, thread, name, event, line, output...
-  // There is no field called `time`; `t` and `beat` are what the music knows about when it meant this.
-  const fields = (r && typeof r === "object") ? r : {};
-  const candidates = [fields.output, fields.text, fields.message, fields.value, fields.line, fields.name, fields.event,
-    ...Object.values(fields)].filter((v) => typeof v === "string");
-  // One `output` record can carry SEVERAL lines (three puts in one run arrived as one record), so split by line
-  // and parse each: taking only the first line was why the other two directives silently did nothing.
-  let d = null, text = "";
-  for (const c of candidates) {
-    for (const line of String(c).split(/\r?\n/)) {
-      const q = parseSynthDirective(line);
-      if (q) { d = q; text = line; break; }
-    }
-    if (d) break;
-  }
-  // Record EVERY record we are handed, parsed or not: "nothing arrived" and "what arrived did not parse" are
-  // different problems, and the first version could not tell them apart (it recorded only on success).
-  if (!d) {
-    trace.push({ at: Date.now(), parsed: false, kind: fields.kind ?? null, keys: Object.keys(fields).slice(0, 12),
-                 text: candidates.filter((c) => /synth/i.test(String(c))).map((c) => String(c).slice(0, 60)).join(" | ") || null,
-                 strings: candidates.map((c) => String(c).slice(0, 40)).slice(0, 6), t: fields.t ?? null, beat: fields.beat ?? null });
-    if (trace.length > 40) trace.shift();
-    return false;
-  }
-  const entry = { at: Date.now(), clock: globalThis.sonicPi?.session?.clockNow?.() ?? null,
-                  t: fields.t ?? null, beat: fields.beat ?? null, kind: fields.kind ?? null,
-                  thread: fields.thread ?? null, line: fields.line ?? null, event: fields.event ?? null,
-                  text: String(text).slice(0, 80),
-                  part: d.part ?? null, command: d.command ?? null, args: numbers(d.args), strings: strings(d.args),
-                  error: d.error ?? null };
-  trace.push(entry); if (trace.length > 40) trace.shift();
-  if (d.error) { say(`the music asked for something I do not understand: ${d.error}`, true); return false; }
-  const n = numbers(d.args), str = strings(d.args);
-  switch (d.command) {
-    case "note": parts.noteOn(d.part, n[0], n[1] ?? 1); break;
-    case "off": parts.noteOff(d.part, n[0]); break;
-    case "alloff": case "panic": parts.allNotesOff(n.length ? d.part : null); break;
-    case "param": if (str[0] != null && n.length) parts.setParam(d.part, str[0], n[n.length - 1]); break;
-    case "mod": { const e = parts.engineOf(d.part); if (e && str[0] && str[1]) e.addModRoute?.(str[0], str[1], n[n.length - 1] ?? 0.25); break; }
-    case "fx": { const e = parts.engineOf(d.part); if (e) e.setFxOrder?.(n); break; }
-    case "free": parts.free(d.part); break;
-    case "gate": say("`:synth, …, :gate` is not implemented yet", true); break;
-    default: break;
-  }
-  return true;
-}
-
-/**
- * A performance signal on its way out to MIDI: `{ path, args, time }` (see midiSend in the app). Matching MIDI to
- * timbres is the natural scheme -- channel is the part -- but the argument order is measured, not assumed, so this
- * records what it sees before it acts on it.
- */
+/** MIDI channel = instrument; the first number the app sends is the channel (/clockwork/midi/out/<kind> <port> <ch> …). */
 function handleMidi(...a) {
   const r = a[0] ?? {};
-  const nums = (r.args ?? []).filter((x) => typeof x === "number");   // [channel, values…]
-  const entry = { at: Date.now(), clock: globalThis.sonicPi?.session?.clockNow?.() ?? null, path: r.path ?? null,
-                  args: (r.args ?? []).map((x) => (typeof x === "number" ? x : String(x).slice(0, 20))), time: r.time ?? null };
+  const nums = (r.args ?? []).filter((x) => typeof x === "number");
   const path = String(r.path ?? "");
-  // The app documents the shape: "/clockwork/midi/out/<kind> <port> <channel> <values…>", so the first NUMBER is the
-  // channel -- which is the natural part selector (channel 0 -> main, channel n -> chN).
   const channel = typeof nums[0] === "number" ? nums[0] : 0;
   const part = channel <= 0 ? "main" : `ch${channel}`;
+  const entry = { at: Date.now(), path, args: r.args ?? [], channel, part, mapped: null };
   if (/note_on|noteon/i.test(path)) {
-    const [, note, velocity] = nums;                      // [channel, note, velocity]
-    entry.mapped = { command: "note", note, velocity };
+    const [, note, velocity] = nums;
+    entry.mapped = { note, velocity };
     if (typeof note === "number") parts.noteOn(part, note, typeof velocity === "number" ? velocity / 127 : 1);
   } else if (/note_off|noteoff/i.test(path)) {
-    const [, note] = nums; entry.mapped = { command: "off", note };
+    const [, note] = nums; entry.mapped = { note };
     if (typeof note === "number") parts.noteOff(part, note);
   } else if (/program_change|program/i.test(path)) {
-    const [, program] = nums;                             // [channel, program]
-    const patch = patchByProgram(program);
-    entry.mapped = { command: "patch", program, patch: patch?.name ?? null };
+    const [, program] = nums; const patch = patchByProgram(program);
+    entry.mapped = { program, patch: patch?.name ?? null };
     if (patch) applyPatch(part, program);
   } else if (/control|cc/i.test(path)) {
-    const [, cc, value] = nums;                           // [channel, cc, value]
-    const PARAM_BY_CC = { 7: "master.volume", 74: "filter1.cutoff", 71: "filter1.resonance", 72: "env1.release", 73: "env1.attack" };
-    const id = PARAM_BY_CC[cc];
-    entry.mapped = { command: "cc", cc, value, param: id ?? null };
+    const [, cc, value] = nums;
+    const MAP = { 7: "master.volume", 71: "filter1.resonance", 72: "env1.release", 73: "env1.attack", 74: "filter1.cutoff" };
+    const id = MAP[cc];
+    entry.mapped = { cc, value, param: id ?? null };
     if (id && typeof value === "number") parts.setParam(part, id, value / 127);
-  } else {
-    entry.mapped = null;
   }
-  midiTrace.push(entry); if (midiTrace.length > 40) midiTrace.shift();
+  midiTrace.push(entry); if (midiTrace.length > 60) midiTrace.shift();
   return true;
 }
 
-const midiTrace = [];
-/**
- * Watch the app's public engine boundary instead of asking upstream for a hook.
- *
- * Everything the music does reaches the engine as OSC through `window.sonicPi.engine.sendOSC` -- including the MIDI
- * it emits -- so wrapping that one public method gives us the performance signals with no edit to any upstream file.
- * Nothing else of ours touches the app: remove this layer and the synth is gone, which is the point.
- */
-function installEngineObserver() {
-  const wrap = () => {
-    const e = globalThis.sonicPi?.engine;
-    if (!e || typeof e.sendOSC !== "function" || e.__sgrObserved) return;
-    const original = e.sendOSC.bind(e);
-    e.sendOSC = (msg, ...rest) => {
-      try {
-        const address = msg?.address ?? msg?.path ?? (Array.isArray(msg) ? msg[0] : null);
-        const args = msg?.args ?? (Array.isArray(msg) ? msg.slice(1) : []);
-        if (address) observeOsc(String(address), args, msg?.time ?? null);
-      } catch (err) { console.error(`Synth — observing the engine threw: ${err?.message ?? err}`); }
-      return original(msg, ...rest);
-    };
-    e.__sgrObserved = true;
-    console.info("Synth — watching the engine's OSC for performance signals");
-  };
-  wrap();
-  setInterval(wrap, 2000);            // the engine is rebuilt on some runs; keep watching the current one
-}
+// ── enabling: the one deliberate step that touches audio ─────────────────────────────────────────────────
+let enabled = false, linkError = null, readerStarted = false;
 
-/** `/clockwork/midi/out/<kind> <port> <channel> <values…>` and friends -> the same mapping the direct hook used. */
-function observeOsc(address, args, time) {
-  const kind = address.includes("/midi/out/") ? address.split("/midi/out/")[1] : address;
-  const path = kind ? `/${kind}` : address;
-  if (!/note_on|note_off|control_change|program_change|pitch_bend|channel_pressure/i.test(path)) return false;
-  return handleMidi({ path, args, time });
+async function ensureEngineExists() {
+  if (globalThis.sonicPi?.engine?.node?.input) return true;
+  say("pressing the app's Run once so its engine exists — that also runs the current buffer");
+  document.getElementById("btn-run")?.click();
+  for (let i = 0; i < 40; i++) { if (globalThis.sonicPi?.engine?.node?.input) return true; await new Promise((r) => setTimeout(r, 250)); }
+  return false;
 }
+async function startReader(tries = 8) {
+  for (let i = 0; i < tries && !readerStarted; i++) {
+    try { await globalThis.sonicPi?.session?.run?.("synth :sound_in_stereo, sustain: 3600, amp: 1", { group: 0 });
+          readerStarted = true; say("reader started — the synth is heard through the engine"); return true; }
+    catch { await new Promise((r) => setTimeout(r, 500)); }
+  }
+  say("the reader did not start — press 'start a reader' in the window", true);
+  return false;
+}
+export async function enable() {
+  if (enabled) return true;
+  linkError = null;
+  try {
+    if (!(await ensureEngineExists())) throw new Error("the app's engine did not appear");
+    await parts.attachToEngine(15000);
+    enabled = true;
+    say("Soundgineer enabled — instruments are on the engine's context");
+    startReader();
+    return true;
+  } catch (e) { linkError = String(e?.message ?? e); enabled = false; say(`could not enable: ${linkError}`, true); return false; }
+}
+export function disable() {
+  parts.detach(); enabled = false; readerStarted = false;
+  say("Soundgineer disabled — the instruments are released");
+  return true;
+}
+const linkState = () => ({ state: linkError ? "error" : !enabled ? "off" : !readerStarted ? "starting (no reader yet)" : "ready",
+  reason: linkError, enabled, reader: readerStarted, out: parts.outState(), instruments: parts.list(), cap: parts.capOf() });
 
 const api = {
-  get ready() { return !!sg; },
-  get error() { return lastError; },
-  node: () => sg?.audioNode ?? null,
-  engine: () => sg,
-  /** What a probe or the window needs to know: is it running, how loud, how many voices, and why not. */
-  state: () => ({
-    running: !!sg,
-    error: lastError,
-    sampleRate: inputNode?.context?.sampleRate ?? null,
-    connected: !!sg && !!inputNode,
-    voices: sg?.voiceCount ?? 0,
-    peak: Math.max(sg?.peakL ?? 0, sg?.peakR ?? 0),
-    params: sg ? { volume: sg.getParamById?.("master.volume"), polyphony: sg.getParamById?.("master.polyphony") } : null,
-  }),
-  start: async () => !!(await boot()),
-  noteOn: async (note, velocity = 1) => (await boot())?.noteOn(note, velocity),
-  noteOff: (note) => sg?.noteOff(note),
-  allNotesOff: () => sg?.allNotesOff?.(),
-  /** By Soundgineer's own stable id (plan: native ids, so there is no mapping table of ours). */
-  setParam: (id, value) => sg?.setParamById(id, value),
-  params: () => sg?.values ?? null,
-  handleRecord,
-  trace: () => trace.slice(),
-  handleMidi,
-  midiTrace: () => midiTrace.slice(),
-  watchEngine: installEngineObserver,
-  /** What the window shows: how the music addresses this synth, and which number is which instrument. */
-  guide,
+  get ready() { return enabled; },
+  get error() { return linkError; },
+  state: () => ({ ...parts.state(), enabled, reader: readerStarted, link: linkState().state }),
+  link: linkState,
+  enable, disable, enabled: () => enabled,
+  engineOf: parts.engineOf,
+  ensurePart: (n) => parts.ensurePart(n).then(() => true),
+  noteOn: (part, note, velocity = 1) => parts.noteOn(part ?? "main", note, velocity),
+  noteOff: (part, note) => parts.noteOff(part ?? "main", note),
+  allNotesOff: (part) => parts.allNotesOff(part ?? null),
+  setParam: (part, id, value) => parts.setParam(part ?? "main", id, value),
+  applyPatch, handleMidi, guide,
   patches: () => PATCHES.map((p) => ({ ...p })),
-  applyPatch,
+  midiTrace: () => midiTrace.slice(),
+  trace: () => trace.slice(),
+  handleRecord(r) {
+    // Kept as the diagnostic tap: every record the app hands this layer is remembered, parsed or not.
+    const fields = (r && typeof r === "object") ? r : {};
+    trace.push({ at: Date.now(), kind: fields.kind ?? null, keys: Object.keys(fields).slice(0, 10),
+                 strings: Object.values(fields).filter((v) => typeof v === "string").map((v) => v.slice(0, 50)).slice(0, 4) });
+    if (trace.length > 40) trace.shift();
+    return false;                       // the `:sgr` sigil was withdrawn; MIDI is the control path
+  },
 };
 
-// Multi-timbre: the music names the part explicitly, every time (`puts :synth, :bass, :note, 60`), so there is no
-// "current part" to get out of step between live loops (docs/plan/soundgineer-multipart-argument.md §5.5).
-api.parts = {
-  ensure: (name) => parts.ensurePart(name).then(() => true),
-  list: parts.list,
-  has: parts.has,
-  engine: parts.engineOf,
-  noteOn: parts.noteOn,
-  noteOff: parts.noteOff,
-  setParam: parts.setParam,
-  allNotesOff: parts.allNotesOff,
-  free: parts.free,
-  state: parts.state,
-  // exposed so the window and the probes can see where the sound goes and when the engines were rebuilt
-  generation: parts.generation,
-  outState: parts.outState,
-  ownContext: parts.usingOwnContext,
-  adoptAppContext: parts.adoptAppContext,
-};
-globalThis.sonicPiParts = api.parts;
-// the window is ours: a button on the audio page and a popup that covers rather than rearranges (window.js)
 api.window = createSynthWindow({
   state: parts.state, patches: () => PATCHES, guide, midiTrace: () => midiTrace.slice(),
-  applyPatch, defaultProgram: DEFAULT_PROGRAM, buildApp: null, engineOf: parts.engineOf, ensurePart: (n) => parts.ensurePart(n).then(() => true), ownContext: parts.usingOwnContext,
+  applyPatch, defaultProgram: DEFAULT_PROGRAM, link: linkState, enable, disable,
+  engineOf: parts.engineOf, ensurePart: (n) => parts.ensurePart(n).then(() => true),
 });
-// The app's engine boots on its first Run. Until then our own context keeps the window and its instruments usable;
-// when the engine appears we move onto it, which is what puts the sound into Sonic Pi's chain (with_fx, scope, the
-// Recorder). Polling is cheap and idempotent.
-// Being inside Sonic Pi means: the instruments are on the engine's context AND something reads its input bus. The
-// reader is retried rather than attempted once: it can only start when the engine is actually there, and a single
-// failure used to leave notes sounding into nothing.
-let readerStarted = false;
-async function startReaderUntilItTakes(tries = 10) {
-  for (let i = 0; i < tries && !readerStarted; i++) {
-    const s = globalThis.sonicPi?.session;
-    if (s?.run) {
-      try {
-        await s.run("synth :sound_in_stereo, sustain: 3600, amp: 1", { group: 0 });
-        readerStarted = true;
-        say("reader started — the synth is heard through the engine");
-        return true;
-      } catch (e) { /* the engine is not ready yet; try again */ }
-    }
-    await new Promise((r) => setTimeout(r, 700));
-  }
-  if (!readerStarted) say("could not start the reader yet — use the window's 'start a reader' button", true);
-  return readerStarted;
-}
-
-setInterval(async () => {
-  const node = globalThis.sonicPi?.engine?.node?.input;
-  if (!node?.context) return;
-  if (parts.adoptAppContext(node.context)) {
-    say("the synth is now inside the app's engine");
-    startReaderUntilItTakes();
-  } else if (!readerStarted && parts.state().ownContext === false) {
-    startReaderUntilItTakes(2);                       // already on the engine's context but nothing reading: try again
-  }
-}, 2000);
-
-/**
- * The link, described rather than guessed. Every failure this thread has hit is a state: no engine yet, on our own
- * context, adopted but nothing reading the bus, or ready. Naming them is the first step to a predictable link.
- */
-api.link = () => {
-  const engineUp = !!globalThis.sonicPi?.engine?.node?.input;
-  const st = parts.state();
-  const own = st.ownContext;
-  const names = parts.list();
-  const state = !engineUp ? (own ? "standalone (speakers)" : "starting")
-    : own ? "engine up, not adopted yet"
-      : !readerStarted ? "on the engine, no reader"
-        : names.length ? "ready" : "on the engine, no instrument yet";
-  return { state, engineUp, ownContext: own, out: parts.outState(), reader: readerStarted,
-           generation: parts.generation(), instruments: names, cap: st.cap };
-};
-
-/** Ask the app to boot its engine. This is the app's own Run, so it also runs the current buffer -- said, not hidden. */
-api.connectToEngine = async () => {
-  if (globalThis.sonicPi?.engine?.node?.input) return true;
-  say("pressing the app's Run so its engine exists — that also runs the current buffer, once");
-  document.getElementById("btn-run")?.click();
-  for (let i = 0; i < 20; i++) {
-    if (globalThis.sonicPi?.engine?.node?.input) { say("the app's engine is up"); return true; }
-    await new Promise((r) => setTimeout(r, 300));
-  }
-  say("the app's engine did not appear after Run — check the editor for an error", true);
-  return false;
-};
 
 globalThis.sonicPiSynth = api;
 export { api as synthHost };
