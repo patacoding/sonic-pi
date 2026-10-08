@@ -109,6 +109,7 @@ async function attachWhenPossible() {
     await parts.attachToEngine(5000);
     enabled = true; linkError = null;
     say("the engine is up — the instruments are on its context");
+    parts.restoreRemembered().catch(() => {});      // a channel's preset must not wait for a click to come back
     startReader();
     return true;
   } catch (e) { linkError = String(e?.message ?? e); return false; }

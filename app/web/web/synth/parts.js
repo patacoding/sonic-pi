@@ -188,6 +188,26 @@ function syncFromEditor(key, p) {
   } catch { /* the engine may be mid-teardown */ }
 }
 
+/** Every channel we have a remembered preset for. */
+export function rememberedChannels() {
+  try { return Object.entries(JSON.parse(localStorage.getItem(PRESET_KEY) ?? "{}")).map(([key, v]) => ({ key, ...v })); }
+  catch { return []; }
+}
+
+/**
+ * Bring the remembered channels back before anyone clicks them. Lazily restoring only worked for a channel whose
+ * engine already existed -- in practice main -- so every other channel looked forgotten until it was selected.
+ */
+export async function restoreRemembered() {
+  const done = [];
+  for (const rec of rememberedChannels()) {
+    if (parts.has(rec.key) || parts.size >= cap) continue;
+    try { await ensurePart(rec.key); done.push(rec.key); } catch { /* over the cap or no engine yet */ }
+  }
+  if (done.length) say(`restored ${done.join(", ")} from the last session`);
+  return done;
+}
+
 export const state = () => ({
   context: ctx ? { sampleRate: ctx.sampleRate, state: ctx.state } : null,
   cap,
