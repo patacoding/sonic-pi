@@ -2,23 +2,58 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <!-- Their stylesheet, unscoped, in its own document: it cannot reach Sonic Pi's page, and -- the reason this must be
-       a frame rather than a div -- 100vh/100vw inside it mean THIS frame's box, which the parent fixes at their design
-       size. Sizing a div that way is impossible, and their layout is written in vh. -->
   <link rel="stylesheet" href="./vendor/soundgineer-ui.css" />
+  <style>
+    html, body { margin: 0; height: 100%; background: transparent; }
+    #app { min-height: 100%; }
+  </style>
 </head>
 <body>
   <div id="app"></div>
   <script type="module">
     import { buildApp } from "./vendor/soundgineer-ui.js";
+
+    // ONE view, built once, against this proxy. Its whole job is to guarantee that the UI is mapped to the SELECTED
+    // channel's preset data -- for reading and for writing -- without anything ever being created or destroyed:
+    // rebuilding their app per switch left their module-level knob registry holding dead canvases and leaked a WebGL
+    // context every time, until Chrome evicted the oldest one (the Shadertoy preview) and it went black.
+    let current = null;
+    const subs = new Map();      // param index -> { fn, off }
+    const notes = new Set();     // their onNote callbacks, so the keyboard follows the channel too
+
+    const view = new Proxy({}, {
+      get(_t, key) {
+        if (key === "onParam") return (index, fn) => {
+          subs.set(index, { fn, off: current?.onParam?.(index, fn) });
+          return () => { try { subs.get(index)?.off?.(); } catch { /* already off */ } subs.delete(index); };
+        };
+        if (key === "onNote") return (fn) => { notes.add(fn); return () => notes.delete(fn); };
+        const v = current?.[key];
+        return typeof v === "function" ? v.bind(current) : v;
+      },
+      set(_t, key, value) { if (current) current[key] = value; return true; },
+      has(_t, key) { return current ? key in current : false; },
+    });
+
+    // THE SWITCH: the only place that decides which engine the view is looking at. Synchronous on purpose -- nothing
+    // may be awaited between unbinding the old engine and binding the new one.
+    window.__focus = (engine) => {
+      if (!engine || engine === current) return false;
+      for (const [index, sub] of subs) { try { sub.off?.(); } catch { /* already off */ } sub.off = engine.onParam?.(index, sub.fn); }
+      current = engine;
+      for (const [index, sub] of subs) { try { sub.fn(engine.getParam?.(index)); } catch { /* a knob mid-teardown */ } }
+      return true;
+    };
+
     window.__mount = (engine) => {
+      if (current) return window.__focus(engine), document.getElementById("app").children.length;
+      current = engine;
       const app = document.getElementById("app");
       app.textContent = "";
-      buildApp(engine, app);
+      buildApp(view, app);
       return app.children.length;
     };
     window.__kids = () => document.getElementById("app").children.length;
-    window.__diag = () => ({ inner: [innerWidth, innerHeight], kids: window.__kids() });
   </script>
 </body>
 </html>

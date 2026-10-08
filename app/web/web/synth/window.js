@@ -261,7 +261,10 @@ export function createSynthWindow(api) {
       if (builtFor === selected && builtEngine === engine) { fitFrame(); return; }
       installRightDragPan(frame);
       allowNativeScrolling(frame);
-      const kids = w.__mount(engine);
+      // Mount ONCE. After that a channel switch is a repoint of the same view (the frame's __focus): nothing is
+      // rebuilt, so their knob registry never holds dead canvases and no WebGL context is leaked.
+      const already = builtEngine === engine;
+      const kids = (already && typeof w.__focus === "function") ? (w.__focus(engine), 0) : w.__mount(engine);
       // the editor's own preset dropdown does not know which preset this engine is on (it is a fresh browser after a
       // remount), so it is set to what we recorded -- display only, no change event, nothing is re-applied
       try {
