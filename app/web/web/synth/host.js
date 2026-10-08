@@ -191,6 +191,8 @@ api.window = createSynthWindow({
   applyPatch, defaultProgram: DEFAULT_PROGRAM, link: linkState,
   enable, disable, enabled: () => enabled, panic, startReader: startReaderOnce,
   engineOf: parts.engineOf, ensurePart: (n) => parts.ensurePart(n).then(() => true),
+  // the window needs these to clear a channel: without them the Remove button silently did nothing
+  setPreset: parts.setPreset, rememberPreset: parts.rememberPreset,
 });
 
 globalThis.sonicPiSynth = api;

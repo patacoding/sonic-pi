@@ -109,6 +109,20 @@ async function createEngine(ch) {
   const node = engine.audioNode;
   if (node) node.connect(inputNode);
   ch.engine = engine; ch.node = node;
+  // THEIR loadPreset writes this.values directly and never calls setParam, so no param listener is notified:
+  // the engine holds the preset (the sound and getParam are right) but every knob and graph keeps the values it
+  // was drawn with. That is the player's "parameters never update" -- not a channel-switching problem.
+  const rawLoad = engine.loadPreset?.bind(engine);
+  if (rawLoad) engine.loadPreset = (preset) => {
+    const out = rawLoad(preset);
+    try {
+      for (const [index, group] of engine.paramListeners ?? []) {
+        for (const fn of group) { try { fn(engine.values[index]); } catch { /* a widget mid-teardown */ } }
+      }
+    } catch { /* their listener table may change shape */ }
+    return out;
+  };
+
   ch.rawSet = engine.setParam?.bind(engine) ?? null;
   ch.rawSetById = engine.setParamById?.bind(engine) ?? null;
   // their knobs call setParam(index, normalized): record it in the data, then render it to the other channels
@@ -131,7 +145,9 @@ export async function ensurePart(name = "main") {
   const key = String(name);
   let ch = channels.get(key);
   if (!ch) ch = await createChannel(key);
-  if (!ch.patchName) return ch;                    // unarmed: no engine, no sound, by design
+  // An engine exists for EVERY channel, preset or not: the editor is built around an engine, so without one a channel
+  // with no preset could never be given one (a dead end the player hit). Silence is enforced where it belongs -- at the
+  // MIDI boundary, which ignores a channel that has no preset chosen.
   if (!ch.engine) { await attachToEngineIfNeeded(); await createEngine(ch); renderAll(ch); }
   return ch;
 }

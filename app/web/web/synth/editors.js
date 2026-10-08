@@ -66,7 +66,7 @@ export function createEditorPool({ host, frameUrl, cap = 2, onStatus }) {
   }
 
   function show(part) {
-    for (const [p, ed] of entries) ed.frame.style.display = p === part ? "block" : "none";
+    for (const [p, ed] of entries) ed.frame.style.display = (p === part && ed.built) ? "block" : "none";
     const i = order.indexOf(part);
     if (i !== -1) order.splice(i, 1);
     order.push(part);
@@ -75,17 +75,29 @@ export function createEditorPool({ host, frameUrl, cap = 2, onStatus }) {
 
   function ensure(part, engine) {
     let ed = entries.get(part);
+    const stamp = engine?.__sgrPreset ?? null;      // their engine records the preset it is on; a change means redraw
     if (ed) {
-      if (engine && ed.engine !== engine) { ed.engine = engine; ed.built = false; }
-      maybeMount(ed, part);
-      return ed;
+      if (engine && (ed.engine !== engine || (stamp && ed.stamp !== stamp))) {
+        // The engine changed AFTER this document was built. Their widgets (3D wavetable, MATRIX, ENV, FX) read state
+        // once at build time and only the knobs listen for param changes, so repointing leaves the document showing the
+        // old values -- which is exactly "the parameters never update". A fresh document is the only arrangement where
+        // every widget is correct, and this happens once per preset change, not once per switch.
+        say("rebuilding the view for " + part + " because its preset changed to " + String(stamp));
+        try { ed.frame.remove(); } catch { /* already gone */ }
+        entries.delete(part);
+        ed = undefined;
+      } else {
+        ed.stamp = stamp;
+        maybeMount(ed, part);
+        return ed;
+      }
     }
     evictIfNeeded();
     const frame = document.createElement("iframe");
     frame.dataset.part = part;
     frame.title = "Soundgineer editor - " + part;
     styleFrame(frame);
-    ed = { frame, engine, built: false };
+    ed = { frame, engine, built: false, stamp };
     entries.set(part, ed);
     frame.addEventListener("load", () => { allowNativeScrolling(frame); maybeMount(ed, part); fit(ed); syncPreset(part); });
     host.appendChild(frame);
@@ -111,8 +123,15 @@ export function createEditorPool({ host, frameUrl, cap = 2, onStatus }) {
   /** THE SWITCH: the selected channel gets its view (built once) and only that view is displayed. */
   async function select(part, api) {
     let engine = api?.engineOf?.(part) ?? null;
-    if (!engine) { try { await api?.ensurePart?.(part); } catch { /* no engine yet: nothing to show */ } engine = api?.engineOf?.(part) ?? null; }
-    ensure(part, engine);
+    if (!engine) { try { await api?.ensurePart?.(part); } catch { /* no engine yet */ } engine = api?.engineOf?.(part) ?? null; }
+    // ALWAYS show the selected channel's own view, even before its engine exists. Returning early here left the
+    // previous channel's view on screen, which is exactly the player's "switching channels does not update the
+    // parameters": the display never switched at all.
+    const ed = ensure(part, engine);
+    if (!engine) say(part + " has no engine yet -- its view is shown empty and will fill in when one exists");
+    // a frame's load event can fire for the initial about:blank, before the module exists; retry EVERY frame here so one
+    // that was created while the player switched away still gets built
+    for (const [p, ed] of entries) maybeMount(ed, p);
     show(part);
     syncPreset(part, api);
     return engine;

@@ -1,6 +1,8 @@
 // Our window: the channel table, the numbering guide, the MIDI echo, and -- when Soundgineer is enabled -- their own
 // editor. Nothing of Sonic Pi's UI is touched: this element covers the page, it never rearranges it, and no state of
 // ours is persisted.
+import { createEditorPool } from "./editors.js";
+
 const STYLE = `
   #synth-btn { position: fixed; right: 0; top: calc(50% + 6.3em); z-index: 101; writing-mode: vertical-rl; height: 5.4em;
     overflow: hidden; padding: 10px 6px; cursor: pointer; font: 12px/1.1 system-ui, sans-serif; letter-spacing: .04em;
@@ -77,11 +79,47 @@ export function createSynthWindow(api) {
       <h4>recent MIDI</h4><div id="synth-midi"></div>
     </details>`;
   document.body.appendChild(win);
+  // one document per channel, built once; switching only shows another one (see editors.js). No LRU: with a handful of
+  // channels, destroying and rebuilding views is the churn we are trying to eliminate.
+  const pool = createEditorPool({
+    host: win.querySelector("#synth-sgr-host"),
+    frameUrl: location.href.replace(/[^/]*$/, "") + "synth/soundgineer-frame.html",
+    cap: 64, onStatus: (m) => console.info("Synth — " + m),
+  });
+  try { win.querySelector("#synth-frame")?.remove(); } catch { /* already gone */ }
+  // Remove sound, per channel row. Delegated: the rows are rebuilt on every paint, and this leaves that loop alone.
+  win.querySelector("#synth-channels")?.addEventListener("click", async (e) => {
+    const btn = e.target?.closest?.(".synth-row-clear");
+    if (!btn) return;
+    e.stopPropagation();                       // do not also select the row
+    e.preventDefault();
+    const part = btn.dataset.part;
+    try {
+      if (api.setPreset) await api.setPreset(part, null);
+      else if (api.rememberPreset) api.rememberPreset(part, null);
+      console.info("Synth — " + part + " has no preset now, so it stays silent");
+    } catch (err) { console.error("Synth — could not clear " + part + ": " + (err?.message ?? err)); }
+    paint();
+  });
+  // clearing a channel's sound: our own control, so nothing of theirs is touched. A channel with no preset is silent.
+  const clearBtn = document.createElement("button");
+  clearBtn.id = "synth-clear-preset";
+  clearBtn.type = "button";
+  clearBtn.textContent = "Remove sound";
+  clearBtn.title = "Forget this channel's preset: it stops sounding until you choose another";
+  clearBtn.addEventListener("click", async () => {
+    const part = selected;
+    try {
+      if (api.setPreset) await api.setPreset(part, null);
+      else if (api.rememberPreset) api.rememberPreset(part, null);
+      console.info("Synth — " + part + " has no preset now, so it stays silent");
+    } catch (e) { console.error("Synth — could not clear " + part + ": " + (e?.message ?? e)); }
+    paint();
+  });
+  try { win.querySelector("#synth-help")?.appendChild(clearBtn); } catch { /* the help block may be absent */ }
 
   const status = (t, bad = false) => { const el = win.querySelector("#synth-status"); el.textContent = t ?? ""; el.style.color = bad ? "#f66" : ""; };
   win.querySelector("#synth-close").addEventListener("click", () => set(false));
-  win.querySelector("#synth-frame").addEventListener("load", () => allowNativeScrolling(win.querySelector("#synth-frame")));
-  win.querySelector("#synth-frame").addEventListener("load", () => installRightDragPan(win.querySelector("#synth-frame")));
   win.querySelector("#synth-pan")?.addEventListener("click", (e) => {
     panMode = !panMode;
     win.querySelector("#synth-sgr-host").dataset.pan = panMode ? "on" : "off";
@@ -121,7 +159,7 @@ export function createSynthWindow(api) {
       const part = ch === 0 ? "main" : `ch${ch}`;
       const p = st.parts?.[part];
       rows.push(`<tr class="${part === selected ? "on" : ""} clickable" data-part="${part}"><td>${ch}</td><td>${part}</td>
-        <td>${p?.preset ?? "—"}</td><td>${p?.voices ?? "—"}</td><td>${p ? (p.peak ?? 0).toFixed(2) : "—"}</td></tr>`);
+        <td>${p?.preset ?? "—"}</td><td>${p?.voices ?? "—"}</td><td>${p ? (p.peak ?? 0).toFixed(2) : "—"}</td><td><button class="synth-row-clear" data-part="${part}" title="remove this channel's sound">×</button></td></tr>`);
     }
     win.querySelector("#synth-channels").innerHTML =
       `<table><thead><tr><th>ch</th><th>part</th><th>preset</th><th>voi</th><th>peak</th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
@@ -142,6 +180,7 @@ export function createSynthWindow(api) {
     const gate = win.querySelector("#synth-gate"), host = win.querySelector("#synth-sgr-host");
     const on = !!link.enabled;
     gate.style.display = on ? "none" : "flex";
+    if (on && open) pool.select(selected, api);   // the switch: build once, then only display
     host.style.display = on ? "block" : "none";
     // A channel that has no engine yet has engineOf() === null, which matched the never-built state and skipped the
     // mount for ever: the editor stayed on the previous channel, so a preset chosen for ch4 was written to main.
@@ -240,6 +279,9 @@ export function createSynthWindow(api) {
   }
   let mountTries = 0;
   async function mountEditor() {
+    // superseded by the editor pool: once it owns the views, this legacy path only ever found the removed
+    // #synth-frame and threw "cannot read properties of null" on every paint
+    if (pool) return;   // the pool owns every editor now: this legacy path only ever found the removed #synth-frame
     const frame = win.querySelector("#synth-frame");
     if (!api.enabled?.()) return;
     try {
