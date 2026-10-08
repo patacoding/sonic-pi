@@ -15,27 +15,24 @@ if (GFX_ENABLED) await import("./graphics/gfx-layer.js");
 // `:synth` lines arrive with no further upstream edit. Installed by polling: the first attempt ran once, found the
 // hook not there yet, and silently did nothing -- measured as forwardFlag false while the app was calling it six
 // times for one line. Now it keeps trying for a few seconds and says so either way.
-function installRecordForwarding(deadlineMs = 15000) {
-  const started = Date.now();
-  const attempt = () => {
+function installRecordForwarding() {
+  // A guard that keeps checking, because a one-shot install lost the wrapper when the page published its own record
+  // function after us -- measured: a run produced no records at all, which looked exactly like "the music sent
+  // nothing". Cheap and idempotent: if the current record is already ours, nothing happens.
+  const wrap = () => {
     const g = globalThis.sonicPiGfx;
-    if (g && typeof g.record === "function") {
-      if (!g.__synthForward) {
-        const original = g.record;
-        g.record = function (r, ...rest) {
-          try { globalThis.sonicPiSynth?.handleRecord?.(r); } catch (e) { console.error(`Synth — a record threw: ${e?.message ?? e}`); }
-          return original.call(this, r, ...rest);
-        };
-        g.__synthForward = true;
-        console.info("Synth — the music's records now reach the synth");
-      }
-      return true;
-    }
-    if (Date.now() - started < deadlineMs) { setTimeout(attempt, 200); return false; }
-    console.error("Synth — could not reach the record hook: nothing of the music will play on this synth");
-    return false;
+    if (!g || typeof g.record !== "function") return;
+    if (g.__synthForward) return;
+    const original = g.record;
+    g.record = function (r, ...rest) {
+      try { globalThis.sonicPiSynth?.handleRecord?.(r); } catch (e) { console.error(`Synth — a record threw: ${e?.message ?? e}`); }
+      return original.call(this, r, ...rest);
+    };
+    g.__synthForward = true;
+    console.info("Synth — the music's records now reach the synth");
   };
-  return attempt();
+  wrap();
+  setInterval(wrap, 2000);          // re-wrap if the page replaced it (and say nothing when it is already ours)
 }
 
 // ── our synthesiser: an independent engine of its own, connected into the app's input bus ─────────────────
