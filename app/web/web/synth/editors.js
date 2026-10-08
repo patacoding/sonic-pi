@@ -137,5 +137,19 @@ export function createEditorPool({ host, frameUrl, cap = 2, onStatus }) {
     return engine;
   }
 
-  return { ensure, show, select, syncPreset, fit, active, list: () => [...entries.keys()], cap, count: () => entries.size };
+  /** Build every channel's view up front. Lazy creation left a window between the click and the new view being ready,
+   *  during which nothing (or the previous channel) was on screen -- which is what "clicking a channel changes
+   *  nothing" turned out to be. Prepared views switch instantly. */
+  async function prepare(parts, api) {
+    for (const part of parts ?? []) {
+      if (entries.get(part)?.built) continue;
+      let engine = api?.engineOf?.(part) ?? null;
+      if (!engine) { try { await api?.ensurePart?.(part); } catch { /* no engine yet */ } engine = api?.engineOf?.(part) ?? null; }
+      if (!engine) continue;
+      const ed = ensure(part, engine);
+      maybeMount(ed, part);
+    }
+  }
+
+  return { ensure, show, select, prepare, syncPreset, fit, active, list: () => [...entries.keys()], cap, count: () => entries.size };
 }

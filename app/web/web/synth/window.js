@@ -181,6 +181,7 @@ export function createSynthWindow(api) {
     const on = !!link.enabled;
     gate.style.display = on ? "none" : "flex";
     if (on && open) pool.select(selected, api);   // the switch: build once, then only display
+    if (on && open) pool.prepare(Object.keys(api.state?.().parts ?? {}), api);   // build them up front, so switching is instant
     host.style.display = on ? "block" : "none";
     // A channel that has no engine yet has engineOf() === null, which matched the never-built state and skipped the
     // mount for ever: the editor stayed on the previous channel, so a preset chosen for ch4 was written to main.
