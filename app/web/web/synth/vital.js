@@ -204,3 +204,75 @@ export function pickSinglePreset(files) {
   const presets = list.filter((f) => /\.vital$/i.test(String(f?.name ?? '')) && !String(f.name).split('/').pop().startsWith('.'));
   return { chosen: presets[0] ?? null, ignored: presets.slice(1), count: presets.length };
 }
+
+
+// ── wavetables embedded inside a .vital preset ───────────────────────────────────────────────────────────
+//
+// settings.wavetables holds THREE entries, one per oscillator, and each is a COMPLETE table: the samples are
+// inside the preset, not referenced by path. A table is a chain of components; we can only take the base carrier
+// (Wave Source keyframes, or an Audio File Source's audio) because the modifiers around it -- Wave Warp, Wave
+// Folder, Frequency Filter, Slew Limiter, Line Source, Wave Window, Phase Shift -- are Vital's own DSP and have no
+// counterpart here. That limitation is reported rather than hidden.
+
+const b64ToBytes = (b64) => { const bin = atob(b64); const out = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out; };
+
+function framesFromWaveSource(component, frameSize = 2048) {
+  const keys = Array.isArray(component?.keyframes) ? component.keyframes : [];
+  const frames = [];
+  for (const k of keys) {
+    const b64 = k?.wave_data;
+    if (typeof b64 !== 'string' || !b64) continue;
+    const bytes = b64ToBytes(b64);
+    const f = new Float32Array(Math.floor(bytes.byteLength / 4));
+    const view = new DataView(bytes.buffer);
+    for (let i = 0; i < f.length; i++) f[i] = view.getFloat32(i * 4, true);
+    frames.push(f.subarray(0, Math.min(frameSize, f.length)));
+  }
+  return frames;
+}
+
+function framesFromAudioSource(component, frameSize = 2048) {
+  const b64 = component?.audio_file;
+  if (typeof b64 !== 'string' || !b64) return [];
+  const bytes = b64ToBytes(b64);
+  const n = Math.floor(bytes.byteLength / 2);
+  const all = new Float32Array(n);
+  for (let i = 0; i < n; i++) all[i] = ((bytes[i * 2 + 1] << 8) | bytes[i * 2]) << 16 >> 16;
+  for (let i = 0; i < n; i++) all[i] /= 32768;
+  const size = Math.max(256, Math.round(component?.window_size || frameSize));
+  const frames = [];
+  for (let o = 0; o + size <= n; o += size) frames.push(all.subarray(o, o + size));
+  return frames;
+}
+
+/** The embedded tables of a preset: one entry per oscillator, with the base carrier turned into frames. */
+export function vitalEmbeddedTables(vital, frameSize = 2048) {
+  const list = vital?.settings?.wavetables;
+  if (!Array.isArray(list)) return [];
+  return list.map((entry, osc) => {
+    const components = entry?.groups?.[0]?.components ?? [];
+    const skipped = [];
+    for (const c of components) {
+      const type = String(c?.type ?? '');
+      if (c?.audio_file) {
+        const frames = framesFromAudioSource(c, frameSize);
+        if (frames.length) return { osc, kind: 'audio', type, frames, frameSize: frames[0].length, skipped };
+        skipped.push(type + ' (no usable audio)');
+        continue;
+      }
+      const wave = framesFromWaveSource(c, frameSize);
+      if (wave.length) return { osc, kind: 'wave', type, frames: wave, frameSize: wave[0].length, skipped };
+      if (type) skipped.push(type);
+    }
+    return { osc, kind: 'unsupported', type: components.map((c) => c?.type).filter(Boolean).join(' > '), frames: [], skipped };
+  });
+}
+
+/** Flatten a table's frames into one sample array, which is what a "stacked frames" wav is. */
+export function flattenFrames(frames, frameSize = 2048) {
+  if (!frames?.length) return new Float32Array(0);
+  const size = frames[0].length || frameSize;
+  const out = new Float32Array(frames.length * size);
+  frames.forEach((f, i) => out.set(f.subarray(0, size), i * size));
+  return out;
+}

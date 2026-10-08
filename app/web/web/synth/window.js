@@ -135,10 +135,21 @@ export function createSynthWindow(api) {
           engine.__sgrPreset = "user:" + preset.name;
           await api.setPreset?.(selected, preset.name);
           ok.push(f.name + " → " + mod.describeReport(report));
-          const refs = mod.wavetableRefs?.(vital) ?? [];
-          if (refs.length && !of("wav").length && !of("vitaltable").length) {
-            console.info("Synth — this preset points at wavetables: " + refs.map((r) => `osc${r.osc + 1}=${r.name}`).join(", ") +
-                         " — select those .wav/.vitaltable files too and they will be loaded");
+          // The preset carries its own wavetables: settings.wavetables has one entry per oscillator, with the samples
+          // embedded. Take each base carrier and give it to that oscillator.
+          const embedded = mod.vitalEmbeddedTables?.(vital) ?? [];
+          for (const table of embedded) {
+            if (!table.frames?.length) {
+              if (table.kind === "unsupported") skipped.push(`${f.name} osc${table.osc + 1} — its table is a Vital DSP chain (${table.type}) with no base waveform to take`);
+              continue;
+            }
+            try {
+              const samples = mod.flattenFrames(table.frames, table.frameSize);
+              const name = `${preset.name} osc${table.osc + 1} (${table.kind === "wave" ? "Wave Source" : "Audio File Source"}).wav`;
+              const blob = new Blob([mod.encodeWavFloat32(samples, table.sampleRate ?? 44100)], { type: "audio/wav" });
+              await engine.importWavetableFile(Math.min(table.osc, 2), new File([blob], name, { type: "audio/wav" }));
+              ok.push(`${f.name} → osc${table.osc + 1} embedded table (${table.frames.length} frames of ${table.frameSize}${table.skipped?.length ? ", modifiers dropped: " + table.skipped.join(" > ") : ""})`);
+            } catch (e) { skipped.push(`${f.name} osc${table.osc + 1} — ${e?.message ?? e}`); }
           }
         } catch (e) { skipped.push(f.name + " — " + (e?.message ?? e)); }
       }
