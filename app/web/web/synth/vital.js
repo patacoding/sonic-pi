@@ -223,26 +223,45 @@ function framesFromWaveSource(component, frameSize = 2048) {
     const b64 = k?.wave_data;
     if (typeof b64 !== 'string' || !b64) continue;
     const bytes = b64ToBytes(b64);
-    const f = new Float32Array(Math.floor(bytes.byteLength / 4));
     const view = new DataView(bytes.buffer);
+    const f = new Float32Array(Math.floor(bytes.byteLength / 4));
     for (let i = 0; i < f.length; i++) f[i] = view.getFloat32(i * 4, true);
-    frames.push(f.subarray(0, Math.min(frameSize, f.length)));
+    frames.push(f.length === frameSize ? f : resampleTo(f, frameSize));   // always exactly one frame long
   }
   return frames;
 }
 
+/** Resample a slice to exactly `size` samples: Vital's windows are not always 2048 (650 was measured), and this
+ *  engine's wavetable frames are. Linear interpolation is enough to keep the shape, and it never drops a frame. */
+function resampleTo(samples, size = 2048) {
+  const out = new Float32Array(size);
+  const n = samples.length;
+  if (!n) return out;
+  for (let i = 0; i < size; i++) {
+    const x = (i * (n - 1)) / Math.max(1, size - 1);
+    const i0 = Math.floor(x), i1 = Math.min(n - 1, i0 + 1), t = x - i0;
+    out[i] = samples[i0] * (1 - t) + samples[i1] * t;
+  }
+  return out;
+}
+
 function framesFromAudioSource(component, frameSize = 2048) {
   const b64 = component?.audio_file;
-  if (typeof b64 !== 'string' || !b64) return [];
+  if (typeof b64 !== 'string' || !b64) return { frames: [], reason: 'no audio_file' };
   const bytes = b64ToBytes(b64);
   const n = Math.floor(bytes.byteLength / 2);
+  if (!n) return { frames: [], reason: 'audio_file is empty' };
   const all = new Float32Array(n);
-  for (let i = 0; i < n; i++) all[i] = ((bytes[i * 2 + 1] << 8) | bytes[i * 2]) << 16 >> 16;
-  for (let i = 0; i < n; i++) all[i] /= 32768;
-  const size = Math.max(256, Math.round(component?.window_size || frameSize));
+  for (let i = 0; i < n; i++) all[i] = ((((bytes[i * 2 + 1] << 8) | bytes[i * 2]) << 16) >> 16) / 32768;
+  const size = Math.max(64, Math.round(component?.window_size || frameSize));
   const frames = [];
-  for (let o = 0; o + size <= n; o += size) frames.push(all.subarray(o, o + size));
-  return frames;
+  if (size >= n) {
+    frames.push(resampleTo(all, frameSize));                 // one window longer than the audio: take it whole
+  } else {
+    for (let o = 0; o + size <= n; o += size) frames.push(resampleTo(all.subarray(o, o + size), frameSize));
+    if (!frames.length) frames.push(resampleTo(all, frameSize));
+  }
+  return { frames, reason: null, window: size, samples: n };
 }
 
 /** The embedded tables of a preset: one entry per oscillator, with the base carrier turned into frames. */
@@ -255,13 +274,15 @@ export function vitalEmbeddedTables(vital, frameSize = 2048) {
     for (const c of components) {
       const type = String(c?.type ?? '');
       if (c?.audio_file) {
-        const frames = framesFromAudioSource(c, frameSize);
-        if (frames.length) return { osc, kind: 'audio', type, frames, frameSize: frames[0].length, skipped };
+        const got = framesFromAudioSource(c, frameSize);
+        if (got.frames.length) return { osc, kind: 'audio', type, frames: got.frames, frameSize: got.frames[0].length, skipped, window: got.window, samples: got.samples };
+        skipped.push(type + ' (audio present but unusable: ' + (got.reason ?? 'unknown') + ')');
         skipped.push(type + ' (no usable audio)');
         continue;
       }
       const wave = framesFromWaveSource(c, frameSize);
       if (wave.length) return { osc, kind: 'wave', type, frames: wave, frameSize: wave[0].length, skipped };
+      if (typeof c?.audio_file === 'string') skipped.push(type + ' (audio present but unusable)');
       if (type) skipped.push(type);
     }
     return { osc, kind: 'unsupported', type: components.map((c) => c?.type).filter(Boolean).join(' > '), frames: [], skipped };
