@@ -1,4 +1,5 @@
 // One editor document per channel, built ONCE and kept alive; switching only changes which one is displayed.
+console.info("Synth build: editors.js switch-fix-2210");
 //
 // Why this exists: rebuilding their app per switch left the module-level knob registry holding dead canvases and leaked
 // a WebGL context every time, until Chrome evicted the oldest one (the Shadertoy preview) and it went black. Repointing
@@ -14,6 +15,7 @@ export function createEditorPool({ host, frameUrl, cap = 2, onStatus }) {
   const entries = new Map();   // part -> { frame, engine, built }
   const order = [];            // least recently used first
   const say = (m) => { try { onStatus?.(m); } catch { /* status is cosmetic */ } };
+  let apiRef = null;   // the frame's load handler runs later and still needs to sync its preset
 
   const active = () => { for (const [, ed] of entries) if (ed.frame.classList.contains("active")) return ed; return null; };
 
@@ -99,7 +101,7 @@ export function createEditorPool({ host, frameUrl, cap = 2, onStatus }) {
     styleFrame(frame);
     ed = { frame, engine, built: false, stamp };
     entries.set(part, ed);
-    frame.addEventListener("load", () => { allowNativeScrolling(frame); maybeMount(ed, part); fit(ed); syncPreset(part); });
+    frame.addEventListener("load", () => { allowNativeScrolling(frame); maybeMount(ed, part); fit(ed); syncPreset(part, apiRef); });
     host.appendChild(frame);
     frame.src = frameUrl;
     return ed;
@@ -115,13 +117,23 @@ export function createEditorPool({ host, frameUrl, cap = 2, onStatus }) {
       const selEl = ed.frame.contentDocument.querySelector("select.preset-select");
       if (!selEl || selEl.options.length === 0) return;
       const opt = [...selEl.options].find((o) => o.value === "factory:" + want || o.value.endsWith(":" + want) || o.textContent.trim() === want);
-      if (opt && selEl.value !== opt.value) selEl.value = opt.value;
+      if (!opt) return;
+      // Set the dropdown AND let their own handler run. Restoring used to write engine.__sgrPreset only, which marks the
+      // name but never loads the parameters: every restored channel then played the defaults, so all channels sounded
+      // and displayed alike until localStorage was cleared and the presets were chosen by hand.
+      const changed = selEl.value !== opt.value;
+      selEl.value = opt.value;
+      if (changed || ed.lastApplied !== want) {
+        ed.lastApplied = want;
+        selEl.dispatchEvent(new ed.frame.contentWindow.Event("change", { bubbles: true }));
+      }
     } catch { /* mid-navigation */ }
   }
   const lastNames = new Map();
 
   /** THE SWITCH: the selected channel gets its view (built once) and only that view is displayed. */
   async function select(part, api) {
+    apiRef = api ?? apiRef;
     let engine = api?.engineOf?.(part) ?? null;
     if (!engine) { try { await api?.ensurePart?.(part); } catch { /* no engine yet */ } engine = api?.engineOf?.(part) ?? null; }
     // ALWAYS show the selected channel's own view, even before its engine exists. Returning early here left the
@@ -141,6 +153,7 @@ export function createEditorPool({ host, frameUrl, cap = 2, onStatus }) {
    *  during which nothing (or the previous channel) was on screen -- which is what "clicking a channel changes
    *  nothing" turned out to be. Prepared views switch instantly. */
   async function prepare(parts, api) {
+    apiRef = api ?? apiRef;
     for (const part of parts ?? []) {
       if (entries.get(part)?.built) continue;
       let engine = api?.engineOf?.(part) ?? null;
@@ -148,6 +161,9 @@ export function createEditorPool({ host, frameUrl, cap = 2, onStatus }) {
       if (!engine) continue;
       const ed = ensure(part, engine);
       maybeMount(ed, part);
+      // A restored channel is never the selected one, so without this its preset was never loaded into its engine: every
+      // restored channel stayed on the defaults, and they all sounded and displayed alike.
+      syncPreset(part, api);
     }
   }
 
