@@ -13,6 +13,7 @@ import { createSynthWindow } from "./window.js";
 
 const say = (t, bad = false) => (bad ? console.error : console.info)(`Synth — ${t}`);
 const trace = [];        // every record the app handed this layer, parsed or not
+const warned = new Set();  // one word per channel about ignored MIDI, not a flood
 const midiTrace = [];    // every performance signal, mapped or not
 
 const CC_MAP = { 7: "master.volume", 71: "filter1.resonance", 72: "env1.release", 73: "env1.attack", 74: "filter1.cutoff" };
@@ -36,6 +37,12 @@ function handleMidi(...a) {
   const channel = typeof nums[0] === "number" ? nums[0] : 0;
   const part = channel <= 0 ? "main" : `ch${channel}`;
   const entry = { at: Date.now(), path, args: r.args ?? [], channel, part, mapped: null };
+  if (/note_on|noteon/i.test(path) && !parts.armed(part)) {
+    entry.mapped = { ignored: "no preset chosen for this channel" };
+    midiTrace.push(entry); if (midiTrace.length > 60) midiTrace.shift();
+    if (!warned.has(part)) { warned.add(part); say(`"${part}" has no preset chosen — its MIDI is ignored until you pick one (or the music sends a program change)`, true); }
+    return true;
+  }
   if (/note_on|noteon/i.test(path)) {
     const [, note, velocity] = nums;
     entry.mapped = { note, velocity };
@@ -47,6 +54,8 @@ function handleMidi(...a) {
     const [, program] = nums; const patch = patchByProgram(program);
     entry.mapped = { program, patch: patch?.name ?? null };
     if (patch) { parts.silence(part); applyPatch(part, program); }   // a new instrument must not inherit the old one's sound
+  } else if (/control|cc/i.test(path) && !parts.armed(part)) {
+    entry.mapped = { ignored: "no preset chosen for this channel" };
   } else if (/control|cc/i.test(path)) {
     const [, cc, value] = nums;
     const id = CC_MAP[cc];

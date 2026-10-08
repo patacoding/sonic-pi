@@ -43,6 +43,16 @@ export const list = () => [...parts.keys()];
 export const has = (name) => parts.has(String(name));
 export const engineOf = (name) => parts.get(String(name))?.engine ?? null;
 export const outState = () => (inputNode ? "engine bus" : "off");
+
+/**
+ * A channel sounds only once it has been armed deliberately: the player chose a library preset, or the music named one
+ * with a program change. Anything else -- a channel that merely exists because the editor was opened -- stays silent
+ * rather than being given a default instrument nobody asked for.
+ */
+export function armed(name) {
+  const p = parts.get(String(name));
+  return !!(p && (p.presetName || p.midiPatch));
+}
 export const capOf = () => cap;
 
 /** The app's engine boots on its first Run; wait for it instead of inventing a second context. */
