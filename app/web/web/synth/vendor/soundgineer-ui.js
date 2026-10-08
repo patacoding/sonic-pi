@@ -530,10 +530,6 @@ function knobRow(engine, ids, size = 46) {
 }
 
 // ../soundgineer/src/ui/enveditor.ts
-var T_MIN = 1e-3;
-var T_MAX = 10;
-var PAD = 6;
-var SUS_W = 0.08;
 function shape(t, c) {
   return Math.pow(t, Math.pow(2, c * 3));
 }
@@ -545,12 +541,6 @@ var EnvDisplay = class {
     this.canvas = el("canvas");
     this.root.appendChild(this.canvas);
     this.cx = this.canvas.getContext("2d");
-    this.canvas.style.touchAction = "none";
-    this.canvas.style.cursor = "crosshair";
-    this.canvas.addEventListener("pointerdown", this.onDown);
-    this.canvas.addEventListener("pointermove", this.onMove);
-    this.canvas.addEventListener("pointerup", this.onUp);
-    this.canvas.addEventListener("pointercancel", this.onUp);
     new ResizeObserver(() => this.resize()).observe(this.root);
     for (let e = 1; e <= 6; e++) {
       for (const f of ["delay", "attack", "hold", "decay", "sustain", "release", "atk_curve", "dec_curve", "rel_curve"]) {
@@ -565,8 +555,6 @@ var EnvDisplay = class {
   cx;
   w = 0;
   h = 0;
-  handles = [];
-  drag = null;
   setEnv(env) {
     this.env = env;
     this.draw();
@@ -586,89 +574,12 @@ var EnvDisplay = class {
     const i = paramIndex(`env${this.env}.${field}`);
     return normToValue(PARAMS[i], this.engine.getParam(i));
   }
-  setValue(field, value2) {
-    const i = paramIndex(`env${this.env}.${field}`);
-    const v = Math.min(1, Math.max(0, valueToNorm(PARAMS[i], value2)));
-    this.engine.setParam(i, v);
-    this.draw();
-  }
-  // ── the fixed logarithmic axis ──────────────────────────────────────────────────────────────────────────
-  X(t) {
-    const x = Math.log(Math.min(T_MAX, Math.max(T_MIN, t)) / T_MIN) / Math.log(T_MAX / T_MIN);
-    return PAD + x * (this.w - PAD * 2);
-  }
-  Tinv(x) {
-    const f = (x - PAD) / (this.w - PAD * 2 || 1);
-    return T_MIN * Math.pow(T_MAX / T_MIN, Math.min(1, Math.max(0, f)));
-  }
-  Y(level) {
-    return (1 - level) * (this.h - 10) + 5;
-  }
-  // ── interaction: one axis per handle ────────────────────────────────────────────────────────────────────
-  onDown = (e) => {
-    const r = this.canvas.getBoundingClientRect();
-    const px = e.clientX - r.left;
-    const py = e.clientY - r.top;
-    let best = null;
-    let bestD = 14;
-    for (const h of this.handles) {
-      const d = Math.hypot(h.x - px, h.y - py);
-      if (d < bestD) {
-        bestD = d;
-        best = h;
-      }
-    }
-    if (!best) return;
-    this.drag = { field: best.field, axis: best.axis, grabX: px, before: this.v(best.field) };
-    this.canvas.style.cursor = best.axis === "y" ? "ns-resize" : "ew-resize";
-    try {
-      this.canvas.setPointerCapture(e.pointerId);
-    } catch {
-    }
-    e.preventDefault();
-  };
-  onMove = (e) => {
-    if (!this.drag) return;
-    const r = this.canvas.getBoundingClientRect();
-    const px = e.clientX - r.left;
-    const py = e.clientY - r.top;
-    if (this.drag.axis === "y") {
-      this.setValue("sustain", Math.min(1, Math.max(0, 1 - (py - 5) / (this.h - 10 || 1))));
-    } else {
-      const d = this.drag;
-      const stages = ["delay", "attack", "hold", "decay", "release"];
-      const upto = stages.slice(0, stages.indexOf(d.field)).reduce((a, f) => a + this.v(f), 0);
-      const target = this.Tinv(px) - upto;
-      const i = paramIndex(`env${this.env}.${d.field}`);
-      this.setValue(d.field, Math.min(PARAMS[i].max, Math.max(PARAMS[i].min, target)));
-    }
-    e.preventDefault();
-  };
-  onUp = (e) => {
-    if (this.drag) {
-      this.canvas.style.cursor = "crosshair";
-      this.drag = null;
-    }
-    try {
-      this.canvas.releasePointerCapture(e.pointerId);
-    } catch {
-    }
-  };
   draw() {
     const c = this.cx;
     const w = this.w;
     const h = this.h;
     if (!w || !h) return;
     c.clearRect(0, 0, w, h);
-    c.strokeStyle = "#ffffff12";
-    c.lineWidth = 1;
-    for (const t of [1e-3, 0.01, 0.1, 1, 10]) {
-      const x = this.X(t);
-      c.beginPath();
-      c.moveTo(x, 0);
-      c.lineTo(x, h);
-      c.stroke();
-    }
     const del = this.v("delay");
     const atk = this.v("attack");
     const hold = this.v("hold");
@@ -678,50 +589,32 @@ var EnvDisplay = class {
     const ac = this.v("atk_curve");
     const dc = this.v("dec_curve");
     const rc = this.v("rel_curve");
-    const t1 = del;
-    const t2 = del + atk;
-    const t3 = t2 + hold;
-    const t4 = t3 + dec;
-    const susEnd = Math.min(T_MAX, t4 + SUS_W * (T_MAX - T_MIN));
-    const t5 = Math.min(T_MAX, susEnd + rel);
-    const N = 40;
+    const susTime = Math.max(0.15 * (del + atk + hold + dec + rel), 0.05);
+    const total = del + atk + hold + dec + susTime + rel;
+    const X = (t) => t / total * (w - 8) + 4;
+    const Y = (v) => (1 - v) * (h - 10) + 5;
     c.beginPath();
-    c.moveTo(this.X(0), this.Y(0));
-    c.lineTo(this.X(t1), this.Y(0));
-    for (let i = 1; i <= N; i++) c.lineTo(this.X(t1 + i / N * atk), this.Y(shape(i / N, ac)));
-    c.lineTo(this.X(t3), this.Y(1));
-    for (let i = 1; i <= N; i++) c.lineTo(this.X(t3 + i / N * dec), this.Y(sus + (1 - sus) * (1 - shape(i / N, -dc))));
-    c.lineTo(this.X(susEnd), this.Y(sus));
-    for (let i = 1; i <= N; i++) c.lineTo(this.X(susEnd + i / N * rel), this.Y(sus * (1 - shape(i / N, -rc))));
+    c.moveTo(X(0), Y(0));
+    c.lineTo(X(del), Y(0));
+    const N = 40;
+    for (let i = 1; i <= N; i++) c.lineTo(X(del + i / N * atk), Y(shape(i / N, ac)));
+    c.lineTo(X(del + atk + hold), Y(1));
+    for (let i = 1; i <= N; i++) c.lineTo(X(del + atk + hold + i / N * dec), Y(sus + (1 - sus) * (1 - shape(i / N, -dc))));
+    c.lineTo(X(del + atk + hold + dec + susTime), Y(sus));
+    for (let i = 1; i <= N; i++) c.lineTo(X(del + atk + hold + dec + susTime + i / N * rel), Y(sus * (1 - shape(i / N, -rc))));
     c.strokeStyle = "#ff9a3c";
     c.lineWidth = 2;
     c.stroke();
-    c.lineTo(this.X(t5), this.Y(0) + 5);
-    c.lineTo(this.X(0), this.Y(0) + 5);
+    c.lineTo(X(total), Y(0) + 5);
+    c.lineTo(X(0), Y(0) + 5);
     c.closePath();
     c.fillStyle = "#ff9a3c15";
     c.fill();
-    this.handles = [
-      { field: "delay", axis: "x", x: this.X(t1), y: this.Y(0) },
-      { field: "attack", axis: "x", x: this.X(t2), y: this.Y(1) },
-      { field: "hold", axis: "x", x: this.X(t3), y: this.Y(1) },
-      { field: "decay", axis: "x", x: this.X(t4), y: this.Y(sus) },
-      { field: "sustain", axis: "y", x: this.X((t4 + susEnd) / 2), y: this.Y(sus) },
-      { field: "release", axis: "x", x: this.X(t5), y: this.Y(0) }
-    ];
-    c.fillStyle = "#ff9a3c";
-    for (const hd of this.handles) {
-      c.beginPath();
-      c.arc(hd.x, hd.y, 3.5, 0, Math.PI * 2);
-      c.fill();
-    }
-    ;
-    window.__sgrEnvHandles = this.handles.map((x) => ({ ...x }));
     const live = this.engine.sourceValues[this.env - 1] ?? 0;
     if (live > 1e-3) {
       c.beginPath();
-      c.moveTo(0, this.Y(live));
-      c.lineTo(w, this.Y(live));
+      c.moveTo(0, Y(live));
+      c.lineTo(w, Y(live));
       c.strokeStyle = "#ff9a3c50";
       c.lineWidth = 1;
       c.stroke();
