@@ -29,7 +29,8 @@ const STYLE = `
     display: flex; flex-direction: column; gap: 6px; }
   /* the mount point must FILL the stage: measured at height 0 before this, which is why the interface was invisible
      even once it had been built */
-  #synth-sgr-host { flex: 1 1 auto; min-height: 120px; width: 100%; border-radius: 6px; overflow: hidden; }
+  #synth-sgr-host { flex: 1 1 auto; min-height: 120px; width: 100%; border-radius: 6px; overflow: hidden; position: relative; }
+  #synth-frame { position: absolute; left: 0; top: 0; width: 1280px; height: 760px; border: 0; transform-origin: top left; background: transparent; }
   #synth-guide { white-space: pre-wrap; font: 11px/1.4 ui-monospace, monospace; opacity: .85; max-height: 7.5em; overflow: auto; }
   #synth-midi { font: 11px/1.4 ui-monospace, monospace; opacity: .7; max-height: 4.5em; overflow: auto; }
 `;
@@ -55,7 +56,7 @@ export function createSynthWindow(api) {
   win.innerHTML = `<div id="synth-bar"><h4>Synth</h4><span id="synth-status"></span><span class="spacer"></span>
       <button id="synth-reader">start a reader</button><button id="synth-close">close</button></div>
     <div id="synth-main"><div id="synth-channels"></div>
-      <div id="synth-stage"><div style="display:flex;gap:6px;align-items:center"><h4 id="synth-stage-title">stage</h4><select id="synth-patch"></select></div><div id="synth-stage-body">the editor loads here…</div><div id="synth-sgr-host"></div></div></div>
+      <div id="synth-stage"><div style="display:flex;gap:6px;align-items:center"><h4 id="synth-stage-title">stage</h4><select id="synth-patch"></select></div><div id="synth-stage-body">the editor loads here…</div><div id="synth-sgr-host"><iframe id="synth-frame" title="Soundgineer editor"></iframe></div></div></div>
     <h4>how the music addresses it</h4><div id="synth-guide"></div>
     <h4>recent MIDI</h4><div id="synth-midi"></div>`;
   document.body.appendChild(win);
@@ -63,57 +64,42 @@ export function createSynthWindow(api) {
   win.querySelector("#synth-reader").addEventListener("click", () => startReader());
 
   /**
-   * Their editor, mounted straight into our window.
+   * Their editor, in a frame sized to the design it was written for.
    *
-   * The one thing to respect is their stylesheet: it is written for a whole page (`:root`, `html`, `body`), so it goes
-   * into a Shadow DOM -- where it cannot reach Sonic Pi's page at all -- with exactly those three selectors remapped to
-   * `:host`. Every other selector is used verbatim, which is why the interface keeps its variables and its layout (my
-   * earlier attempt prefixed all of them, broke :root and the media queries, and that is what garbled it).
+   * The frame is not decoration and not an isolation trick: their layout is written in vh/vw, which only mean the
+   * design size if there is a viewport of that size. So the frame is 1280x760 and the FRAME is scaled to the room we
+   * have; nothing inside it is rewritten, remapped or scaled.
    */
-  let sgrCss = null;
-  async function theirCss() {
-    if (sgrCss != null) return sgrCss;
-    const res = await fetch("./vendor/soundgineer-ui.css");
-    const raw = await res.text();
-    sgrCss = raw.replace(/(^|\})([^{}@]*?)(:root|html|body)\b/g, (m, close, pre, sel) => close + pre + ":host");
-    return sgrCss;
+  function fitFrame() {
+    const frame = document.getElementById("synth-frame");
+    const host = document.getElementById("synth-sgr-host");
+    if (!frame || !host) return 0;
+    const r = host.getBoundingClientRect();
+    const k = Math.max(0.2, Math.min((r.width || 1280) / 1280, (r.height || 760) / 760));
+    frame.style.transform = `scale(${k})`;
+    frame.style.left = Math.max(0, (r.width - 1280 * k) / 2) + "px";
+    frame.style.top = Math.max(0, (r.height - 760 * k) / 2) + "px";
+    return k;
   }
 
   async function mountSoundgineer() {
-    const host = document.getElementById("synth-sgr-host");
-    if (!host) return;
+    const frame = document.getElementById("synth-frame");
+    if (!frame) return;
     try {
+      if (!frame.src) {
+        frame.src = location.href.replace(/[^/]*$/, "") + "synth/soundgineer-frame.html";
+        await new Promise((r) => setTimeout(r, 500));
+      }
       let engine = api.engineOf?.(selected);
       if (!engine) { await api.ensurePart?.(selected); engine = api.engineOf?.(selected); }
-      if (!engine) { status("press Run on the audio page once — the synth needs the app's engine", true); return; }
-      const shadow = host.shadowRoot ?? host.attachShadow({ mode: "open" });
-      shadow.innerHTML = "";
-      const style = document.createElement("style");
-      style.textContent = await theirCss();
-      // Their editor is laid out for a page about this wide; give it exactly that and scale the whole thing down to
-      // the room we have, so its own layout is what its authors designed instead of a squeezed version of it.
-      const DW = 1280, DH = 760;
-      const box = document.createElement("div");
-      box.style.cssText = "position:relative;width:100%;height:100%;overflow:hidden;";
-      const canvas = document.createElement("div");
-      canvas.style.cssText = `position:absolute;left:0;top:0;width:${DW}px;height:${DH}px;transform-origin:top left;display:flex;flex-direction:column;`;
-      const build = document.createElement("div");
-      build.style.cssText = "flex:1 1 auto;min-height:0;";
-      canvas.appendChild(build);
-      box.appendChild(canvas);
-      shadow.append(style, box);
-      const fit = () => {
-        const r = host.getBoundingClientRect();
-        const k = Math.max(0.2, Math.min((r.width || DW) / DW, (r.height || DH) / DH));
-        canvas.style.transform = `scale(${k})`;
-        canvas.style.left = Math.max(0, (r.width - DW * k) / 2) + "px";
-        canvas.style.top = Math.max(0, (r.height - DH * k) / 2) + "px";
-      };
-      api.buildApp?.(engine, build);
-      fit();
-      if (!host.__fitBound) { host.__fitBound = true; addEventListener("resize", fit); }
-      host.dataset.built = selected;
-      status(`${selected}: editor built`);
+      if (!engine) { status("the editor could not start (no audio context) — see the console", true); return; }
+      const win = frame.contentWindow;
+      if (!win?.__mount) { setTimeout(() => mountSoundgineer(), 400); return; }
+      const kids = win.__mount(engine);
+      frame.dataset.built = selected;
+      fitFrame();
+      if (!win.__fitBound) { win.__fitBound = true; addEventListener("resize", fitFrame); }
+      status(`${selected}: editor built (${kids} sections${api.ownContext?.() ? ", our own context — press Run for the engine" : ""})`);
     } catch (e) { status(`the editor could not be built: ${e?.message ?? e}`, true); console.error(e); }
   }
 
@@ -151,7 +137,7 @@ export function createSynthWindow(api) {
     win.querySelector("#synth-stage-body").textContent =
       st.parts?.[selected] ? `voices ${st.parts[selected].voices} · peak ${(st.parts[selected].peak ?? 0).toFixed(3)} · patch ${st.parts[selected].patch ?? "—"}`
                            : "no instrument on this channel yet — it is created by its first program change, note or CC.";
-    const built = document.getElementById("synth-sgr-host")?.dataset.built;
+    const built = document.getElementById("synth-frame")?.dataset.built;
     if (open && built !== selected && !mounting) { mounting = true; mountSoundgineer().finally(() => { mounting = false; }); }
     win.querySelector("#synth-guide").textContent = api.guide?.() ?? "";
     win.querySelector("#synth-midi").textContent = (api.midiTrace?.() ?? []).slice(-6).map((e) => `${e.path} ${JSON.stringify(e.args)}${e.mapped ? " → " + JSON.stringify(e.mapped) : ""}`).join("\n");

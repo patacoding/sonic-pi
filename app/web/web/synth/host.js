@@ -259,7 +259,15 @@ globalThis.sonicPiParts = api.parts;
 // the window is ours: a button on the audio page and a popup that covers rather than rearranges (window.js)
 api.window = createSynthWindow({
   state: parts.state, patches: () => PATCHES, guide, midiTrace: () => midiTrace.slice(),
-  applyPatch, defaultProgram: DEFAULT_PROGRAM, buildApp, engineOf: parts.engineOf, ensurePart: (n) => parts.ensurePart(n).then(() => true),
+  applyPatch, defaultProgram: DEFAULT_PROGRAM, buildApp: null, engineOf: parts.engineOf, ensurePart: (n) => parts.ensurePart(n).then(() => true), ownContext: parts.usingOwnContext,
 });
+// The app's engine boots on its first Run. Until then our own context keeps the window and its instruments usable;
+// when the engine appears we move onto it, which is what puts the sound into Sonic Pi's chain (with_fx, scope, the
+// Recorder). Polling is cheap and idempotent.
+setInterval(() => {
+  const node = globalThis.sonicPi?.engine?.node?.input;
+  if (node?.context && parts.adoptAppContext(node.context)) say("the synth is now inside the app's engine");
+}, 2000);
+
 globalThis.sonicPiSynth = api;
 export { api as synthHost };

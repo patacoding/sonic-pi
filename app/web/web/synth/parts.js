@@ -30,18 +30,35 @@ async function waitForEngine(timeoutMs = 20000) {
   }
 }
 
+/** The context we are using: the app's engine's when it exists, otherwise one of our own so the UI works at once. */
+let ownCtx = null;
+export const usingOwnContext = () => !!ownCtx && !appCtx;
+let appCtx = null;
+export function adoptAppContext(ctx) {                 // called when the app's engine finally appears
+  if (!ctx || ctx === appCtx) return false;
+  appCtx = ctx;
+  for (const n of [...parts.keys()]) free(n);           // parts are bound to a context; rebuild them on the new one
+  say("the app's engine is up — rebuilding the instruments on its context");
+  return true;
+}
+export async function contextNow() {
+  try { return (await waitForEngine(300)).context; } catch { /* no app engine yet */ }
+  if (!ownCtx) { ownCtx = new AudioContext({ latencyHint: "interactive" }); say("using our own AudioContext until the app's engine is up (the UI works now; sound waits for Run)"); }
+  return ownCtx;
+}
+
 export async function ensurePart(name = DEFAULT_PART) {
   const key = String(name);
   const existing = parts.get(key);
   if (existing) return existing;
   if (parts.size >= cap) throw new Error(`no room for part "${key}": the cap is ${cap} (measured cost decides it)`);
-  inputNode = inputNode ?? (await waitForEngine());
-  ctx = ctx ?? inputNode.context;
+  const useCtx = await contextNow();
+  ctx = ctx ?? useCtx;
   const engine = new SynthEngine();
   await engine.start({ ctx, connectToDestination: false });   // we route; every part goes into the engine's bus
   const node = engine.audioNode;
   if (!node) throw new Error(`part "${key}" got no node`);
-  node.connect(inputNode);
+  if (inputNode) node.connect(inputNode);      // straight into the engine's bus; nothing to connect to before Run
   engine.primeTables();
   const made = { engine, node, started: performance.now() };
   parts.set(key, made);
@@ -88,6 +105,7 @@ export function free(name) {
 /** What the probe and the window need, per part and in total. */
 export const state = () => ({
   context: ctx ? { sampleRate: ctx.sampleRate, state: ctx.state } : null,
+  ownContext: !appCtx,
   cap,
   parts: Object.fromEntries([...parts].map(([n, p]) => [n, {
     voices: p.engine.voiceCount ?? 0,
