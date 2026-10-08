@@ -319,8 +319,9 @@ export function flattenFrames(frames, frameSize = 2048) {
 export function externalAudioRefs(vital) {
   const found = [];
   const looksLikeAudio = /[^\\/]+\.(wav|aif|aiff|flac|mp3|vit|vitaltable)$/i;
-  const walk = (node, osc, keyPath) => {
-    if (Array.isArray(node)) { node.forEach((n, i) => walk(n, osc, keyPath)); return; }
+  const walk = (node, osc, keyPath, depth = 0) => {
+    if (depth > MAX_WALK_DEPTH) return;                      // a forged deeply nested preset must not exhaust the stack
+    if (Array.isArray(node)) { node.forEach((n) => walk(n, osc, keyPath, depth + 1)); return; }
     if (!node || typeof node !== 'object') return;
     if (typeof node.type === 'string' && node.type) {
       const hasData = (typeof node.audio_file === 'string' && node.audio_file.length > 32) ||
@@ -333,7 +334,7 @@ export function externalAudioRefs(vital) {
     }
     for (const [k, v] of Object.entries(node)) {
       if (k === 'audio_file' || k === 'wave_data') continue;
-      walk(v, osc, `${keyPath}.${k}`);
+      walk(v, osc, `${keyPath}.${k}`, depth + 1);
     }
   };
   (vital?.settings?.wavetables ?? []).forEach((entry, osc) => walk(entry, osc, `osc${osc + 1}`));
@@ -347,3 +348,37 @@ export function matchLocalFile(name, files) {
   for (const f of files ?? []) if (stem(f.name) === want) return f;
   return null;
 }
+
+
+/**
+ * Parse a .vital file the way Vital itself does: stop at the end of the top-level object.
+ *
+ * The format reference (hed0rah.github.io/audio_files_anatomy/vital-anatomy.html) notes that trailing bytes after the
+ * closing brace still load in Vital, because its reader stops at the object's end -- JSON.parse would throw instead and
+ * we would reject a file the synth accepts. Bracket depth is tracked with strings and escapes respected.
+ */
+export function parseVitalText(text) {
+  const raw = String(text ?? '').replace(/^\uFEFF/, '');
+  const start = raw.indexOf('{');
+  if (start < 0) return { ok: false, reason: 'no JSON object in this file' };
+  let depth = 0, inStr = false, esc = false, end = -1;
+  for (let i = start; i < raw.length; i++) {
+    const c = raw[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === '{') depth++;
+    else if (c === '}') { depth--; if (depth === 0) { end = i + 1; break; } }
+  }
+  if (end < 0) return { ok: false, reason: 'the JSON object is not closed (the file looks truncated)' };
+  const trailing = raw.slice(end).trim();
+  try { return { ok: true, data: JSON.parse(raw.slice(start, end)), trailing: trailing.length ? trailing.slice(0, 40) : null }; }
+  catch (e) { return { ok: false, reason: 'JSON could not be parsed (' + String(e.message).slice(0, 60) + ')' }; }
+}
+
+/** Bound recursion for anything walking a preset: a forged deep object must not exhaust the stack. */
+export const MAX_WALK_DEPTH = 32;

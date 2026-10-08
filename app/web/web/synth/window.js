@@ -118,9 +118,11 @@ export function createSynthWindow(api) {
         console.warn(`Synth — ${file.name} is not a .vital preset (${kind.reason ?? kind.kind}). This importer takes one preset file; for a wavetable use the Import button on the oscillator panel.`);
         return;
       }
-      let vital;
-      try { vital = JSON.parse(text); }
-      catch (e) { console.error(`Synth — ${file.name} could not be parsed: ${e?.message ?? e}`); return; }
+      // Parse the way Vital itself does: stop at the end of the top-level object, so trailing bytes are tolerated
+      const parsed = mod.parseVitalText ? mod.parseVitalText(text) : (() => { try { return { ok: true, data: JSON.parse(text) }; } catch (e) { return { ok: false, reason: e?.message }; } })();
+      if (!parsed.ok) { console.error(`Synth — ${file.name} could not be read: ${parsed.reason}`); return; }
+      const vital = parsed.data;
+      if (parsed.trailing) console.warn(`Synth — ${file.name} has ${parsed.trailing.length}+ bytes after the preset object; they were ignored (Vital does the same)`);
       const { preset, report } = mod.vitalToPreset(vital, file.name.replace(/\.vital$/i, ""));
       const judged = mod.assessPreset(preset, mod.knownParamIds());
       if (!judged.ok) { console.warn(`Synth — ${file.name} was not applied: ${judged.note}`); return; }
