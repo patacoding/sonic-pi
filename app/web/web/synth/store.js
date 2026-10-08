@@ -6,7 +6,7 @@
 // so an engine can always be re-derived from the data and can never drift.
 import { SynthEngine } from "./vendor/soundgineer.js";
 import { PARAMS } from "./vendor/soundgineer-params.js";   // index -> param id, for the writes their knobs make
-console.info("Synth build: store.js switch-fix-2210");
+console.info("Synth build: store.js presets-final-1");
 
 const say = (t, bad = false) => (bad ? console.error : console.info)(`Synth — ${t}`);
 const PARTS_KEY = "sonicpi.synth.preset.v1";     // our record: channel -> patch name
@@ -123,6 +123,20 @@ async function createEngine(ch) {
   const rawLoad = engine.loadPreset?.bind(engine);
   if (rawLoad) engine.loadPreset = (preset) => {
     const out = rawLoad(preset);
+    // The DATA is the truth, so which way this goes depends on whether the patch already exists:
+    //   · new patch  -> learn what the preset contains, from the engine that just loaded it (their library only stores
+    //                   USER presets, so a factory patch record would otherwise start empty);
+    //   · known patch -> do NOT let the preset overwrite it. A channel that joins a shared preset later must inherit the
+    //                   edits already made on it, not reset them to the preset's own values.
+    if (preset?.name && engine.values && PARAMS) {
+      const known = patches.has(preset.name);
+      const patch = patchData(preset.name);
+      if (known) {
+        for (const [id, value] of patch.params) { const i = PARAMS.findIndex((x) => x.id === id); if (i >= 0) { try { ch.rawSet?.(i, value); } catch { /* unknown id */ } } }
+      } else {
+        for (let i = 0; i < PARAMS.length; i++) { const id = PARAMS[i]?.id; if (id) patch.params.set(id, engine.values[i]); }
+      }
+    }
     try {
       for (const [index, group] of engine.paramListeners ?? []) {
         for (const fn of group) { try { fn(engine.values[index]); } catch { /* a widget mid-teardown */ } }

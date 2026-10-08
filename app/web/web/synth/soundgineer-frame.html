@@ -17,7 +17,7 @@
     // channel's preset data -- for reading and for writing -- without anything ever being created or destroyed:
     // rebuilding their app per switch left their module-level knob registry holding dead canvases and leaked a WebGL
     // context every time, until Chrome evicted the oldest one (the Shadertoy preview) and it went black.
-    console.info("Synth build: frame.html switch-fix-2210");   // which frame build this document is actually running
+    console.info("Synth build: frame.html presets-final-1");   // which frame build this document is actually running
     let current = null;
     let builds = 0;               // how many times their app was actually built: it must stay 1
     const subs = new Map();      // param index -> { fn, off }

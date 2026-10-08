@@ -1,5 +1,5 @@
 // One editor document per channel, built ONCE and kept alive; switching only changes which one is displayed.
-console.info("Synth build: editors.js switch-fix-2210");
+console.info("Synth build: editors.js presets-final-1");
 //
 // Why this exists: rebuilding their app per switch left the module-level knob registry holding dead canvases and leaked
 // a WebGL context every time, until Chrome evicted the oldest one (the Shadertoy preview) and it went black. Repointing
