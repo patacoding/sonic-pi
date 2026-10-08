@@ -55,7 +55,7 @@ export function createSynthWindow(api) {
     <div id="synth-main"><div id="synth-channels"></div>
       <div id="synth-stage">
         <div id="synth-gate"><strong>Soundgineer is off</strong>
-          <div id="synth-gate-why">Enabling starts it: it presses the app's Run once (which also runs the current buffer), puts the instruments on the engine's context and starts the reader.</div>
+          <div id="synth-gate-why">Enabling runs nothing. It waits for the app's engine and attaches the instruments to it the moment it exists — press <strong>Run</strong> when you are ready, and your music starts as it always does.</div>
           <button id="synth-enable-2" data-role="enable">Enable Soundgineer</button></div>
         <div id="synth-sgr-host"><iframe id="synth-frame" title="Soundgineer editor"></iframe></div>
       </div></div>
