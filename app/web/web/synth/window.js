@@ -47,7 +47,8 @@ const STYLE = `
   #synth-import-row { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 4px 6px;
     border-bottom: 1px solid color-mix(in srgb, var(--WindowBorder) 60%, transparent); }
   #synth-import-row button { font: 11px/1.6 system-ui, sans-serif; cursor: pointer; }
-  #synth-import-note { font: 11px/1.4 system-ui, sans-serif; opacity: .7; }
+  /* the conversion report is several lines and must not be truncated: it is the product's diagnosis surface */
+  #synth-import-note { font: 11px/1.4 system-ui, sans-serif; opacity: .7; white-space: pre-wrap; max-width: 72ch; text-align: left; }
   #synth-row-stamp { font: 11px/1.6 ui-monospace, monospace; opacity: .7; }
   #synth-sgr-host { flex: 1 1 auto; min-height: 0; position: relative; overflow: hidden; display: none; }
   #synth-pan-overlay { position: absolute; inset: 0; pointer-events: none; cursor: grab; }
@@ -274,13 +275,24 @@ export function createSynthWindow(api) {
         const appliedParams = { ...(preset.params ?? {}), ...((extra ?? {}).params ?? {}) };
         const pi = await import("./paramapi.js").catch(() => null);
         const check = (mod.verifyApplied && pi) ? mod.verifyApplied(engine, (id) => pi.paramIndex(id), appliedParams) : null;
+        const keptSlots = (engine.modSlots ?? []).filter(Boolean).length;
+        const keptShapes = (engine.lfoShapes ?? []).filter(Boolean).length;
         const layers = mod.vitalLayerReport?.({ parsed, mapping: report, extra, routes: wiringUsable, shapes: wiringShapes,
-          applied: { slots: (engine.modSlots ?? []).filter(Boolean).length, shapes: (engine.lfoShapes ?? []).filter(Boolean).length,
-                     verifiedParams: check?.verified ?? null, ofParams: check?.of ?? null } });
+          applied: { slots: keptSlots, shapes: keptShapes, verifiedParams: check?.verified ?? null, ofParams: check?.of ?? null } });
         if (layers) console.info("Synth — " + layers.line);
-        if (check?.missing?.length) console.info("Synth — the engine did not keep: " + check.missing.slice(0, 5).join(", "));
-      } catch (e) { console.warn("Synth — the report could not be built: " + (e?.message ?? e)); }
-      say(`imported "${preset.name}" → ${selected} · ${judged.mapped} parameter(s) · library ${(() => { try { return JSON.parse(localStorage.getItem("soundgineer.presets.v1") ?? "[]").length; } catch { return "?"; } })()}`);
+        // Four states, kept apart on purpose: telling the player "there were warnings" hides which is which -- what the
+        // engine has no counterpart for, what failed, what the engine did not keep, and what has not been checked.
+        const unsupported = Object.keys({ ...(report?.dropped ?? {}), ...((extra ?? {}).dropped ?? {}) }).length;
+        const notKept = check?.missing ?? [];
+        say([
+          `imported "${preset.name}" \u2192 ${selected}`,
+          `file: read ok${parsed?.trailing ? ", trailing bytes ignored" : ""}`,
+          `converted: ${judged.mapped} parameter(s) \u00b7 unsupported ${unsupported} \u00b7 wiring ${wiringUsable} route(s) \u00b7 ${wiringShapes} shape(s)`,
+          `engine: ${keptSlots} modulation slot(s) \u00b7 ${keptShapes} shape(s) \u00b7 ${check ? `${check.verified}/${check.of} parameter(s) read back` : "read-back not checked"}`,
+          notKept.length ? `read-back mismatch: ${notKept.slice(0, 4).join(", ")}${notKept.length > 4 ? ", \u2026" : ""}` : "read-back mismatch: none",
+          "not verified: nothing here listens to the result, so the sound is not compared with Vital",
+        ].join("\n"));
+      } catch (e) { say(`imported "${preset.name}" \u2192 ${selected}, but the report could not be built: ` + (e?.message ?? e), true); }
     } catch (e) {
       say("the import stopped unexpectedly: " + (e?.message ?? e), true);
     }
