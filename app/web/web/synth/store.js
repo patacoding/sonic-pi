@@ -210,6 +210,10 @@ export async function setPreset(name, patchName) {
   patchData(ch.patchName);
   if (!ch.engine) await createEngine(ch);
   renderAll(ch);
+  // Point the engine at this channel's wiring again once the preset is in place. createEngine() applies it too, but
+  // importing a preset replaces the engine and the order of those two events was not guaranteed -- the slots landed on
+  // some runs and not others.
+  applyWiring(ch);
   remember(key, ch.patchName);
   say(`"${key}" plays "${ch.patchName}" on its own engine`);
   return ch.engine;

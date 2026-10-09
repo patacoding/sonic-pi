@@ -201,5 +201,6 @@ globalThis.sonicPiParts = {
   list: parts.list, has: parts.has, engineOf: parts.engineOf, ensure: parts.ensurePart, state: parts.state,
   noteOn: parts.noteOn, noteOff: parts.noteOff, setParam: parts.setParam, allNotesOff: parts.allNotesOff,
   free: parts.free, silence: parts.silence, rememberPreset: parts.rememberPreset, outState: parts.outState, cap: parts.capOf, attachToEngine: parts.attachToEngine, detach: parts.detach,
+  setWiring: parts.setWiring,   // the engine's own surface must agree with the window's
 };
 export { api as synthHost };
