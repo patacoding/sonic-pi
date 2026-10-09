@@ -776,6 +776,47 @@ export function vitalLayerReport({ parsed, mapping, extra, routes, shapes, appli
   return { parsed, mapped: { parameters: mappedParams, skipped, approximated, routes: routes ?? 0, shapes: shapes ?? 0 }, applied: applied ?? null, line };
 }
 
+/**
+ * The single import entry: what the product runs and what the tests run.
+ *
+ * The review's reason for wanting it is a failure I repeated three times here: the conversion is two passes, and a test
+ * that called only vitalToPreset() passed while the extra pass was never exercised. One entry point makes that impossible.
+ *
+ * It returns a structured result rather than a preset -- what was applied, what was skipped and why, which parameters
+ * are only partial, the tables and shapes that would be handed over, and a status of complete, partial or failed.
+ * "Complete" still does not mean it sounds like Vital: nothing here listens to the result.
+ */
+export function vitalImport(vital, api = null, fallbackName = 'Imported Vital') {
+  const failures = [];
+  let preset = null, report = null;
+  try { ({ preset, report } = vitalToPreset(vital, fallbackName, api)); }
+  catch (e) { failures.push('parameter mapping: ' + (e?.message ?? e)); }
+  let extra = { params: {}, mapped: {}, dropped: {} };
+  if (api) { try { extra = vitalExtraParams(vital, api); } catch (e) { failures.push('extra parameters: ' + (e?.message ?? e)); } }
+  let tables = [];
+  try { tables = vitalEmbeddedTables(vital); } catch (e) { failures.push('wavetables: ' + (e?.message ?? e)); }
+  let shapes = [];
+  try { shapes = vitalLfoShapeApplications(vital); } catch (e) { failures.push('lfo shapes: ' + (e?.message ?? e)); }
+  const MOD_SOURCES = [...Array.from({ length: 6 }, (_, i) => `env${i + 1}`), ...Array.from({ length: 8 }, (_, i) => `lfo${i + 1}`),
+    'velocity', 'keytrack', 'random', ...Array.from({ length: 4 }, (_, i) => `macro${i + 1}`), 'modwheel', 'pitchwheel', 'aftertouch'];
+  let wired = { routes: [], skipped: [] };
+  try { wired = vitalModRoutes(vital, knownParamIds(), MOD_SOURCES); } catch (e) { failures.push('modulation: ' + (e?.message ?? e)); }
+  const dropped = { ...(report?.dropped ?? {}), ...(extra.dropped ?? {}) };
+  const approximate = Object.keys(dropped).filter((k) => /semitones|relative|approximat/i.test(String(dropped[k])));
+  const withFrames = tables.filter((x) => x.frames?.length);
+  const status = failures.length ? 'failed' : (withFrames.length === 3 && !wired.skipped.length && !approximate.length ? 'complete' : 'partial');
+  return {
+    status, failures,
+    params: { ...(preset?.params ?? {}), ...(extra.params ?? {}) },
+    preset, extra, tables, shapes,
+    routes: wired.routes, skippedRoutes: wired.skipped,
+    mapped: Object.keys(preset?.params ?? {}).length + Object.keys(extra.params ?? {}).length,
+    skipped: Object.keys(dropped).length, approximate,
+    unsupported: Object.keys(dropped).filter((k) => !/semitones|relative|approximat/i.test(String(dropped[k]))),
+    paramStatus: api ? vitalParamStatusSummary() : null,
+  };
+}
+
 /** Read the engine back: how many of the parameters we wrote does it actually hold, within a tolerance? */
 export function verifyApplied(engine, paramIndex, wanted, tolerance = 1e-4) {
   let verified = 0, missing = [];
