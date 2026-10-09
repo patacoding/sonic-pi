@@ -116,7 +116,6 @@ export function vitalToPreset(vital, fallbackName = 'Imported Vital', api = null
 
   // oscillator basics that exist in both
   for (let o = 1; o <= 3; o++) {
-    if (typeof s[`osc_${o}_level`] === 'number') put(`osc${o}.level`, s[`osc_${o}_level`]);
     if (typeof s[`osc_${o}_pan`] === 'number') put(`osc${o}.pan`, (s[`osc_${o}_pan`] + 1) / 2);
     if (typeof s[`osc_${o}_transpose`] === 'number') put(`osc${o}.octave`, (s[`osc_${o}_transpose`] + 24) / 48);
   }
