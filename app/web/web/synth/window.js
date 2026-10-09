@@ -2,8 +2,8 @@
 // editor. Nothing of Sonic Pi's UI is touched: this element covers the page, it never rearranges it, and no state of
 // ours is persisted.
 import { createEditorPool } from "./editors.js";
-console.info("Synth build: window.js b100a3");
-const BUILD = "b100a3";   // single source of truth: the stamp, the row and the staleness check all use this
+console.info("Synth build: window.js b100a5");
+const BUILD = "b100a5";   // single source of truth: the stamp, the row and the staleness check all use this
 
 const STYLE = `
   #synth-btn { position: fixed; right: 0; top: calc(50% + 6.3em); z-index: 101; writing-mode: vertical-rl; height: 5.4em;
@@ -123,72 +123,76 @@ export function createSynthWindow(api) {
     vitalBtn.title = "Load ONE of your own .vital presets into the selected channel. A preset that needs other files is yours to complete with the Import button in the oscillator panel.";
     vitalBtn.addEventListener("click", () => vitalInput.click());
   } catch { /* cosmetic */ }
+  /** Say something in BOTH places the player looks: the title-bar line and the note beside the import button.
+   *  Every outcome uses this -- a rejection that only reaches the console reads to the player as "nothing happened". */
+  const say = (text, bad = false) => {
+    try {
+      const el = win.querySelector("#synth-last-import");
+      const note = win.querySelector("#synth-import-note");
+      if (el) el.textContent = text;
+      if (note) { note.textContent = text; note.style.opacity = "1"; note.style.color = bad ? "#ffb4b4" : ""; }
+    } catch { /* cosmetic */ }
+    if (bad) console.warn("Synth — " + text); else console.info("Synth — " + text);
+  };
+
   vitalInput.addEventListener("change", async () => {
-    // ONE file. The core of this flow is a single file going in and coming out as parameters (plus whatever wavetables
-    // that file carries inside it). A preset that depends on other files is not our problem to solve: the user
-    // completes it with the Import button that each oscillator panel already has.
+    // ONE file. This flow is a single file going in and coming out as parameters plus whatever wavetables that same
+    // file carries. A preset that needs other files is the player's to complete, with the oscillator's Import button.
     const file = vitalInput.files?.[0] ?? null;
     vitalInput.value = "";
-    if (!file) return;
+    if (!file) { say("no file was chosen", true); return; }
     try {
-      const mod = await import("./vital.js").catch((e) => { console.error("Synth — the converter could not load:", e); return null; });
+      const mod = await import("./vital.js").catch((e) => { say("the converter could not load: " + (e?.message ?? e), true); return null; });
       if (!mod) return;
       const engine = api.engineOf?.(selected);
-      if (!engine) { console.warn("Synth — pick a channel first, then import"); return; }
+      if (!engine) { say(`pick a channel first — the selected one, "${selected}", has no sound yet`, true); return; }
       const text = await file.text();
       const kind = mod.classifyFile(file.name, text);
       if (kind.kind !== "vital") {
-        console.warn(`Synth — ${file.name} is not a .vital preset (${kind.reason ?? kind.kind}). This importer takes one preset file; for a wavetable use the Import button on the oscillator panel.`);
+        // By far the most common miss: a macOS "._name.vital" metadata sibling, which looks like a preset in the picker.
+        const meta = /^\._/.test(file.name);
+        const real = file.name.replace(/^\._/, "");
+        say(meta
+          ? `"${file.name}" is macOS metadata, not a preset — pick "${real}" instead (the one without the "._" prefix)`
+          : `"${file.name}" is not a .vital preset (${kind.reason ?? kind.kind}); this importer takes one preset file`, true);
         return;
       }
-      // Parse the way Vital itself does: stop at the end of the top-level object, so trailing bytes are tolerated
-      const parsed = mod.parseVitalText ? mod.parseVitalText(text) : (() => { try { return { ok: true, data: JSON.parse(text) }; } catch (e) { return { ok: false, reason: e?.message }; } })();
-      if (!parsed.ok) { console.error(`Synth — ${file.name} could not be read: ${parsed.reason}`); return; }
+      const parsed = mod.parseVitalText ? mod.parseVitalText(text)
+        : (() => { try { return { ok: true, data: JSON.parse(text) }; } catch (e) { return { ok: false, reason: e?.message }; } })();
+      if (!parsed.ok) { say(`"${file.name}" could not be read: ${parsed.reason}`, true); return; }
       const vital = parsed.data;
-      if (parsed.trailing) console.warn(`Synth — ${file.name} has ${parsed.trailing.length}+ bytes after the preset object; they were ignored (Vital does the same)`);
+      if (parsed.trailing) console.warn(`Synth — ${file.name} has bytes after the preset object; they were ignored (Vital does the same)`);
       const { preset, report } = mod.vitalToPreset(vital, file.name.replace(/\.vital$/i, ""));
       const judged = mod.assessPreset(preset, mod.knownParamIds());
-      if (!judged.ok) { console.warn(`Synth — ${file.name} was not applied: ${judged.note}`); return; }
+      if (!judged.ok) { say(`"${file.name}" was not applied: ${judged.note}`, true); return; }
       engine.loadPreset(preset);
-      // SAVE IT WHERE THE PLAYER CAN SEE IT: the editor's preset dropdown is rendered from their user library in
-      // localStorage, so a preset that only lives in the engine is invisible and is lost on reload.
+      // SAVE IT WHERE THE PLAYER CAN SEE IT: the editor's dropdown is rendered from their user library in localStorage,
+      // so a preset that only lives in the engine is invisible and is lost on reload. Repair the library while saving:
+      // entries their reader cannot use make it return an empty list, and then the User group never appears at all.
       try {
         const KEY = "soundgineer.presets.v1";
-        // A library that cannot be parsed, or that holds entries with no name, makes THEIR reader return an empty list
-        // -- which means the User group never appears and no amount of writing helps. So repair it while saving.
         let list = [];
         let repaired = false;
         try {
           const raw = localStorage.getItem(KEY);
-          const parsed = raw ? JSON.parse(raw) : [];
-          if (Array.isArray(parsed)) list = parsed.filter((x) => x && typeof x.name === "string");
+          const was = raw ? JSON.parse(raw) : [];
+          if (Array.isArray(was)) list = was.filter((x) => x && typeof x.name === "string");
           else repaired = true;
-          if (Array.isArray(parsed) && list.length !== parsed.length) repaired = true;
+          if (Array.isArray(was) && list.length !== was.length) repaired = true;
         } catch { repaired = true; }
         const kept = list.filter((x) => x.name !== preset.name);
         kept.push(preset);
         localStorage.setItem(KEY, JSON.stringify(kept));
         if (repaired) console.warn("Synth — your preset library had entries that could not be used; it was rewritten with the valid ones (" + kept.length + ")");
-        console.info(`Synth — saved "${preset.name}" to your preset library (${kept.length} user presets); it is in the preset dropdown of the "${selected}" editor`);
-        // read it back the way the editor's browser does, so a library their reader cannot parse is visible immediately
-        try {
-          const back = JSON.parse(localStorage.getItem(KEY) ?? "[]");
-          const userOnes = Array.isArray(back) ? back.filter((x) => x && typeof x.name === "string").length : -1;
-          console.info(`Synth — library reads back: ${userOnes} usable entries of ${Array.isArray(back) ? back.length : "?"}; the editor is being rebuilt for "${selected}"`);
-        } catch (e) {
-          console.warn("Synth — the library was written but cannot be read back (" + (e?.message ?? e) + "); the editor's User list will be empty until it is fixed");
-        }
       } catch (e) {
-        console.warn("Synth — the preset was loaded but could not be saved to your library: " + (e?.message ?? e));
+        say("loaded, but it could not be saved to your library: " + (e?.message ?? e), true);
       }
       engine.__sgrPreset = "user:" + preset.name;
       await api.setPreset?.(selected, preset.name);
-      // FORCE the view to be rebuilt: the pool only rebuilds on its own when the preset NAME changes, so importing a
-      // name that is already current (or re-importing) used to leave the old dropdown on screen -- "nothing changed".
-      try { pool.reload(selected); console.info(`Synth — rebuilt the editor for "${selected}" so its preset list is current`); }
-      catch (e) { console.warn("Synth — could not rebuild the editor: " + (e?.message ?? e)); }
-      console.info("Synth — " + mod.describeReport(report));
-      // 1) wavetables that are INSIDE this file: use them, so one file is complete
+      // FORCE the view to be rebuilt: the pool only rebuilds on its own when the preset NAME changes, so re-importing a
+      // name that is already current used to leave the previous option list on screen -- "nothing changed".
+      try { pool.reload(selected); } catch (e) { console.warn("Synth — could not rebuild the editor: " + (e?.message ?? e)); }
+      // 1) the wavetables INSIDE this file: use them, so one file is complete
       const embedded = mod.vitalEmbeddedTables?.(vital) ?? [];
       for (const table of embedded.filter((x) => x.frames?.length)) {
         try {
@@ -196,33 +200,19 @@ export function createSynthWindow(api) {
           const name = `${preset.name} osc${table.osc + 1} (${table.kind === "wave" ? "Wave Source" : "Audio File Source"}).wav`;
           const blob = new Blob([mod.encodeWavFloat32(samples, table.sampleRate ?? 44100)], { type: "audio/wav" });
           await engine.importWavetableFile(Math.min(table.osc, 2), new File([blob], name, { type: "audio/wav" }));
-          console.info(`Synth — osc${table.osc + 1} ← its embedded table (${table.frames.length} frames of ${table.frameSize}${table.skipped?.length ? ", modifiers dropped: " + table.skipped.join(" > ") : ""})`);
+          console.info(`Synth — osc${table.osc + 1} ← its embedded table (${table.frames.length} frames of ${table.frameSize})`);
         } catch (e) { console.warn(`Synth — osc${table.osc + 1} embedded table could not be used: ${e?.message ?? e}`); }
       }
-      // 2) wavetables this file does NOT carry: hand them over, with the name so the user can find the file
+      // 2) the wavetables it does NOT carry: name the file and hand it over
       const external = mod.externalAudioRefs?.(vital) ?? [];
       for (const table of embedded.filter((x) => !x.frames?.length)) {
         const wanted = external.filter((r) => r.osc === table.osc);
-        if (wanted.length) {
-          console.warn(`Synth — osc${table.osc + 1} needs "${wanted.map((r) => r.name).join('", "')}", which is not inside this preset. ` +
-                       "Load it yourself with the Import button on that oscillator panel (.wav).");
-        } else {
-          console.warn(`Synth — osc${table.osc + 1}'s table is a Vital DSP chain (${table.type}) with no base waveform inside this file. ` +
-                       "Load a wavetable yourself with the Import button on that oscillator panel.");
-        }
+        if (wanted.length) console.warn(`Synth — osc${table.osc + 1} needs "${wanted.map((r) => r.name).join('", "')}", which is not inside this preset; load it with the Import button on that oscillator panel`);
+        else console.warn(`Synth — osc${table.osc + 1}'s table is a Vital DSP chain (${table.type}) with no base waveform inside this file; load a wavetable with that panel's Import button`);
       }
-      console.info(`Synth — ${file.name} applied: ${judged.mapped} parameter(s)${judged.unknown ? ", " + judged.unknown + " dropped" : ""}`);
-      try {
-        const el = win.querySelector("#synth-last-import");
-        const note = win.querySelector("#synth-import-note");
-        const text = `imported "${preset.name}" → ${selected} · library ${JSON.parse(localStorage.getItem("soundgineer.presets.v1") ?? "[]").length} · view rebuilt`;
-        if (el) el.textContent = text;
-        if (note) { note.textContent = text; note.style.opacity = "1"; }
-      } catch { /* cosmetic */ }
+      say(`imported "${preset.name}" → ${selected} · ${judged.mapped} parameter(s) · library ${(() => { try { return JSON.parse(localStorage.getItem("soundgineer.presets.v1") ?? "[]").length; } catch { return "?"; } })()}`);
     } catch (e) {
-      console.error("Synth — the import stopped unexpectedly: " + (e?.message ?? e));
-    } finally {
-      paint();
+      say("the import stopped unexpectedly: " + (e?.message ?? e), true);
     }
   });
   // VISIBLE: the title bar, next to the other window controls -- inside the collapsed help block it could not be seen.
