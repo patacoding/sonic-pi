@@ -14,8 +14,10 @@
 //   quadratic    real = stored^2        (stored = sqrt(real))
 //   cubic        real = stored^3
 //   quartic      real = stored^4        (stored = real^(1/4))
-//   square_root  real = stored^2 as well: the knob is the square root of the value
-//   exponential  real = exp(stored)     -- the base is not yet confirmed; see the protocol document section 10
+//   square_root  real = sqrt(stored)    -- "Volume" is the only one that matters here: its stored default 5473.0404
+//                                         is sqrt(73.98), and with the entry's post_offset of -80 that is -6.02 dB
+//   exponential  real = 2 ** stored     -- confirmed by the declared ranges: reverb_decay_time -6..6 is 0.0156..64 s,
+//                                         chorus_frequency -6..3 is 0.0156..8 Hz, phaser_frequency -5..2 is 0.031..4 s
 //   indexed      a menu index; not a continuous quantity at all
 
 /** [min, max, default, scale] for the parameters we map. Anything absent is reported rather than guessed. */
@@ -33,7 +35,7 @@ export const VITAL_PARAMS = {
   osc_3_unison_detune: [0, 10, 4.472135955, 'quadratic'],
   osc_1_unison_voices: [1, 16, 1, 'indexed'], osc_1_wave_frame: [0, 256, 0, 'linear'],
   osc_1_phase: [0, 1, 0.5, 'linear'], osc_1_transpose: [-48, 48, 0, 'indexed'], osc_1_tune: [-1, 1, 0, 'linear'],
-  // filters: 8..136 is not Hz
+  // filters: 8..136 with a default of 60 is MIDI note numbers (60 = middle C), not Hz -- see vitalMidiToHz below
   filter_1_cutoff: [8, 136, 60, 'linear'], filter_2_cutoff: [8, 136, 60, 'linear'],
   filter_1_resonance: [0, 1, 0.5, 'linear'], filter_1_drive: [0, 20, 0, 'linear'],
   filter_1_keytrack: [-1, 1, 0, 'linear'],
@@ -55,8 +57,8 @@ export function vitalToReal(value, scale) {
     case 'quadratic': return v * v;
     case 'cubic': return v * v * v;
     case 'quartic': return v * v * v * v;
-    case 'square_root': return v * v;
-    case 'exponential': return Math.exp(v);          // base unconfirmed; callers must be able to say so
+    case 'square_root': return Math.sqrt(v);         // stored = real ** 2, so real = sqrt(stored)
+    case 'exponential': return Math.pow(2, v);       // base 2, read off the declared ranges
     case 'indexed': return v;                        // a menu index, passed through as a number
     default: return null;
   }
@@ -68,3 +70,6 @@ export function vitalReal(name, value) {
   if (!def) return null;
   return vitalToReal(value, def[3]);
 }
+
+/** The cutoff family is stored as a MIDI note number (60 = middle C, 8..136 about C-1..E9), not as hertz. */
+export const vitalMidiToHz = (note) => 440 * Math.pow(2, (Number(note) - 69) / 12);
