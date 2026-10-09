@@ -171,11 +171,12 @@ export function createSynthWindow(api) {
       const judged = mod.assessPreset(preset, mod.knownParamIds());
       if (!judged.ok) { say(`"${file.name}" was not applied: ${judged.note}`, true); return; }
       // the LFOs and the insides of the effects, converted with the engine's own range functions
+      let extra = { params: {}, mapped: {}, dropped: {} };   // the report below needs it, and its own try used to end first
       try {
         const paramsApi = await import("./paramapi.js").catch(() => null) ?? null;
         const api = paramsApi ?? (engine.__sgrParamApi ?? null);
         if (api) {
-          const extra = mod.vitalExtraParams?.(vital, api) ?? { params: {}, mapped: {}, dropped: {} };
+          extra = mod.vitalExtraParams?.(vital, api) ?? extra;
           const n = Object.keys(extra.params).length;
           Object.assign(preset.params, extra.params);
           if (n) console.info(`Synth — ${n} more parameters mapped from the LFOs and the effects`);
