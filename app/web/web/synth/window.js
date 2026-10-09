@@ -304,6 +304,7 @@ export function createSynthWindow(api) {
           `file: read ok${parsed?.trailing ? ", trailing bytes ignored" : ""}`,
           `converted: ${judged.mapped} parameter(s) \u00b7 ${unsupported} with no counterpart \u00b7 ${approximate} approximate \u00b7 ${skippedAll} skipped \u00b7 wiring ${wiringUsable} route(s) \u00b7 ${wiringShapes} shape(s)`,
           `engine: ${keptSlots} modulation slot(s) \u00b7 ${keptShapes} shape(s) \u00b7 ${check ? `${check.verified}/${check.of} parameter(s) read back` : "read-back not checked"}`,
+          `modulation: ${wiringUsable} route(s)${(imported.differingLaw ?? []).length ? `, ${imported.differingLaw.length} whose law (bipolar, power or stereo) this engine cannot hold` : ""}${(imported.inactiveRoutes ?? []).length ? `, ${imported.inactiveRoutes.length} bypassed in the preset and left out` : ""}`,
           notKept.length ? `read-back mismatch: ${notKept.slice(0, 4).join(", ")}${notKept.length > 4 ? ", \u2026" : ""}` : "read-back mismatch: none",
           "not verified: nothing here listens to the result, so the sound is not compared with Vital",
         ].join("\n"));

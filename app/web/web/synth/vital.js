@@ -607,16 +607,29 @@ export function engineParamIdFromVital(name) {
 
 /** The connections this engine can actually hold: source in MOD_SOURCES, destination an id it has. */
 export function vitalModRoutes(vital, paramIds, modSources = ['velocity', 'keytrack', 'random', 'modwheel', 'pitchwheel', 'aftertouch']) {
-  const routes = [], skipped = [];
+  const routes = [], skipped = [], inactive = [], differingLaw = [];
+  const settings = vital?.settings ?? {};
   for (const c of vitalModulations(vital)) {
     if (!c.source && !c.destination) continue;
+    // modulation_connection_processor.cpp clears its output when the connection is bypassed, so a bypassed connection
+    // modulates nothing at all. Adding it here would invent modulation the preset does not have.
+    if (Number(c.bypass) === 1) { inactive.push(`${c.source} → ${c.destination}: bypassed in the preset`); continue; }
     const source = engineModSourceFromVital(c.source, modSources);
     if (!source) { skipped.push(`${c.source} → ${c.destination}: this engine has no ${c.source} as a modulation source`); continue; }
     const dest = engineParamIdFromVital(c.destination);
     if (!dest || (paramIds && !paramIds.has(dest))) { skipped.push(`${c.source} → ${c.destination}: no counterpart for ${c.destination}`); continue; }
+    // The amount travels as it is: the processor clamps it to -1..1, which is the same domain this engine's depth uses.
     routes.push({ source, dest, depth: typeof c.amount === 'number' ? c.amount : 1, from: c.source, to: c.destination });
+    // The LAW does not travel. Bipolar shifts the source before scaling (offset -0.5, gain 2, post-scale 0.5), power bends
+    // it, stereo scales the right channel; this engine has one depth per connection and no curve. So each such connection
+    // is named rather than quietly flattened into a single number.
+    const law = [];
+    if (Number(c.bipolar) === 1) law.push('bipolar');
+    if (typeof c.power === 'number' && c.power !== 0) law.push('power ' + c.power);
+    if (Number(settings[`modulation_${c.slot}_stereo`] ?? 0) === 1) law.push('stereo');
+    if (law.length) differingLaw.push(`${c.source} → ${c.destination}: ${law.join(', ')} (this engine has one depth, not a curve)`);
   }
-  return { routes, skipped };
+  return { routes, skipped, inactive, differingLaw };
 }
 
 /** The eight LFO shapes, ready for setLfoShape(lfo, points) -- the engine's own LfoPoint shape. */
@@ -820,6 +833,7 @@ export function vitalImport(vital, api = null, fallbackName = 'Imported Vital') 
     preset, extra, report, extraReport: extra,
     tables, shapes,
     routes: wired.routes, skippedRoutes: wired.skipped,
+    inactiveRoutes: wired.inactive ?? [], differingLaw: wired.differingLaw ?? [],
     mapped: Object.keys(preset?.params ?? {}).length + Object.keys(extra.params ?? {}).length,
     skipped: Object.keys(dropped).length, approximate,
     unsupported: Object.keys(dropped).filter((k) => !/semitones|relative|approximat/i.test(String(dropped[k]))),
