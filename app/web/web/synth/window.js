@@ -209,7 +209,11 @@ export function createSynthWindow(api) {
       // the wiring and the shapes: only the connections this engine can hold, with the rest named rather than dropped
       try {
         const ids = mod.knownParamIds ? mod.knownParamIds() : null;
-        const { routes, skipped } = mod.vitalModRoutes?.(vital, ids) ?? { routes: [], skipped: [] };
+        // the twenty-four sources from the engine's own protocol, not the six a grep of the built bundle finds
+        const MOD_SOURCES = [...Array.from({ length: 6 }, (_, i) => `env${i + 1}`), ...Array.from({ length: 8 }, (_, i) => `lfo${i + 1}`),
+                            "velocity", "keytrack", "random", ...Array.from({ length: 4 }, (_, i) => `macro${i + 1}`),
+                            "modwheel", "pitchwheel", "aftertouch"];
+        const { routes, skipped } = mod.vitalModRoutes?.(vital, ids, MOD_SOURCES) ?? { routes: [], skipped: [] };
         for (const r of routes) engine.addModRoute(r.source, r.dest, r.depth);
         const shapes = mod.vitalLfoShapeApplications?.(vital) ?? [];
         for (const sh of shapes) engine.setLfoShape(sh.lfo, sh.points);

@@ -502,6 +502,32 @@ const SOURCE_ALIASES = {
   keytrack: 'keytrack', random: 'random',
 };
 
+/**
+ * Vital's modulation sources against this engine's.
+ *
+ * The engine's MOD_SOURCES is not the six I first read out of the built bundle -- grepping the minified file for
+ * `id: "..."` only found the literal entries, while six envelopes, eight LFOs and four macros are generated. The source
+ * of truth is src/shared/messages.ts, and the protocol document lists all twenty-four: env1..6, lfo1..8, velocity,
+ * keytrack, random, macro1..4, modwheel, pitchwheel, aftertouch. That is almost exactly Vital's vocabulary, which makes
+ * this mapping the difference between a couple of percent and nearly all of it.
+ *
+ * Vital's indexed `random_N`, `note`, `stereo`, `lift` and `note_in_octave` have no counterpart and are reported.
+ */
+export function engineModSourceFromVital(name, modSources) {
+  const n = String(name ?? '');
+  const indexed = /^(env|lfo|macro_control|random)_(\d+)$/.exec(n);
+  if (indexed) {
+    // Vital has four independent randoms; this engine has one. Routing them all to it is closer to the preset than
+    // dropping them, and the caller reports it as an approximation rather than passing it off as exact.
+    const base = indexed[1] === 'macro_control' ? 'macro' : (indexed[1] === 'random' ? 'random' : indexed[1]);
+    const id = indexed[1] === 'random' ? 'random' : `${base}${indexed[2]}`;
+    return !modSources || modSources.includes(id) ? id : null;
+  }
+  const id = SOURCE_ALIASES[n] ?? null;
+  if (!id) return null;
+  return !modSources || modSources.includes(id) ? id : null;
+}
+
 /** Vital parameter names to this engine's ids: grouped names flatten (osc_1_level -> osc1.level) with the exceptions
  *  that the two synths spell differently. Returns null when there is no counterpart at all. */
 export function engineParamIdFromVital(name) {
@@ -527,7 +553,10 @@ export function engineParamIdFromVital(name) {
   let [, group, index, rest] = m;
   if (group === 'distortion') return 'fxdist.' + (aliases[`distortion_${rest}`] ?? rest);
   if (group === 'compressor') return 'comp.' + (aliases[`compressor_${rest}`] ?? rest);
-  if (group === 'filter_fx') return null;                                  // no counterpart
+  if (group === 'filter_fx') {                                             // the engine's own filter section
+    const map = { cutoff: 'filter.cutoff', resonance: 'filter.resonance', on: 'filter.enabled', mix: 'filter.mix' };
+    return map[rest] ?? null;
+  }
   if (group === 'random') return null;                                     // a different random source
   if (group === 'sample') return null;                                     // the engine has no sample oscillator
   if (group === 'master') return 'master.' + ({ volume: 'volume', bpm: 'bpm', polyphony: 'polyphony' }[rest] ?? rest);
@@ -540,8 +569,8 @@ export function vitalModRoutes(vital, paramIds, modSources = ['velocity', 'keytr
   const routes = [], skipped = [];
   for (const c of vitalModulations(vital)) {
     if (!c.source && !c.destination) continue;
-    const source = SOURCE_ALIASES[c.source] ?? c.source;
-    if (!modSources.includes(source)) { skipped.push(`${c.source} → ${c.destination}: this engine has no ${c.source} as a modulation source`); continue; }
+    const source = engineModSourceFromVital(c.source, modSources);
+    if (!source) { skipped.push(`${c.source} → ${c.destination}: this engine has no ${c.source} as a modulation source`); continue; }
     const dest = engineParamIdFromVital(c.destination);
     if (!dest || (paramIds && !paramIds.has(dest))) { skipped.push(`${c.source} → ${c.destination}: no counterpart for ${c.destination}`); continue; }
     routes.push({ source, dest, depth: typeof c.amount === 'number' ? c.amount : 1, from: c.source, to: c.destination });
