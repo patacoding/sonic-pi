@@ -695,7 +695,7 @@ export function vitalExtraParams(vital, api) {
       if (typeof v === 'number') put(`osc${i}.${mine}`, v);
     }
     // tune is in semitones and this engine's fine control is in cents, so convert rather than pretend they match
-    if (typeof s[`osc_${i}_tune`] === 'number') { const fineDef = def(`osc${i}.fine`); if (fineDef) put(`osc${i}.fine`, s[`osc_${i}_tune`] * 100); }
+    if (typeof s[`osc_${i}_tune`] === 'number' && s[`osc_${i}_tune`] !== 0) dropped[`osc${i}.fine`] = 'Vital tune is -1..1 linear but its unit is unproven, so no cents conversion is attempted';
 
     // Vital's wave_frame is a frame index (0..255) and this engine's morph is 0..1; older files may already be
     // normalised, so only a value above 1 is treated as an index.
@@ -712,7 +712,8 @@ export function vitalExtraParams(vital, api) {
     for (const [vitalKey, mine] of Object.entries(FILTER_KEYS)) {
       const v = s[`filter_${i}_${vitalKey}`];
       if (typeof v !== 'number') continue;
-      put(`filter${i}.${mine}`, vitalKey in FILTER_MIDI ? vitalMidiToHz(v) : (vitalKey === 'drive' ? v / 20 : v));
+      if (vitalKey === 'cutoff') { dropped[`filter${i}.cutoff`] = 'its unit is unproven: 8..136 with a default of 60 is either a MIDI note or semitones from a base'; continue; }
+      put(`filter${i}.${mine}`, vitalKey === 'drive' ? v / 20 : v);
     }
     for (const k of ['blend', 'blend_transpose', 'formant_x', 'formant_y', 'formant_resonance', 'formant_transpose', 'filter_input', 'style', 'model']) {
       const v = s[`filter_${i}_${k}`];
