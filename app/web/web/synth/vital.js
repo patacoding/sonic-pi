@@ -697,7 +697,7 @@ export function vitalExtraParams(vital, api) {
   // similar is not enough to write into a slot.
   const OSC_KEYS = {
     pan: 'pan', phase: 'phase', random_phase: 'phase_rand', transpose: 'transpose',
-    unison_voices: 'unison', unison_blend: 'blend', stereo_spread: 'spread', unison_blend: 'blend', stereo_spread: 'spread', on: 'enabled',
+    unison_voices: 'unison', unison_blend: 'blend', stereo_spread: 'spread', on: 'enabled',
   };
   const OSC_SKIP = ['distortion_amount', 'distortion_type', 'distortion_phase', 'distortion_spread', 'spectral_morph_amount',
                     'spectral_morph_type', 'spectral_morph_spread', 'spectral_unison', 'frame_spread', 'detune_power',
