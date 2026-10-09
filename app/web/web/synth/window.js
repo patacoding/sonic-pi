@@ -2,7 +2,8 @@
 // editor. Nothing of Sonic Pi's UI is touched: this element covers the page, it never rearranges it, and no state of
 // ours is persisted.
 import { createEditorPool } from "./editors.js";
-console.info("Synth build: window.js b100a2");
+console.info("Synth build: window.js b100a3");
+const BUILD = "b100a3";   // single source of truth: the stamp, the row and the staleness check all use this
 
 const STYLE = `
   #synth-btn { position: fixed; right: 0; top: calc(50% + 6.3em); z-index: 101; writing-mode: vertical-rl; height: 5.4em;
@@ -262,7 +263,7 @@ export function createSynthWindow(api) {
     const bar = win.querySelector("#synth-bar") ?? win.firstElementChild;
     const stamp = document.createElement("span");
     stamp.id = "synth-build-stamp";
-    stamp.textContent = " build b100a2";
+    stamp.textContent = " build " + BUILD;
     stamp.style.cssText = "font:10px/1 ui-monospace,monospace;opacity:.6;margin-left:6px";
     const spacer = bar?.querySelector(".spacer");
     const last = document.createElement("span");
