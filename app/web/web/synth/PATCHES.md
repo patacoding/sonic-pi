@@ -21,3 +21,17 @@
 | 3 | `src/ui/enveditor.ts` | ENV **图上直接拖**：9 个手柄（D/A/H/D/R 横向、sustain 纵向、A/D/R 曲线上下），全部经 `engine.setParam(index, normalized)` 写入 —— DSP / worklet / 参数注册表零改动 |
 
 **构建自包含检查（与来源无关，仍然必要）**：`soundgineer-worklet.js` 必须**不含** `import` / `fetch` / `importScripts`，否则构建失败。
+
+## SP-EXT: host-supplied factory presets, grouped by category (2026-10-10)
+
+`node_modules/soundgineer/src/ui/presets.ts` and `ui/app.ts` carry four small additions, and the patched files are kept in
+`engine-patches/` because node_modules is not ours to commit and `npm ci` would discard them:
+
+1. a registry (`registerFactoryPresets`) for factory presets a host supplies, each with an optional `category`;
+2. `refresh()` builds one `optgroup` per category from that registry, after the built-in `Factory` group;
+3. the lookup in `load()` searches the registry as well as the built-ins -- without this, choosing a registered voice
+   would silently do nothing;
+4. `ui/app.ts` re-exports it, so a host can reach it from the same module it mounts the UI from.
+
+To reapply after `npm ci` in `app/web`: `cp web/synth/engine-patches/*.ts node_modules/soundgineer/src/ui/ && node
+scripts/build-soundgineer.mjs`. Upstream is pinned by SHA in `../VENDOR.json`; these belong in that fork's repository.
