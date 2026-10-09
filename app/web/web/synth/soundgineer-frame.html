@@ -11,7 +11,28 @@
 <body>
   <div id="app"></div>
   <script type="module">
-    import { buildApp } from "./vendor/soundgineer-ui.js";
+    // Namespace import, deliberately: a named import of something an older engine build does not export fails at link
+    // time and takes the whole frame with it. Through the namespace, a missing hook is just a missing property.
+    import * as ui from "./vendor/soundgineer-ui.js";
+    const { buildApp } = ui;
+
+    // Our mined built-in voices, grouped by category in the preset menu. Registered HERE, before anything mounts, and
+    // awaited at the top level so the menu's first render already has them; every step is guarded, because a missing file
+    // or an engine without the hook must leave this frame exactly as it was.
+    try {
+      if (typeof ui.registerFactoryPresets !== "function") {
+        console.info("Synth — this engine build has no preset registration hook; built-in voices are not offered");
+      } else {
+        const res = await fetch("./builtin-voices.json", { cache: "no-store" });
+        if (!res.ok) console.info(`Synth — no built-in voices file beside this frame (HTTP ${res.status})`);
+        else {
+          const data = await res.json();
+          const voices = (Array.isArray(data) ? data : data.voices) ?? [];
+          const total = ui.registerFactoryPresets(voices.map((v) => ({ ...v, version: 1, fxOrder: v.fxOrder ?? [] })));
+          console.info(`Synth — ${voices.length} built-in voice(s) registered (${total} factory presets in the menu)`);
+        }
+      }
+    } catch (e) { console.warn("Synth — built-in voices could not be registered: " + (e?.message ?? e)); }
 
     // ONE view, built once, against this proxy. Its whole job is to guarantee that the UI is mapped to the SELECTED
     // channel's preset data -- for reading and for writing -- without anything ever being created or destroyed:
