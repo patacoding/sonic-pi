@@ -216,7 +216,9 @@ export function createSynthWindow(api) {
         const destIndex = {};
         for (const r of routes) if (paramApi) destIndex[r.dest] = paramApi.paramIndex(r.dest);
         const usable = routes.filter((r) => (destIndex[r.dest] ?? -1) >= 0 && MOD_SOURCES.includes(r.source));
+        console.info(`Synth — wiring: ${usable.length} usable of ${routes.length} route(s), ${Object.keys(destIndex).length} destination index/indices, sources ${MOD_SOURCES.length}, shapes ${shapes.length}`);
         await api.setWiring?.(selected, { routes: usable, shapes, sources: MOD_SOURCES, destIndex });
+        console.info("Synth — wiring handed to the store for " + selected);
         if (usable.length || shapes.length) console.info(`Synth — ${usable.length} modulation route(s) and ${shapes.length} LFO shape(s) handed to the channel`);
         if (skipped?.length) console.warn(`Synth — ${skipped.length} Vital connection(s) have no counterpart here: ` + skipped.slice(0, 3).join("; ") + (skipped.length > 3 ? "; …" : ""));
       } catch (e) { console.warn("Synth — the modulation wiring could not be applied: " + (e?.message ?? e)); }
