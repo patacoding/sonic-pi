@@ -235,7 +235,7 @@ export function createSynthWindow(api) {
     // reads these files at load time. So ask the server what it has now and say so, loudly and visibly.
     try {
       const reload = win.querySelector("#synth-stale-reload");
-      if (reload) reload.addEventListener("click", () => location.reload());
+      if (reload) reload.addEventListener("click", () => { if (typeof location.reload === "function") location.reload(); });
       fetch(import.meta.url, { cache: "no-store" })
         .then((r) => r.text())
         .then((text) => {
