@@ -2,7 +2,7 @@
 // editor. Nothing of Sonic Pi's UI is touched: this element covers the page, it never rearranges it, and no state of
 // ours is persisted.
 import { createEditorPool } from "./editors.js";
-console.info("Synth build: window.js b100a1");
+console.info("Synth build: window.js b100a2");
 
 const STYLE = `
   #synth-btn { position: fixed; right: 0; top: calc(50% + 6.3em); z-index: 101; writing-mode: vertical-rl; height: 5.4em;
@@ -39,6 +39,10 @@ const STYLE = `
   #synth-gate { flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center;
     gap: 8px; padding: 16px; text-align: center; }
   /* the stage clips: the editor may be zoomed past it, but nothing of it ever leaves the window */
+  #synth-stale { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 4px 6px;
+    font: 11px/1.5 system-ui, sans-serif; color: #2b1a00; background: #ffd479;
+    border-bottom: 1px solid rgba(0,0,0,.25); }
+  #synth-stale button { font: 11px/1.6 system-ui, sans-serif; cursor: pointer; }
   #synth-import-row { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 4px 6px;
     border-bottom: 1px solid color-mix(in srgb, var(--WindowBorder) 60%, transparent); }
   #synth-import-row button { font: 11px/1.6 system-ui, sans-serif; cursor: pointer; }
@@ -81,6 +85,11 @@ export function createSynthWindow(api) {
       <button id="synth-close">close</button></div>
     <div id="synth-main"><div id="synth-channels"></div>
       <div id="synth-stage">
+        <div id="synth-stale" hidden>
+          <strong>A newer build is available.</strong>
+          <span id="synth-stale-text"></span>
+          <button id="synth-stale-reload" type="button">reload now</button>
+        </div>
         <div id="synth-import-row">
           <button id="synth-import-vital-2" type="button">Import a Vital preset (.vital)</button>
           <span id="synth-row-stamp"></span>
@@ -221,6 +230,24 @@ export function createSynthWindow(api) {
     if (alt) alt.addEventListener("click", () => vitalInput.click());
     const rs = win.querySelector("#synth-row-stamp");
     if (rs) rs.textContent = BUILD;
+    // A page that was loaded before a newer build was deployed keeps running the old code forever -- the browser only
+    // reads these files at load time. So ask the server what it has now and say so, loudly and visibly.
+    try {
+      const reload = win.querySelector("#synth-stale-reload");
+      if (reload) reload.addEventListener("click", () => location.reload());
+      fetch(import.meta.url, { cache: "no-store" })
+        .then((r) => r.text())
+        .then((text) => {
+          const served = (text.match(/b1[0-9]{3}[a-z0-9]+/g) ?? []).sort().pop();
+          if (!served || served === BUILD) return;
+          const box = win.querySelector("#synth-stale");
+          const what = win.querySelector("#synth-stale-text");
+          if (what) what.textContent = `running ${BUILD}, the server has ${served} — reload to get it`;
+          if (box) box.hidden = false;
+          console.warn(`Synth — this page is running build ${BUILD} but the server serves ${served}; reload the page`);
+        })
+        .catch(() => { /* offline or file:// — nothing to compare */ });
+    } catch { /* cosmetic */ }
   } catch { /* cosmetic */ }
   try {
     const bar = win.querySelector("#synth-bar");
@@ -235,7 +262,7 @@ export function createSynthWindow(api) {
     const bar = win.querySelector("#synth-bar") ?? win.firstElementChild;
     const stamp = document.createElement("span");
     stamp.id = "synth-build-stamp";
-    stamp.textContent = " build b100a1";
+    stamp.textContent = " build b100a2";
     stamp.style.cssText = "font:10px/1 ui-monospace,monospace;opacity:.6;margin-left:6px";
     const spacer = bar?.querySelector(".spacer");
     const last = document.createElement("span");
