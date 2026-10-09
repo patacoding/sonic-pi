@@ -131,16 +131,21 @@ function applyWiring(ch, attempt = 0) {
     n++;
   }
   for (const sh of (w.shapes ?? [])) { try { engine.setLfoShape(sh.lfo, sh.points); } catch { /* refused */ } }
-  // Read it back. Importing replaces the channel's engine, so the slots can land on an object that is already gone --
-  // which is exactly what the first import of a session used to do while the second and third were fine. If the engine
-  // kept nothing, try again on whatever the channel points at now, a few times only, and say so if it never takes.
-  if (n > 0 && attempt < 4) {
-    const kept = (engine.modSlots ?? []).filter(Boolean).length;
-    if (kept === 0) {
+  // Read it back, and only re-apply while the engine still holds nothing. Two faults were in the first version: it
+  // compared the RETURN value (how many routes it tried) against zero, so the report of failure could never fire, and it
+  // re-applied unconditionally, which would double the routes once they did stick. Importing replaces the channel's
+  // engine, so an empty read-back is the signal that the routes landed on an object that is already gone.
+  if (n > 0 && attempt < 6) {
+    const keptNow = (ch.engine?.modSlots ?? []).filter(Boolean).length;
+    if (keptNow === 0) {
+      const delay = [0, 60, 150, 300, 600, 1200][attempt] ?? 1200;
       setTimeout(() => {
-        const again = applyWiring(ch, attempt + 1);
-        if (again === 0 && attempt === 3) console.warn('Synth — the modulation wiring did not stick on "' + (ch.name ?? ch.key ?? "?") + '" after 5 tries');
-      }, attempt === 0 ? 0 : 120);
+        const stillEmpty = (ch.engine?.modSlots ?? []).filter(Boolean).length === 0;
+        if (stillEmpty) {
+          applyWiring(ch, attempt + 1);
+          if (attempt === 5) console.warn('Synth — the modulation wiring never stuck on "' + (ch.name ?? ch.key ?? "?") + '" (6 attempts)');
+        }
+      }, delay);
     }
   }
   return n;
