@@ -2,8 +2,8 @@
 // editor. Nothing of Sonic Pi's UI is touched: this element covers the page, it never rearranges it, and no state of
 // ours is persisted.
 import { createEditorPool } from "./editors.js";
-console.info("Synth build: window.js b100b1");
-const BUILD = "b100b1";   // single source of truth: the stamp, the row and the staleness check all use this
+console.info("Synth build: window.js b100b3");
+const BUILD = "b100b3";   // single source of truth: the stamp, the row and the staleness check all use this
 
 const STYLE = `
   #synth-btn { position: fixed; right: 0; top: calc(50% + 6.3em); z-index: 101; writing-mode: vertical-rl; height: 5.4em;
@@ -236,6 +236,17 @@ export function createSynthWindow(api) {
           console.info(`Synth — osc${table.osc + 1} ← its embedded table (${table.frames.length} frames of ${table.frameSize})`);
         } catch (e) { console.warn(`Synth — osc${table.osc + 1} embedded table could not be used: ${e?.message ?? e}`); }
       }
+      // The sample oscillator is its own region and this engine has none: say so with its numbers rather than
+      // pretending. Measured over 400 real presets, settings.sample is the only structured region besides the three
+      // this importer already handles; custom_warps and random_values do not exist in any of them.
+      try {
+        const smp = vital?.settings?.sample;
+        if (smp && typeof smp === "object" && (smp.samples || smp.length)) {
+          const secs = (typeof smp.length === "number" && typeof smp.sample_rate === "number" && smp.sample_rate) ? (smp.length / smp.sample_rate).toFixed(2) : null;
+          say(`"${preset.name}" also carries a sample oscillator (${smp.name ?? "unnamed"}${smp.sample_rate ? ", " + smp.sample_rate + " Hz" : ""}${secs ? ", " + secs + " s" : ""}) — this engine has no sample oscillator, so that part is not loaded`, true);
+        }
+      } catch { /* the region is optional */ }
+
       // 2) the wavetables it does NOT carry: name the file and hand it over
       const external = mod.externalAudioRefs?.(vital) ?? [];
       for (const table of embedded.filter((x) => !x.frames?.length)) {
