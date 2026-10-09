@@ -206,18 +206,22 @@ export function createSynthWindow(api) {
       // FORCE the view to be rebuilt: the pool only rebuilds on its own when the preset NAME changes, so re-importing a
       // name that is already current used to leave the previous option list on screen -- "nothing changed".
       try { pool.reload(selected); } catch (e) { console.warn("Synth — could not rebuild the editor: " + (e?.message ?? e)); }
-      // the wiring and the shapes: only the connections this engine can hold, with the rest named rather than dropped
+      // the wiring and the shapes: only the connections this engine can hold, with the rest named rather than dropped.
+      // The store applies them on every engine it creates, because importing a preset replaces this channel's engine --
+      // applying to whatever it pointed at in this moment registered routes on an object that was then discarded.
       try {
         const ids = mod.knownParamIds ? mod.knownParamIds() : null;
-        // the twenty-four sources from the engine's own protocol, not the six a grep of the built bundle finds
         const MOD_SOURCES = [...Array.from({ length: 6 }, (_, i) => `env${i + 1}`), ...Array.from({ length: 8 }, (_, i) => `lfo${i + 1}`),
                             "velocity", "keytrack", "random", ...Array.from({ length: 4 }, (_, i) => `macro${i + 1}`),
                             "modwheel", "pitchwheel", "aftertouch"];
         const { routes, skipped } = mod.vitalModRoutes?.(vital, ids, MOD_SOURCES) ?? { routes: [], skipped: [] };
-        for (const r of routes) engine.addModRoute(r.source, r.dest, r.depth);
         const shapes = mod.vitalLfoShapeApplications?.(vital) ?? [];
-        for (const sh of shapes) engine.setLfoShape(sh.lfo, sh.points);
-        if (routes.length || shapes.length) console.info(`Synth — ${routes.length} modulation route(s) and ${shapes.length} LFO shape(s) applied`);
+        const paramApi = await import("./paramapi.js").catch(() => null);
+        const destIndex = {};
+        for (const r of routes) if (paramApi) destIndex[r.dest] = paramApi.paramIndex(r.dest);
+        const usable = routes.filter((r) => (destIndex[r.dest] ?? -1) >= 0 && MOD_SOURCES.includes(r.source));
+        await api.setWiring?.(selected, { routes: usable, shapes, sources: MOD_SOURCES, destIndex });
+        if (usable.length || shapes.length) console.info(`Synth — ${usable.length} modulation route(s) and ${shapes.length} LFO shape(s) handed to the channel`);
         if (skipped?.length) console.warn(`Synth — ${skipped.length} Vital connection(s) have no counterpart here: ` + skipped.slice(0, 3).join("; ") + (skipped.length > 3 ? "; …" : ""));
       } catch (e) { console.warn("Synth — the modulation wiring could not be applied: " + (e?.message ?? e)); }
 

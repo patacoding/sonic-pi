@@ -110,6 +110,30 @@ async function createChannel(key) {
 }
 
 /** Give a channel its own engine, wired so that their knob writes land in the DATA first (see edit()). */
+/** A channel's modulation wiring and LFO shapes, kept so a rebuilt engine gets them again. */
+export async function setWiring(name, w) {
+  const ch = channels.get(String(name));
+  if (!ch) return false;
+  ch.wiring = w ?? null;
+  applyWiring(ch);
+  return true;
+}
+
+function applyWiring(ch) {
+  const w = ch?.wiring, engine = ch?.engine;
+  if (!w || !engine) return 0;
+  let n = 0;
+  for (const r of (w.routes ?? [])) {
+    const s = (w.sources ?? []).indexOf(r.source);
+    const d = w.destIndex?.[r.dest] ?? -1;
+    if (s < 0 || d < 0) continue;
+    engine.addModRoute(s, d, Math.max(-1, Math.min(1, r.depth)));   // indices, not names
+    n++;
+  }
+  for (const sh of (w.shapes ?? [])) { try { engine.setLfoShape(sh.lfo, sh.points); } catch { /* refused */ } }
+  return n;
+}
+
 async function createEngine(ch) {
   const engine = new SynthEngine();
   await engine.start({ ctx, connectToDestination: false });
@@ -117,6 +141,10 @@ async function createEngine(ch) {
   const node = engine.audioNode;
   if (node) node.connect(inputNode);
   ch.engine = engine; ch.node = node;
+  // The channel's wiring is applied HERE, where the engine comes into existence. Importing a preset replaces the engine,
+  // so applying routes to whatever the channel pointed at a moment earlier registered them on an object that was thrown
+  // away -- the log said "applied" while the worklet had nothing.
+  applyWiring(ch);
   // THEIR loadPreset writes this.values directly and never calls setParam, so no param listener is notified:
   // the engine holds the preset (the sound and getParam are right) but every knob and graph keeps the values it
   // was drawn with. That is the player's "parameters never update" -- not a channel-switching problem.
