@@ -452,10 +452,17 @@ export function vitalModulations(vital) {
     });
   }
   if (!out.length) {                                             // the flat form: keys without an array
+    // source and destination are two separate keys, so slots have to be merged rather than pushed one per key
+    const bySlot = new Map();
     for (const k of Object.keys(s)) {
       const m = /^modulation_(\d+)_(source|destination)$/.exec(k);
-      if (m) out.push({ slot: Number(m[1]), source: m[2] === 'source' ? String(s[k]) : "", destination: m[2] === 'destination' ? String(s[k]) : "", amount: s[`modulation_${m[1]}_amount`] ?? null });
+      if (!m) continue;
+      const slot = Number(m[1]);
+      const cur = bySlot.get(slot) ?? { slot, source: "", destination: "", amount: s[`modulation_${slot}_amount`] ?? null };
+      if (m[2] === 'source') cur.source = String(s[k]); else cur.destination = String(s[k]);
+      bySlot.set(slot, cur);
     }
+    out.push(...[...bySlot.values()].sort((a, b) => a.slot - b.slot));
   }
   return out;
 }
