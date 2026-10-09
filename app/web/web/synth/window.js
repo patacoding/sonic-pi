@@ -229,8 +229,16 @@ export function createSynthWindow(api) {
         wiringUsable = usable.length; wiringShapes = shapes.length;
         lastWiring = { routes: usable, shapes, sources: MOD_SOURCES, destIndex };
         console.info(`Synth — wiring: ${usable.length} usable of ${routes.length} route(s), ${Object.keys(destIndex).length} destination index/indices, sources ${MOD_SOURCES.length}, shapes ${shapes.length}`);
-        await api.setWiring?.(selected, { routes: usable, shapes, sources: MOD_SOURCES, destIndex });
-        console.info("Synth — wiring handed to the store for " + selected);
+        // The store returns false when it has no channel of that name yet, and I used to ignore that answer. On the
+        // first import of a session the channel does not exist until setPreset creates it, so the wiring could be
+        // dropped without a word while the second and third imports worked -- exactly the intermittent slots=0. Make
+        // sure the channel exists first, and never ignore the answer again.
+        try { await api.ensurePart?.(selected); } catch { /* it may already exist */ }
+        let stored = false;
+        try { stored = await api.setWiring?.(selected, { routes: usable, shapes, sources: MOD_SOURCES, destIndex }); }
+        catch (e) { console.warn("Synth — setWiring threw: " + (e?.message ?? e)); }
+        if (stored === false) say(`the modulation wiring could not be stored for "${selected}": the store has no such channel yet`, true);
+        console.info(`Synth — wiring handed to the store for ${selected} (accepted: ${stored})`);
         if (usable.length || shapes.length) console.info(`Synth — ${usable.length} modulation route(s) and ${shapes.length} LFO shape(s) handed to the channel`);
         if (skipped?.length) console.warn(`Synth — ${skipped.length} Vital connection(s) have no counterpart here: ` + skipped.slice(0, 3).join("; ") + (skipped.length > 3 ? "; …" : ""));
       } catch (e) { console.warn("Synth — the modulation wiring could not be applied: " + (e?.message ?? e)); }
