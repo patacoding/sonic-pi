@@ -808,7 +808,8 @@ export function vitalImport(vital, api = null, fallbackName = 'Imported Vital') 
   return {
     status, failures,
     params: { ...(preset?.params ?? {}), ...(extra.params ?? {}) },
-    preset, extra, tables, shapes,
+    preset, extra, report, extraReport: extra,
+    tables, shapes,
     routes: wired.routes, skippedRoutes: wired.skipped,
     mapped: Object.keys(preset?.params ?? {}).length + Object.keys(extra.params ?? {}).length,
     skipped: Object.keys(dropped).length, approximate,
