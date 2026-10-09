@@ -62,10 +62,10 @@ export const VITAL_PARAMS = {
   // filters: the cutoff is SEMITONES RELATIVE TO THE PLAYED NOTE -- the source declares units "semitones" with a
   // post_offset of -60 (so the display is stored - 60, ranging -52..+76), not a MIDI note number as I first assumed.
   // A single hertz value cannot be derived at import time without knowing the note, so it stays unmapped and reported.
-  // Mapped, but as an approximation with a stated premise: the stored value is semitones relative to the played note,
-  // so it is evaluated at A4 (440 Hz) and the filter is keytracked to follow the keyboard. Marked approximate rather
-  // than verified because the premise is mine, even though the arithmetic is exact.
-  filter_1_cutoff: [8, 136, 60, 'linear', 'approximate'], filter_2_cutoff: [8, 136, 60, 'linear', 'approximate'],
+  // Verified against the algorithm: filter_module.cpp feeds the filters midi_cutoff = cutoff + note * keytrack, so the
+  // stored value is a MIDI note number and 60 is middle C. The declared 8..136 with post_offset -60 is the display side
+  // of the same fact (it shows as -52..+76 semitones around middle C).
+  filter_1_cutoff: [8, 136, 60, 'linear', 'verified'], filter_2_cutoff: [8, 136, 60, 'linear', 'verified'],
   filter_1_resonance: [0, 1, 0.5, 'linear', 'partial'], filter_1_drive: [0, 20, 0, 'linear', 'partial'],
   filter_1_keytrack: [-1, 1, 0, 'linear', 'partial'],
   // lfos

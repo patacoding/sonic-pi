@@ -713,19 +713,20 @@ export function vitalExtraParams(vital, api) {
     }
   }
   const FILTER_KEYS = { cutoff: 'cutoff', resonance: 'resonance', drive: 'drive', keytrack: 'keytrack', mix: 'mix', on: 'enabled' };
-  // The cutoff family: the source declares units "semitones" with a post_offset of -60, so the stored value IS the
-  // cutoff in semitones relative to the PLAYED NOTE -- the default 60 means "at the note itself", not "middle C" as I
-  // first read it. That relative definition is a definite frequency once a reference note is fixed, and it inherently
-  // follows the keyboard. So: value it at A4 (MIDI 69, 440 Hz), and ask the engine to keytrack the filter, which is what
-  // the relative definition means. This is a mapping with a stated premise, and the premise is in this comment.
+  // The cutoff family, settled by the algorithm rather than by inference. filter_module.cpp builds the value the filters
+  // read as:  midi_cutoff = cutoff_parameter + note * keytrack  (the note and the _keytrack control are multiplied and
+  // fed in as internal modulation). So the parameter itself is a MIDI note number -- 60 is middle C, 261.63 Hz -- and
+  // following the keyboard is the job of the separate _keytrack parameter, which presets carry and we already map.
+  // The parameter's declared position 8..136 with post_offset -60 is the same fact seen from the display side: it shows
+  // as -52..+76 semitones around middle C. The forum confirms the unit is a display choice between Hz and semitones.
+  // No reference note of mine, and no forcing keytrack on.
   for (let i = 1; i <= 2; i++) {
     for (const [vitalKey, mine] of Object.entries(FILTER_KEYS)) {
       const v = s[`filter_${i}_${vitalKey}`];
       if (typeof v !== 'number') continue;
       if (vitalKey === 'cutoff') {
-        put(`filter${i}.cutoff`, 440 * Math.pow(2, (v - 60) / 12));
-        // only when the preset does not say: a cutoff defined relative to the note tracks the keyboard in full
-        if (typeof s[`filter_${i}_keytrack`] !== 'number') put(`filter${i}.keytrack`, 1);
+        // a MIDI note number to hertz; keytracking comes from the preset's own filter_N_keytrack, never from here
+        put(`filter${i}.cutoff`, 440 * Math.pow(2, (v - 69) / 12));
         continue;
       }
       put(`filter${i}.${mine}`, vitalKey === 'drive' ? v / 20 : v);
