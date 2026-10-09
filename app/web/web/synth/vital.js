@@ -647,8 +647,7 @@ export function vitalExtraParams(vital, api) {
   // similar is not enough to write into a slot.
   const OSC_KEYS = {
     level: 'level', pan: 'pan', phase: 'phase', random_phase: 'phase_rand', transpose: 'transpose',
-    unison_voices: 'unison', unison_detune: 'detune', unison_blend: 'blend', stereo_spread: 'spread',
-    wave_frame: 'morph', on: 'enabled',
+    unison_voices: 'unison', unison_detune: 'detune', unison_blend: 'blend', stereo_spread: 'spread', on: 'enabled',
   };
   const OSC_SKIP = ['distortion_amount', 'distortion_type', 'distortion_phase', 'distortion_spread', 'spectral_morph_amount',
                     'spectral_morph_type', 'spectral_morph_spread', 'spectral_unison', 'frame_spread', 'detune_power',
@@ -660,6 +659,10 @@ export function vitalExtraParams(vital, api) {
     }
     // tune is in semitones and this engine's fine control is in cents, so convert rather than pretend they match
     if (typeof s[`osc_${i}_tune`] === 'number') { const fineDef = def(`osc${i}.fine`); if (fineDef) put(`osc${i}.fine`, s[`osc_${i}_tune`] * 100); }
+
+    // Vital's wave_frame is a frame index (0..255) and this engine's morph is 0..1; older files may already be
+    // normalised, so only a value above 1 is treated as an index.
+    if (typeof s[`osc_${i}_wave_frame`] === 'number') put(`osc${i}.morph`, s[`osc_${i}_wave_frame`] > 1 ? s[`osc_${i}_wave_frame`] / 255 : s[`osc_${i}_wave_frame`]);
     for (const k of OSC_SKIP) {
       const v = s[`osc_${i}_${k}`];
       if (typeof v === 'number' && v !== 0) dropped[`osc${i}.${k}`] = 'this engine has no counterpart';
