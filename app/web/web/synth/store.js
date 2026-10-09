@@ -119,7 +119,7 @@ export async function setWiring(name, w) {
   return true;
 }
 
-function applyWiring(ch) {
+function applyWiring(ch, attempt = 0) {
   const w = ch?.wiring, engine = ch?.engine;
   if (!w || !engine) return 0;
   let n = 0;
@@ -131,6 +131,18 @@ function applyWiring(ch) {
     n++;
   }
   for (const sh of (w.shapes ?? [])) { try { engine.setLfoShape(sh.lfo, sh.points); } catch { /* refused */ } }
+  // Read it back. Importing replaces the channel's engine, so the slots can land on an object that is already gone --
+  // which is exactly what the first import of a session used to do while the second and third were fine. If the engine
+  // kept nothing, try again on whatever the channel points at now, a few times only, and say so if it never takes.
+  if (n > 0 && attempt < 4) {
+    const kept = (engine.modSlots ?? []).filter(Boolean).length;
+    if (kept === 0) {
+      setTimeout(() => {
+        const again = applyWiring(ch, attempt + 1);
+        if (again === 0 && attempt === 3) console.warn('Synth — the modulation wiring did not stick on "' + (ch.name ?? ch.key ?? "?") + '" after 5 tries');
+      }, attempt === 0 ? 0 : 120);
+    }
+  }
   return n;
 }
 
