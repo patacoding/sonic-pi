@@ -293,13 +293,16 @@ export function createSynthWindow(api) {
           applied: { slots: keptSlots, shapes: keptShapes, verifiedParams: check?.verified ?? null, ofParams: check?.of ?? null } });
         if (layers) console.info("Synth — " + layers.line);
         // Four states, kept apart on purpose: telling the player "there were warnings" hides which is which -- what the
-        // engine has no counterpart for, what failed, what the engine did not keep, and what has not been checked.
-        const unsupported = Object.keys({ ...(report?.dropped ?? {}), ...((extra ?? {}).dropped ?? {}) }).length;
+        // engine has no counterpart for, what was approximated, what failed, what the engine did not keep, and what has
+        // not been checked. The entry classifies the skips, so use its lists rather than counting them as one number.
+        const skippedAll = Object.keys({ ...(report?.dropped ?? {}), ...((extra ?? {}).dropped ?? {}) }).length;
+        const unsupported = Array.isArray(imported.unsupported) ? imported.unsupported.length : skippedAll;
+        const approximate = Array.isArray(imported.approximate) ? imported.approximate.length : 0;
         const notKept = check?.missing ?? [];
         say([
           `imported "${preset.name}" \u2192 ${selected}`,
           `file: read ok${parsed?.trailing ? ", trailing bytes ignored" : ""}`,
-          `converted: ${judged.mapped} parameter(s) \u00b7 unsupported ${unsupported} \u00b7 wiring ${wiringUsable} route(s) \u00b7 ${wiringShapes} shape(s)`,
+          `converted: ${judged.mapped} parameter(s) \u00b7 ${unsupported} with no counterpart \u00b7 ${approximate} approximate \u00b7 ${skippedAll} skipped \u00b7 wiring ${wiringUsable} route(s) \u00b7 ${wiringShapes} shape(s)`,
           `engine: ${keptSlots} modulation slot(s) \u00b7 ${keptShapes} shape(s) \u00b7 ${check ? `${check.verified}/${check.of} parameter(s) read back` : "read-back not checked"}`,
           notKept.length ? `read-back mismatch: ${notKept.slice(0, 4).join(", ")}${notKept.length > 4 ? ", \u2026" : ""}` : "read-back mismatch: none",
           "not verified: nothing here listens to the result, so the sound is not compared with Vital",
