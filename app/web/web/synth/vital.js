@@ -10,7 +10,7 @@
 // in the right region; the player can refine with the knobs afterwards.
 import { PARAMS } from "./vendor/soundgineer-params.js";
 
-import { VITAL_PARAMS, vitalToReal, vitalMidiToHz } from './vital-params.js';
+import { VITAL_PARAMS, vitalToReal, vitalParamStatusSummary } from './vital-params.js';
 
 const clamp01 = (x) => (Number.isFinite(x) ? Math.min(1, Math.max(0, x)) : 0);
 const logMap = (x, lo, hi) => clamp01(Math.log(Math.max(x, lo) / lo) / Math.log(hi / lo));
@@ -377,14 +377,6 @@ export function externalAudioRefs(vital) {
   };
   (vital?.settings?.wavetables ?? []).forEach((entry, osc) => walk(entry, osc, `osc${osc + 1}`));
   return found;
-}
-
-/** Match a named file against the files the player selected, by base name (case-insensitive, extension ignored). */
-export function matchLocalFile(name, files) {
-  const stem = (x) => String(x).split(/[\\/]/).pop().replace(/\.[a-z0-9]+$/i, '').toLowerCase();
-  const want = stem(name);
-  for (const f of files ?? []) if (stem(f.name) === want) return f;
-  return null;
 }
 
 

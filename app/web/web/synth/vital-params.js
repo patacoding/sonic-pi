@@ -20,32 +20,45 @@
 //                                         chorus_frequency -6..3 is 0.0156..8 Hz, phaser_frequency -5..2 is 0.031..4 s
 //   indexed      a menu index; not a continuous quantity at all
 
-/** [min, max, default, scale] for the parameters we map. Anything absent is reported rather than guessed. */
+/**
+ * [min, max, default, scale, status] for the parameters we map. Anything absent is reported rather than guessed.
+ *
+ * The status is not decoration: vitalToReal() succeeding only means the arithmetic ran. Per the review's standard --
+ *
+ *   verified     a source or a two-way test supports both the scale and the serialisation
+ *   partial      a declared default or range supports it, but not both directions
+ *   approximate  a recorded approximation rather than the original semantics
+ *   unsupported  the target engine has no equivalent, so no value is written
+ */
 export const VITAL_PARAMS = {
-  // envelopes: quartic times, the classic trap
-  env_1_attack: [0, 2.37842, 0.1495, 'quartic'], env_2_attack: [0, 2.37842, 0.1495, 'quartic'],
-  env_3_attack: [0, 2.37842, 0.1495, 'quartic'], env_4_attack: [0, 2.37842, 0.1495, 'quartic'],
-  env_5_attack: [0, 2.37842, 0.1495, 'quartic'], env_6_attack: [0, 2.37842, 0.1495, 'quartic'],
-  env_1_hold: [0, 1.4142135624, 0, 'quartic'], env_1_decay: [0, 2.37842, 1, 'quartic'],
-  env_1_release: [0, 2.37842, 0.5476, 'quartic'],
+  // envelopes: quartic times, the classic trap. The only parameters with two-way evidence: the writer's
+  // `seconds ** 0.25` and the declared maximum of 2.37842 being exactly 32 seconds.
+  env_1_attack: [0, 2.37842, 0.1495, 'quartic', 'verified'], env_2_attack: [0, 2.37842, 0.1495, 'quartic', 'verified'],
+  env_3_attack: [0, 2.37842, 0.1495, 'quartic', 'verified'], env_4_attack: [0, 2.37842, 0.1495, 'quartic', 'verified'],
+  env_5_attack: [0, 2.37842, 0.1495, 'quartic', 'verified'], env_6_attack: [0, 2.37842, 0.1495, 'quartic', 'verified'],
+  env_1_hold: [0, 1.4142135624, 0, 'quartic', 'verified'], env_1_decay: [0, 2.37842, 1, 'quartic', 'verified'],
+  env_1_release: [0, 2.37842, 0.5476, 'quartic', 'verified'],
   // oscillators
-  osc_1_level: [0, 1, 0.70710678119, 'quadratic'], osc_2_level: [0, 1, 0.70710678119, 'quadratic'],
-  osc_3_level: [0, 1, 0.70710678119, 'quadratic'],
-  osc_1_unison_detune: [0, 10, 4.472135955, 'quadratic'], osc_2_unison_detune: [0, 10, 4.472135955, 'quadratic'],
-  osc_3_unison_detune: [0, 10, 4.472135955, 'quadratic'],
-  osc_1_unison_voices: [1, 16, 1, 'indexed'], osc_1_wave_frame: [0, 256, 0, 'linear'],
-  osc_1_phase: [0, 1, 0.5, 'linear'], osc_1_transpose: [-48, 48, 0, 'indexed'], osc_1_tune: [-1, 1, 0, 'linear'],
-  // filters: 8..136 with a default of 60 is MIDI note numbers (60 = middle C), not Hz -- see vitalMidiToHz below
-  filter_1_cutoff: [8, 136, 60, 'linear'], filter_2_cutoff: [8, 136, 60, 'linear'],
-  filter_1_resonance: [0, 1, 0.5, 'linear'], filter_1_drive: [0, 20, 0, 'linear'],
-  filter_1_keytrack: [-1, 1, 0, 'linear'],
+  osc_1_level: [0, 1, 0.70710678119, 'quadratic', 'partial'], osc_2_level: [0, 1, 0.70710678119, 'quadratic', 'partial'],
+  osc_3_level: [0, 1, 0.70710678119, 'quadratic', 'partial'],
+  osc_1_unison_detune: [0, 10, 4.472135955, 'quadratic', 'partial'], osc_2_unison_detune: [0, 10, 4.472135955, 'quadratic', 'partial'],
+  osc_3_unison_detune: [0, 10, 4.472135955, 'quadratic', 'partial'],
+  osc_1_unison_voices: [1, 16, 1, 'indexed', 'partial'], osc_1_wave_frame: [0, 256, 0, 'linear', 'partial'],
+  osc_1_phase: [0, 1, 0.5, 'linear', 'partial'], osc_1_transpose: [-48, 48, 0, 'indexed', 'partial'],
+  osc_1_tune: [-1, 1, 0, 'linear', 'partial'],
+  // filters: the cutoff is SEMITONES RELATIVE TO THE PLAYED NOTE -- the source declares units "semitones" with a
+  // post_offset of -60 (so the display is stored - 60, ranging -52..+76), not a MIDI note number as I first assumed.
+  // A single hertz value cannot be derived at import time without knowing the note, so it stays unmapped and reported.
+  filter_1_cutoff: [8, 136, 60, 'linear', 'unsupported'], filter_2_cutoff: [8, 136, 60, 'linear', 'unsupported'],
+  filter_1_resonance: [0, 1, 0.5, 'linear', 'partial'], filter_1_drive: [0, 20, 0, 'linear', 'partial'],
+  filter_1_keytrack: [-1, 1, 0, 'linear', 'partial'],
   // lfos
-  lfo_1_frequency: [-7, 9, 1, 'exponential'], lfo_1_phase: [0, 1, 0, 'linear'],
-  lfo_1_sync: [0, 4, 1, 'indexed'], lfo_1_delay_time: [0, 4, 0, 'linear'],
+  lfo_1_frequency: [-7, 9, 1, 'exponential', 'partial'], lfo_1_phase: [0, 1, 0, 'linear', 'partial'],
+  lfo_1_sync: [0, 4, 1, 'indexed', 'partial'], lfo_1_delay_time: [0, 4, 0, 'linear', 'partial'],
   // effects and master
-  volume: [0, 7399.4404, 5473.0404, 'square_root'], polyphony: [1, 32, 8, 'indexed'],
-  chorus_frequency: [-6, 3, -3, 'exponential'], reverb_decay_time: [-6, 6, 0, 'exponential'],
-  delay_frequency: [-2, 9, 2, 'exponential'], distortion_drive: [-30, 30, 0, 'linear'],
+  volume: [0, 7399.4404, 5473.0404, 'square_root', 'partial'], polyphony: [1, 32, 8, 'indexed', 'partial'],
+  chorus_frequency: [-6, 3, -3, 'exponential', 'partial'], reverb_decay_time: [-6, 6, 0, 'exponential', 'partial'],
+  delay_frequency: [-2, 9, 2, 'exponential', 'partial'], distortion_drive: [-30, 30, 0, 'linear', 'partial'],
 };
 
 /** The stored value turned into the real quantity the table's min/max are expressed in. */
@@ -71,5 +84,18 @@ export function vitalReal(name, value) {
   return vitalToReal(value, def[3]);
 }
 
-/** The cutoff family is stored as a MIDI note number (60 = middle C, 8..136 about C-1..E9), not as hertz. */
-export const vitalMidiToHz = (note) => 440 * Math.pow(2, (Number(note) - 69) / 12);
+/** How far each parameter's conversion is trusted, so a count of mapped parameters is never mistaken for correctness. */
+export function vitalParamStatus(name) {
+  const def = VITAL_PARAMS[name];
+  return def && def.length > 4 ? def[4] : 'unknown';
+}
+
+/** The table by status. A mapped count says how much was computed; this says how much is trustworthy. */
+export function vitalParamStatusSummary() {
+  const out = { verified: 0, partial: 0, approximate: 0, unsupported: 0, unknown: 0 };
+  for (const name of Object.keys(VITAL_PARAMS)) {
+    const s = vitalParamStatus(name);
+    out[s] = (out[s] ?? 0) + 1;
+  }
+  return out;
+}
