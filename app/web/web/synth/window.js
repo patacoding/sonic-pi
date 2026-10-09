@@ -168,16 +168,20 @@ export function createSynthWindow(api) {
         if (unknown.length) console.warn("Synth — " + file.name + " has top-level keys Vital does not define: " + unknown.slice(0, 6).join(", ") + (unknown.length > 6 ? ", …" : "") + " (kept in memory, not applied)");
       } catch { /* the report is a courtesy */ }
       if (parsed.trailing) console.warn(`Synth — ${file.name} has bytes after the preset object; they were ignored (Vital does the same)`);
-      const { preset, report } = mod.vitalToPreset(vital, file.name.replace(/\.vital$/i, ""));
+      // The engine's own converters, fetched once and used for BOTH passes, so every value is normalised by the engine
+      // rather than by a guess of mine. The name must NOT be "api": this block already reads an outer `api` above, and a
+      // local `const api` here puts that outer name in the temporal dead zone for the whole block, so the earlier line
+      // throws "cannot access before initialization" before any catch can see it. That cost three attempts at this switch.
+      let engineApi = null;
+      try { engineApi = (await import("./paramapi.js")) ?? engine.__sgrParamApi ?? null; } catch { engineApi = null; }
+      const { preset, report } = mod.vitalToPreset(vital, file.name.replace(/\.vital$/i, ""), engineApi);
       const judged = mod.assessPreset(preset, mod.knownParamIds());
       if (!judged.ok) { say(`"${file.name}" was not applied: ${judged.note}`, true); return; }
-      // the LFOs and the insides of the effects, converted with the engine's own range functions
-      let extra = { params: {}, mapped: {}, dropped: {} };   // the report below needs it, and its own try used to end first
+      // the LFOs and the insides of the effects, through the same converters
+      let extra = { params: {}, mapped: {}, dropped: {} };
       try {
-        const paramsApi = await import("./paramapi.js").catch(() => null) ?? null;
-        const api = paramsApi ?? (engine.__sgrParamApi ?? null);
-        if (api) {
-          extra = mod.vitalExtraParams?.(vital, api) ?? extra;
+        if (engineApi) {
+          extra = mod.vitalExtraParams?.(vital, engineApi) ?? extra;
           const n = Object.keys(extra.params).length;
           Object.assign(preset.params, extra.params);
           if (n) console.info(`Synth — ${n} more parameters mapped from the LFOs and the effects`);
