@@ -553,3 +553,68 @@ export function vitalModRoutes(vital, paramIds, modSources = ['velocity', 'keytr
 export function vitalLfoShapeApplications(vital) {
   return vitalLfoShapes(vital).filter((x) => x.points && x.numPoints > 0).map((x) => ({ lfo: x.index - 1, points: vitallfoToPoints(x) }));
 }
+
+
+// ── the parameters beyond the first pass: the LFOs and the insides of the effects ──────────────────────────────────
+//
+// This engine's parameters are normalised, and it exposes the conversion itself -- valueToNorm(def, value) with the
+// definition from paramDef(id) -- so a frequency in Hz or a time in seconds can be handed over faithfully instead of
+// being written raw into a 0..1 slot. Anything without a counterpart is reported by name.
+
+const LFO_KEYS = {
+  frequency: 'rate', phase: 'phase', sync: 'sync', sync_type: 'division', smooth_mode: 'smooth',
+};
+const LFO_NO_COUNTERPART = ['delay_time', 'fade_time', 'stereo', 'tempo', 'keytrack_transpose', 'keytrack_tune', 'smooth_time'];
+const FX_GROUPS = {
+  chorus: 'chorus', delay: 'delay', reverb: 'reverb', phaser: 'phaser', flanger: 'flanger', eq: 'eq',
+};
+const FX_KEYS = {
+  rate: 'rate', depth: 'depth', dry_wet: 'mix', mix: 'mix', feedback: 'feedback', size: 'size', damp: 'damp',
+  width: 'width', delay: 'time', sync: 'sync', division: 'division', ping_pong: 'pingpong', pingpong: 'pingpong',
+  low_gain: 'low_gain', mid_gain: 'mid_gain', mid_freq: 'mid_freq', high_gain: 'high_gain',
+};
+
+/** The LFO and effect parameters, converted into this engine's normalised values. */
+export function vitalExtraParams(vital, api) {
+  const s = vital?.settings ?? {};
+  const params = {}, mapped = {}, dropped = {};
+  const def = (id) => (api?.paramDef ? api.paramDef(id) : null);
+  const known = (id) => (api?.knownParamIds ? api.knownParamIds().has(id) : true);
+  const put = (id, value) => {
+    // A key from my own table that this engine does not have is simply not attempted; only a Vital parameter that
+    // genuinely exists and has nowhere to go is worth reporting, or the log fills with noise.
+    if (!known(id)) return false;
+    const d = def(id);
+    let norm;
+    if (api?.valueToNorm && d) { norm = api.valueToNorm(d, value); if (!Number.isFinite(norm)) norm = null; }
+    if (norm === null || norm === undefined) norm = Math.max(0, Math.min(1, value));
+    params[id] = norm; mapped[id] = +Number(norm).toFixed(4);
+    return true;
+  };
+
+  for (let i = 1; i <= 8; i++) {
+    for (const [vitalKey, mine] of Object.entries(LFO_KEYS)) {
+      const v = s[`lfo_${i}_${vitalKey}`];
+      if (typeof v === 'number') put(`lfo${i}.${mine}`, v);
+    }
+    for (const k of LFO_NO_COUNTERPART) {
+      const v = s[`lfo_${i}_${k}`];
+      if (typeof v === 'number' && v !== 0) dropped[`lfo${i}.${k}`] = 'this engine has no counterpart';
+    }
+  }
+  for (const [vitalGroup, mine] of Object.entries(FX_GROUPS)) {
+    for (const [vitalKey, myKey] of Object.entries(FX_KEYS)) {
+      const v = s[`${vitalGroup}_${vitalKey}`];
+      if (typeof v === 'number') put(`${mine}.${myKey}`, v);
+    }
+  }
+  if (typeof s.compressor_threshold === 'number') put('comp.threshold', s.compressor_threshold);
+  if (typeof s.compressor_ratio === 'number') put('comp.ratio', s.compressor_ratio);
+  if (typeof s.compressor_attack === 'number') put('comp.attack', s.compressor_attack);
+  if (typeof s.compressor_release === 'number') put('comp.release', s.compressor_release);
+  if (typeof s.compressor_makeup === 'number') put('comp.makeup', s.compressor_makeup);
+  if (typeof s.distortion_drive === 'number') put('fxdist.drive', s.distortion_drive);
+  if (typeof s.distortion_mix === 'number') put('fxdist.mix', s.distortion_mix);
+  if (typeof s.distortion_filter_cutoff === 'number') put('fxdist.tone', s.distortion_filter_cutoff);
+  return { params, mapped, dropped };
+}

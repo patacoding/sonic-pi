@@ -165,6 +165,20 @@ export function createSynthWindow(api) {
       const { preset, report } = mod.vitalToPreset(vital, file.name.replace(/\.vital$/i, ""));
       const judged = mod.assessPreset(preset, mod.knownParamIds());
       if (!judged.ok) { say(`"${file.name}" was not applied: ${judged.note}`, true); return; }
+      // the LFOs and the insides of the effects, converted with the engine's own range functions
+      try {
+        const paramsApi = await import("./paramapi.js").catch(() => null) ?? null;
+        const api = paramsApi ?? (engine.__sgrParamApi ?? null);
+        if (api) {
+          const extra = mod.vitalExtraParams?.(vital, api) ?? { params: {}, mapped: {}, dropped: {} };
+          const n = Object.keys(extra.params).length;
+          Object.assign(preset.params, extra.params);
+          if (n) console.info(`Synth — ${n} more parameters mapped from the LFOs and the effects`);
+          const missing = Object.keys(extra.dropped ?? {});
+          if (missing.length) console.info(`Synth — ${missing.length} parameter(s) have no counterpart here: ` + missing.slice(0, 4).join(", ") + (missing.length > 4 ? ", …" : ""));
+        }
+      } catch (e) { console.warn("Synth — the LFO and effect parameters could not be mapped: " + (e?.message ?? e)); }
+
       engine.loadPreset(preset);
       // SAVE IT WHERE THE PLAYER CAN SEE IT: the editor's dropdown is rendered from their user library in localStorage,
       // so a preset that only lives in the engine is invisible and is lost on reload. Repair the library while saving:
