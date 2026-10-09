@@ -3,3 +3,4 @@
 import { PARAMS, paramDef, valueToNorm, normToValue, paramIndex } from "./vendor/soundgineer-params.js";
 export { PARAMS, paramDef, valueToNorm, normToValue, paramIndex };
 export const knownIds = () => new Set(PARAMS.map((p) => p.id));
+export const knownParamIds = knownIds;   // the name vitalExtraParams looks for; the mismatch made every id "known"

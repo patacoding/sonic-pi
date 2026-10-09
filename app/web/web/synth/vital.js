@@ -607,15 +607,16 @@ const FX_KEYS = {
 export function vitalExtraParams(vital, api) {
   const s = vital?.settings ?? {};
   const params = {}, mapped = {}, dropped = {};
-  const def = (id) => (api?.paramDef ? api.paramDef(id) : null);
-  const known = (id) => (api?.knownParamIds ? api.knownParamIds().has(id) : true);
+  // A definition lookup must never throw: an id this engine does not have is answered, not raised.
+  const def = (id) => { try { return api?.paramDef ? api.paramDef(id) : null; } catch { return null; } };
+  const known = (id) => { try { return api?.knownParamIds ? api.knownParamIds().has(id) : true; } catch { return false; } };
   const put = (id, value) => {
     // A key from my own table that this engine does not have is simply not attempted; only a Vital parameter that
     // genuinely exists and has nowhere to go is worth reporting, or the log fills with noise.
     if (!known(id)) return false;
     const d = def(id);
     let norm;
-    if (api?.valueToNorm && d) { norm = api.valueToNorm(d, value); if (!Number.isFinite(norm)) norm = null; }
+    if (api?.valueToNorm && d) { try { norm = api.valueToNorm(d, value); } catch { norm = null; } if (!Number.isFinite(norm)) norm = null; }
     if (norm === null || norm === undefined) norm = Math.max(0, Math.min(1, value));
     params[id] = norm; mapped[id] = +Number(norm).toFixed(4);
     return true;

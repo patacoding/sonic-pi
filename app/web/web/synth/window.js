@@ -2,8 +2,8 @@
 // editor. Nothing of Sonic Pi's UI is touched: this element covers the page, it never rearranges it, and no state of
 // ours is persisted.
 import { createEditorPool } from "./editors.js";
-console.info("Synth build: window.js b100a5");
-const BUILD = "b100a5";   // single source of truth: the stamp, the row and the staleness check all use this
+console.info("Synth build: window.js b100b1");
+const BUILD = "b100b1";   // single source of truth: the stamp, the row and the staleness check all use this
 
 const STYLE = `
   #synth-btn { position: fixed; right: 0; top: calc(50% + 6.3em); z-index: 101; writing-mode: vertical-rl; height: 5.4em;
