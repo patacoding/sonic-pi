@@ -168,27 +168,26 @@ export function createSynthWindow(api) {
         if (unknown.length) console.warn("Synth — " + file.name + " has top-level keys Vital does not define: " + unknown.slice(0, 6).join(", ") + (unknown.length > 6 ? ", …" : "") + " (kept in memory, not applied)");
       } catch { /* the report is a courtesy */ }
       if (parsed.trailing) console.warn(`Synth — ${file.name} has bytes after the preset object; they were ignored (Vital does the same)`);
-      // The engine's own converters, fetched once and used for BOTH passes, so every value is normalised by the engine
-      // rather than by a guess of mine. The name must NOT be "api": this block already reads an outer `api` above, and a
-      // local `const api` here puts that outer name in the temporal dead zone for the whole block, so the earlier line
-      // throws "cannot access before initialization" before any catch can see it. That cost three attempts at this switch.
+      // ONE entry point, the same orchestration the unit tests run -- both conversion passes, the wavetables, the LFO
+      // shapes and the modulation routes. Calling the two passes here by hand is what let a test pass while half the
+      // conversion never ran. The name must NOT be "api": this block already reads an outer `api` above, and a local
+      // `const api` here puts that outer name in the temporal dead zone for the whole block, so the earlier line throws
+      // before any catch can see it -- which is what cost four attempts at this switch.
       let engineApi = null;
       try { engineApi = (await import("./paramapi.js")) ?? engine.__sgrParamApi ?? null; } catch { engineApi = null; }
-      const { preset, report } = mod.vitalToPreset(vital, file.name.replace(/\.vital$/i, ""), engineApi);
+      const imported = mod.vitalImport
+        ? mod.vitalImport(vital, engineApi, file.name.replace(/\.vital$/i, ""))
+        : (() => { const one = mod.vitalToPreset(vital, file.name.replace(/\.vital$/i, ""), engineApi);
+                   return { preset: one.preset, report: one.report, extra: { params: {}, mapped: {}, dropped: {} }, failures: [], status: "unknown" }; })();
+      const preset = imported.preset;
+      const report = imported.report;
+      const extra = imported.extra ?? { params: {}, mapped: {}, dropped: {} };
+      if (!preset || !preset.params) { say(`"${file.name}" produced no preset: ${(imported.failures ?? []).join("; ") || imported.status}`, true); return; }
+      // the entry keeps the two passes apart; the engine wants one parameter set
+      Object.assign(preset.params, extra.params ?? {});
+      if (imported.failures?.length) console.warn("Synth — the conversion reported: " + imported.failures.join("; "));
       const judged = mod.assessPreset(preset, mod.knownParamIds());
       if (!judged.ok) { say(`"${file.name}" was not applied: ${judged.note}`, true); return; }
-      // the LFOs and the insides of the effects, through the same converters
-      let extra = { params: {}, mapped: {}, dropped: {} };
-      try {
-        if (engineApi) {
-          extra = mod.vitalExtraParams?.(vital, engineApi) ?? extra;
-          const n = Object.keys(extra.params).length;
-          Object.assign(preset.params, extra.params);
-          if (n) console.info(`Synth — ${n} more parameters mapped from the LFOs and the effects`);
-          const missing = Object.keys(extra.dropped ?? {});
-          if (missing.length) console.info(`Synth — ${missing.length} parameter(s) have no counterpart here: ` + missing.slice(0, 4).join(", ") + (missing.length > 4 ? ", …" : ""));
-        }
-      } catch (e) { console.warn("Synth — the LFO and effect parameters could not be mapped: " + (e?.message ?? e)); }
 
       engine.loadPreset(preset);
       // SAVE IT WHERE THE PLAYER CAN SEE IT: the editor's dropdown is rendered from their user library in localStorage,
