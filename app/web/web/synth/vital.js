@@ -280,6 +280,87 @@ export function pickSinglePreset(files) {
 
 const b64ToBytes = (b64) => { const bin = atob(b64); const out = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out; };
 
+// ── Vital's frame interpolation, from src/common/wavetable/wave_source.cpp ─────────────────────────────────────────
+//
+// WaveSource has InterpolationMode { kTime, kFrequency } stored per component as "interpolation", and BOTH the source and
+// its keyframe class initialise to kFrequency -- so a table that says nothing morphs in the SPECTRUM, not in the time
+// domain. In that mode Vital takes the amplitudes as sqrt(|X|), tweens them, squares them back, and runs each phase from
+// arg(from) by t * arg(conj(from) * to) along the shortest way, with the DC bin and the last harmonic tweened as plain
+// reals. Time mode tweens the samples directly instead.
+//
+// This engine's custom wavetable morphs in the time domain, so a spectrum-mode table is rendered here at several
+// intermediate positions and handed over as more frames: the engine then crossfades between neighbours that are already
+// almost the spectrum result. Time-mode tables and single-frame tables are passed through untouched.
+
+function fftInPlace(re, im, inverse) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) { let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = (inverse ? 2 : -2) * Math.PI / len, wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let cr = 1, ci = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const ur = re[i + k], ui = im[i + k];
+        const vr = re[i + k + len / 2] * cr - im[i + k + len / 2] * ci;
+        const vi = re[i + k + len / 2] * ci + im[i + k + len / 2] * cr;
+        re[i + k] = ur + vr; im[i + k] = ui + vi;
+        re[i + k + len / 2] = ur - vr; im[i + k + len / 2] = ui - vi;
+        const ncr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = ncr;
+      }
+    }
+  }
+  if (inverse) for (let i = 0; i < n; i++) { re[i] /= n; im[i] /= n; }
+}
+
+/** Vital's linearFrequencyInterpolate: sqrt amplitudes tweened and squared back, phase along the shortest arc. */
+export function vitalFrequencyInterpolate(from, to, t) {
+  const n = from.length, half = n / 2;
+  const ar = Float64Array.from(from), ai = new Float64Array(n);
+  const br = Float64Array.from(to), bi = new Float64Array(n);
+  fftInPlace(ar, ai, false);
+  fftInPlace(br, bi, false);
+  const outR = new Float64Array(n), outI = new Float64Array(n);
+  for (let i = 1; i < half; i++) {
+    const ampA = Math.sqrt(Math.hypot(ar[i], ai[i]));
+    const ampB = Math.sqrt(Math.hypot(br[i], bi[i]));
+    const amp = Math.pow(ampA + (ampB - ampA) * t, 2);
+    let phase;
+    if (ampA === 0) phase = Math.atan2(bi[i], br[i]);
+    else {
+      const dr = ar[i] * br[i] + ai[i] * bi[i];                 // arg(conj(from) * to) along the shortest way
+      const di = ar[i] * bi[i] - ai[i] * br[i];
+      phase = Math.atan2(ai[i], ar[i]) + t * Math.atan2(di, dr);
+    }
+    outR[i] = amp * Math.cos(phase); outI[i] = amp * Math.sin(phase);
+    outR[n - i] = outR[i]; outI[n - i] = -outI[i];               // keep the signal real
+  }
+  outR[0] = ar[0] + (br[0] - ar[0]) * t; outI[0] = 0;            // DC and the last harmonic are reals in Vital
+  outR[half] = ar[half] + (br[half] - ar[half]) * t; outI[half] = 0;
+  fftInPlace(outR, outI, true);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) out[i] = outR[i];
+  return out;
+}
+
+/** Spectrum-mode tables get intermediate frames. Vital's default is kFrequency, so an absent value means spectrum mode. */
+export function vitalInterpolatedFrames(frames, interpolation, steps = 3) {
+  const mode = Number(interpolation);
+  const frequency = !Number.isFinite(mode) || mode === 1;
+  if (!frequency || !Array.isArray(frames) || frames.length < 2) return frames;
+  const out = [];
+  for (let i = 0; i < frames.length - 1; i++) {
+    out.push(frames[i]);
+    for (let s = 1; s <= steps; s++) out.push(vitalFrequencyInterpolate(frames[i], frames[i + 1], s / (steps + 1)));
+  }
+  out.push(frames[frames.length - 1]);
+  return out;
+}
+
 function framesFromWaveSource(component, frameSize = 2048) {
   const keys = Array.isArray(component?.keyframes) ? component.keyframes : [];
   const frames = [];
@@ -292,7 +373,8 @@ function framesFromWaveSource(component, frameSize = 2048) {
     for (let i = 0; i < f.length; i++) f[i] = view.getFloat32(i * 4, true);
     frames.push(f.length === frameSize ? f : resampleTo(f, frameSize));   // always exactly one frame long
   }
-  return frames;
+  // Vital's own morph between the keyframes, rendered here when the component asks for spectrum interpolation
+  return vitalInterpolatedFrames(frames, component?.interpolation);
 }
 
 /** Resample a slice to exactly `size` samples: Vital's windows are not always 2048 (650 was measured), and this
