@@ -193,6 +193,7 @@ api.window = createSynthWindow({
   engineOf: parts.engineOf, ensurePart: (n) => parts.ensurePart(n).then(() => true),
   // the window needs these to clear a channel: without them the Remove button silently did nothing
   setPreset: parts.setPreset, rememberPreset: parts.rememberPreset,
+  setWiring: parts.setWiring,   // the importer hands the modulation wiring here; it was missing and the call silently did nothing
 });
 
 globalThis.sonicPiSynth = api;
