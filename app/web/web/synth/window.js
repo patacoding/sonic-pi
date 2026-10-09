@@ -2,7 +2,7 @@
 // editor. Nothing of Sonic Pi's UI is touched: this element covers the page, it never rearranges it, and no state of
 // ours is persisted.
 import { createEditorPool } from "./editors.js";
-console.info("Synth build: window.js b100a0");
+console.info("Synth build: window.js b100a1");
 
 const STYLE = `
   #synth-btn { position: fixed; right: 0; top: calc(50% + 6.3em); z-index: 101; writing-mode: vertical-rl; height: 5.4em;
@@ -39,6 +39,11 @@ const STYLE = `
   #synth-gate { flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center;
     gap: 8px; padding: 16px; text-align: center; }
   /* the stage clips: the editor may be zoomed past it, but nothing of it ever leaves the window */
+  #synth-import-row { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 4px 6px;
+    border-bottom: 1px solid color-mix(in srgb, var(--WindowBorder) 60%, transparent); }
+  #synth-import-row button { font: 11px/1.6 system-ui, sans-serif; cursor: pointer; }
+  #synth-import-note { font: 11px/1.4 system-ui, sans-serif; opacity: .7; }
+  #synth-row-stamp { font: 11px/1.6 ui-monospace, monospace; opacity: .7; }
   #synth-sgr-host { flex: 1 1 auto; min-height: 0; position: relative; overflow: hidden; display: none; }
   #synth-pan-overlay { position: absolute; inset: 0; pointer-events: none; cursor: grab; }
   #synth-sgr-host[data-pan="on"] #synth-pan-overlay { pointer-events: auto; }
@@ -76,6 +81,11 @@ export function createSynthWindow(api) {
       <button id="synth-close">close</button></div>
     <div id="synth-main"><div id="synth-channels"></div>
       <div id="synth-stage">
+        <div id="synth-import-row">
+          <button id="synth-import-vital-2" type="button">Import a Vital preset (.vital)</button>
+          <span id="synth-row-stamp"></span>
+          <span id="synth-import-note">one file: its parameters and any wavetables inside it are loaded into the selected channel</span>
+        </div>
         <div id="synth-gate"><strong>Soundgineer is off</strong>
           <div id="synth-gate-why">Enabling runs nothing. It waits for the app's engine and attaches the instruments to it the moment it exists — press <strong>Run</strong> when you are ready, and your music starts as it always does.</div>
           <button id="synth-enable-2" data-role="enable">Enable Soundgineer</button></div>
@@ -194,7 +204,10 @@ export function createSynthWindow(api) {
       console.info(`Synth — ${file.name} applied: ${judged.mapped} parameter(s)${judged.unknown ? ", " + judged.unknown + " dropped" : ""}`);
       try {
         const el = win.querySelector("#synth-last-import");
-        if (el) el.textContent = `imported "${preset.name}" → ${selected} · library ${JSON.parse(localStorage.getItem("soundgineer.presets.v1") ?? "[]").length} · view rebuilt`;
+        const note = win.querySelector("#synth-import-note");
+        const text = `imported "${preset.name}" → ${selected} · library ${JSON.parse(localStorage.getItem("soundgineer.presets.v1") ?? "[]").length} · view rebuilt`;
+        if (el) el.textContent = text;
+        if (note) { note.textContent = text; note.style.opacity = "1"; }
       } catch { /* cosmetic */ }
     } catch (e) {
       console.error("Synth — the import stopped unexpectedly: " + (e?.message ?? e));
@@ -203,6 +216,12 @@ export function createSynthWindow(api) {
     }
   });
   // VISIBLE: the title bar, next to the other window controls -- inside the collapsed help block it could not be seen.
+  try {
+    const alt = win.querySelector("#synth-import-vital-2");
+    if (alt) alt.addEventListener("click", () => vitalInput.click());
+    const rs = win.querySelector("#synth-row-stamp");
+    if (rs) rs.textContent = BUILD;
+  } catch { /* cosmetic */ }
   try {
     const bar = win.querySelector("#synth-bar");
     const close = win.querySelector("#synth-close");
@@ -216,7 +235,7 @@ export function createSynthWindow(api) {
     const bar = win.querySelector("#synth-bar") ?? win.firstElementChild;
     const stamp = document.createElement("span");
     stamp.id = "synth-build-stamp";
-    stamp.textContent = " build b100a0";
+    stamp.textContent = " build b100a1";
     stamp.style.cssText = "font:10px/1 ui-monospace,monospace;opacity:.6;margin-left:6px";
     const spacer = bar?.querySelector(".spacer");
     const last = document.createElement("span");
