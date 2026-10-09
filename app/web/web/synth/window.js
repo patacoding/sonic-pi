@@ -2,8 +2,8 @@
 // editor. Nothing of Sonic Pi's UI is touched: this element covers the page, it never rearranges it, and no state of
 // ours is persisted.
 import { createEditorPool } from "./editors.js";
-console.info("Synth build: window.js b100b3");
-const BUILD = "b100b3";   // single source of truth: the stamp, the row and the staleness check all use this
+console.info("Synth build: window.js b100b4");
+const BUILD = "b100b4";   // single source of truth: the stamp, the row and the staleness check all use this
 
 const STYLE = `
   #synth-btn { position: fixed; right: 0; top: calc(50% + 6.3em); z-index: 101; writing-mode: vertical-rl; height: 5.4em;
@@ -146,6 +146,7 @@ export function createSynthWindow(api) {
       if (!mod) return;
       const engine = api.engineOf?.(selected);
       if (!engine) { say(`pick a channel first — the selected one, "${selected}", has no sound yet`, true); return; }
+      if (file.size > 32 * 1024 * 1024) { say(`"${file.name}" is ${(file.size / 1048576).toFixed(1)} MB, too large to be a preset`, true); return; }
       const text = await file.text();
       const kind = mod.classifyFile(file.name, text);
       if (kind.kind !== "vital") {
@@ -201,11 +202,6 @@ export function createSynthWindow(api) {
       } catch (e) {
         say("loaded, but it could not be saved to your library: " + (e?.message ?? e), true);
       }
-      engine.__sgrPreset = "user:" + preset.name;
-      await api.setPreset?.(selected, preset.name);
-      // FORCE the view to be rebuilt: the pool only rebuilds on its own when the preset NAME changes, so re-importing a
-      // name that is already current used to leave the previous option list on screen -- "nothing changed".
-      try { pool.reload(selected); } catch (e) { console.warn("Synth — could not rebuild the editor: " + (e?.message ?? e)); }
       // the wiring and the shapes: only the connections this engine can hold, with the rest named rather than dropped.
       // The store applies them on every engine it creates, because importing a preset replaces this channel's engine --
       // applying to whatever it pointed at in this moment registered routes on an object that was then discarded.
@@ -225,6 +221,11 @@ export function createSynthWindow(api) {
         if (skipped?.length) console.warn(`Synth — ${skipped.length} Vital connection(s) have no counterpart here: ` + skipped.slice(0, 3).join("; ") + (skipped.length > 3 ? "; …" : ""));
       } catch (e) { console.warn("Synth — the modulation wiring could not be applied: " + (e?.message ?? e)); }
 
+      engine.__sgrPreset = "user:" + preset.name;
+      await api.setPreset?.(selected, preset.name);
+      // FORCE the view to be rebuilt: the pool only rebuilds on its own when the preset NAME changes, so re-importing a
+      // name that is already current used to leave the previous option list on screen -- "nothing changed".
+      try { pool.reload(selected); } catch (e) { console.warn("Synth — could not rebuild the editor: " + (e?.message ?? e)); }
       // 1) the wavetables INSIDE this file: use them, so one file is complete
       const embedded = mod.vitalEmbeddedTables?.(vital) ?? [];
       for (const table of embedded.filter((x) => x.frames?.length)) {
@@ -236,6 +237,12 @@ export function createSynthWindow(api) {
           console.info(`Synth — osc${table.osc + 1} ← its embedded table (${table.frames.length} frames of ${table.frameSize})`);
         } catch (e) { console.warn(`Synth — osc${table.osc + 1} embedded table could not be used: ${e?.message ?? e}`); }
       }
+      // Two regions only Vital 1.5.5 writes. They are named rather than ignored so a 1.5.5 preset is not silently partial.
+      for (const [key, what] of [['custom_warps', 'custom wavetable warps'], ['random_values', 'randomisation seeds']]) {
+        const region = vital?.settings?.[key];
+        if (Array.isArray(region) && region.length) console.info(`Synth — "${preset.name}" carries ${region.length} ${what} (settings.${key}); this engine has no counterpart, so they are not loaded`);
+      }
+
       // The sample oscillator is its own region and this engine has none: say so with its numbers rather than
       // pretending. Measured over 400 real presets, settings.sample is the only structured region besides the three
       // this importer already handles; custom_warps and random_values do not exist in any of them.

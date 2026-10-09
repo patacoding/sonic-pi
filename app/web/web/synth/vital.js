@@ -10,6 +10,8 @@
 // in the right region; the player can refine with the knobs afterwards.
 import { PARAMS } from "./vendor/soundgineer-params.js";
 
+import { VITAL_PARAMS, vitalToReal, vitalMidiToHz } from './vital-params.js';
+
 const clamp01 = (x) => (Number.isFinite(x) ? Math.min(1, Math.max(0, x)) : 0);
 const logMap = (x, lo, hi) => clamp01(Math.log(Math.max(x, lo) / lo) / Math.log(hi / lo));
 
@@ -26,9 +28,23 @@ export const knownParamIds = () => new Set(PARAMS.map((p) => p.id));
 const has = (ids, id) => ids.has(id);
 
 /** Vital envelope values: seconds (and 0..1 percentages for sustain) -> normalized. */
-function envNorm(key, value) {
+function envNorm(key, value, api, paramId) {
   if (key === 'sustain') return clamp01(value);
   if (key.endsWith('_curve') || key.endsWith('_power')) return clamp01(value);
+  // Vital stores these as seconds ** (1/4): 2.37842 ** 4 is 32 seconds. Reading the stored number as seconds clamped
+  // every time above one second, which is most of them.
+  const def = VITAL_PARAMS[`env_1_${key}`];
+  if (def && def[3] === 'quartic') {
+    const seconds = vitalToReal(value, 'quartic');
+    if (api?.paramDef && api?.valueToNorm && paramId) {
+      try {
+        const norm = api.valueToNorm(api.paramDef(paramId), seconds);
+        if (Number.isFinite(norm)) return clamp01(norm);
+      } catch { /* fall through to the old mapping */ }
+    }
+    const range = TIME_KEYS[key];
+    return range ? logMap(seconds, range[0], range[1]) : clamp01(seconds);
+  }
   const range = TIME_KEYS[key];
   return range ? logMap(value, range[0], range[1]) : clamp01(value);
 }
@@ -37,7 +53,7 @@ function envNorm(key, value) {
  * Convert a parsed .vital object into this engine's PresetData shape.
  * Returns { preset, report } where report says what was mapped, what was dropped and why.
  */
-export function vitalToPreset(vital, fallbackName = 'Imported Vital') {
+export function vitalToPreset(vital, fallbackName = 'Imported Vital', api = null) {
   const ids = knownParamIds();
   const s = (vital && typeof vital === 'object' && vital.settings) ? vital.settings : {};
   const params = {};
@@ -56,12 +72,13 @@ export function vitalToPreset(vital, fallbackName = 'Imported Vital') {
       const v = s[`env_${e}_${key}`];
       if (typeof v !== 'number') continue;
       const target = `env${e}.${key.replace('_curve', '_curve')}`;
-      put(target, envNorm(key, v));
+      put(target, envNorm(key, v, api, `env${e}.${key}`));
     }
   }
 
   // the two filters
-  for (const [src, dst] of Object.entries(CC)) if (typeof s[src] === 'number') put(dst, dst.endsWith('cutoff') ? clamp01(s[src] / 120) : s[src]);
+  // (the filter cutoffs are converted from MIDI note numbers in vitalExtraParams; the legacy /120 guess used to
+  //  write a wrong value here and fight with it)
 
   // effects: whether each is on, and its mix where the names line up
   for (const [vitalName, id] of Object.entries(FX_ENABLE)) {
@@ -78,6 +95,23 @@ export function vitalToPreset(vital, fallbackName = 'Imported Vital') {
     if (typeof value === 'number') put(`macro${m}.value`, value);
     const name = vital?.[`macro${m}`];
     if (typeof name === 'string' && name && !/^macro\s*\d+$/i.test(name)) report.macros = [...(report.macros ?? []), `${m}=${name}`];
+  }
+
+  // The scale-typed parameters: Vital stores level and unison detune as squares, and volume as a square root.
+  const scaled = (name, id, toNorm) => {
+    const v = s[name];
+    if (typeof v !== 'number') return;
+    const real = vitalToReal(v, VITAL_PARAMS[name]?.[3] ?? 'linear');
+    if (real === null) return;
+    put(id, clamp01(toNorm(real)));
+  };
+  for (let i = 1; i <= 3; i++) {
+    scaled(`osc_${i}_level`, `osc${i}.level`, (r) => r);                       // quadratic: stored^2 is the level
+    scaled(`osc_${i}_unison_detune`, `osc${i}.detune`, (r) => r / 100);       // 0..10 stored is 0..100 real
+  }
+  if (typeof s.volume === 'number') {
+    const db = vitalToReal(s.volume, 'square_root') - 80;                     // the entry's post_offset
+    put('master.volume', clamp01((db + 80) / 86));                            // -80..+6 dB across the range
   }
 
   // oscillator basics that exist in both
@@ -117,7 +151,10 @@ export function vitallfoToPoints(lfo) {
   const points = [];
   for (let i = 0, k = 0; i + 1 < pts.length; i += 2, k++) {
     const power = Number.isFinite(powers[k]) ? Math.min(1, Math.max(-1, powers[k])) : 0;   // LfoPoint is {x, y, power}
-    points.push({ x: clamp01(pts[i]), y: clamp01(pts[i + 1]), power });
+    // Vital (like Serum) puts y = 0 at the top, where the modulation is at its maximum; this engine puts y = 1 at
+    // the top, so the value has to be flipped. The two are exact mirrors: flipping a real preset's Sine gives exactly
+    // the engine's own default shape.
+    points.push({ x: clamp01(pts[i]), y: clamp01(1 - pts[i + 1]), power });
   }
   return points;
 }
@@ -647,8 +684,8 @@ export function vitalExtraParams(vital, api) {
   // per-oscillator distortion, detune_range/power and filter style have no counterpart here, and a name that looks
   // similar is not enough to write into a slot.
   const OSC_KEYS = {
-    level: 'level', pan: 'pan', phase: 'phase', random_phase: 'phase_rand', transpose: 'transpose',
-    unison_voices: 'unison', unison_detune: 'detune', unison_blend: 'blend', stereo_spread: 'spread', on: 'enabled',
+    pan: 'pan', phase: 'phase', random_phase: 'phase_rand', transpose: 'transpose',
+    unison_voices: 'unison', unison_blend: 'blend', stereo_spread: 'spread', on: 'enabled',
   };
   const OSC_SKIP = ['distortion_amount', 'distortion_type', 'distortion_phase', 'distortion_spread', 'spectral_morph_amount',
                     'spectral_morph_type', 'spectral_morph_spread', 'spectral_unison', 'frame_spread', 'detune_power',
@@ -670,16 +707,28 @@ export function vitalExtraParams(vital, api) {
     }
   }
   const FILTER_KEYS = { cutoff: 'cutoff', resonance: 'resonance', drive: 'drive', keytrack: 'keytrack', mix: 'mix', on: 'enabled' };
+  // The cutoff family is a MIDI note number (60 = middle C), not hertz, so it goes to hertz before the engine's converter.
+  const FILTER_MIDI = { cutoff: 'cutoff' };
   for (let i = 1; i <= 2; i++) {
     for (const [vitalKey, mine] of Object.entries(FILTER_KEYS)) {
       const v = s[`filter_${i}_${vitalKey}`];
-      if (typeof v === 'number') put(`filter${i}.${mine}`, v);
+      if (typeof v !== 'number') continue;
+      put(`filter${i}.${mine}`, vitalKey in FILTER_MIDI ? vitalMidiToHz(v) : v);
     }
     for (const k of ['blend', 'blend_transpose', 'formant_x', 'formant_y', 'formant_resonance', 'formant_transpose', 'filter_input', 'style', 'model']) {
       const v = s[`filter_${i}_${k}`];
       if (typeof v === 'number' && v !== 0) dropped[`filter${i}.${k}`] = 'this engine has no counterpart';
     }
   }
+  // Effect rates and times are exponential in base 2: chorus_frequency -6..3 is 0.0156..8 Hz, delay_frequency -2..9 is
+  // 0.25..512 seconds, reverb_decay_time -6..6 is 0.0156..64 seconds.
+  for (const [name, id] of [['chorus_frequency', 'chorus.rate'], ['delay_frequency', 'delay.time']]) {
+    const v = s[name];
+    if (typeof v !== 'number') continue;
+    put(id, vitalToReal(v, 'exponential'));
+  }
+  if (typeof s.reverb_decay_time === 'number') dropped['reverb_decay_time'] = 'this engine has size and damping, not a decay time';
+
   if (typeof s.distortion_drive === 'number') put('fxdist.drive', s.distortion_drive);
   if (typeof s.distortion_mix === 'number') put('fxdist.mix', s.distortion_mix);
   if (typeof s.distortion_filter_cutoff === 'number') put('fxdist.tone', s.distortion_filter_cutoff);
