@@ -206,6 +206,7 @@ export function createSynthWindow(api) {
       } catch (e) {
         say("loaded, but it could not be saved to your library: " + (e?.message ?? e), true);
       }
+      let wiringUsable = 0, wiringShapes = 0;   // reported below, and the wiring block below is their own scope
       // the wiring and the shapes: only the connections this engine can hold, with the rest named rather than dropped.
       // The store applies them on every engine it creates, because importing a preset replaces this channel's engine --
       // applying to whatever it pointed at in this moment registered routes on an object that was then discarded.
@@ -220,6 +221,7 @@ export function createSynthWindow(api) {
         const destIndex = {};
         for (const r of routes) if (paramApi) destIndex[r.dest] = paramApi.paramIndex(r.dest);
         const usable = routes.filter((r) => (destIndex[r.dest] ?? -1) >= 0 && MOD_SOURCES.includes(r.source));
+        wiringUsable = usable.length; wiringShapes = shapes.length;
         console.info(`Synth — wiring: ${usable.length} usable of ${routes.length} route(s), ${Object.keys(destIndex).length} destination index/indices, sources ${MOD_SOURCES.length}, shapes ${shapes.length}`);
         await api.setWiring?.(selected, { routes: usable, shapes, sources: MOD_SOURCES, destIndex });
         console.info("Synth — wiring handed to the store for " + selected);
@@ -267,6 +269,16 @@ export function createSynthWindow(api) {
         if (wanted.length) console.warn(`Synth — osc${table.osc + 1} needs "${wanted.map((r) => r.name).join('", "')}", which is not inside this preset; load it with the Import button on that oscillator panel`);
         else console.warn(`Synth — osc${table.osc + 1}'s table is a Vital DSP chain (${table.type}) with no base waveform inside this file; load a wavetable with that panel's Import button`);
       }
+      try {
+        const appliedParams = { ...(preset.params ?? {}), ...((extra ?? {}).params ?? {}) };
+        const pi = await import("./paramapi.js").catch(() => null);
+        const check = (mod.verifyApplied && pi) ? mod.verifyApplied(engine, (id) => pi.paramIndex(id), appliedParams) : null;
+        const layers = mod.vitalLayerReport?.({ parsed, mapping: report, extra, routes: wiringUsable, shapes: wiringShapes,
+          applied: { slots: (engine.modSlots ?? []).filter(Boolean).length, shapes: (engine.lfoShapes ?? []).filter(Boolean).length,
+                     verifiedParams: check?.verified ?? null, ofParams: check?.of ?? null } });
+        if (layers) console.info("Synth — " + layers.line);
+        if (check?.missing?.length) console.info("Synth — the engine did not keep: " + check.missing.slice(0, 5).join(", "));
+      } catch (e) { console.warn("Synth — the report could not be built: " + (e?.message ?? e)); }
       say(`imported "${preset.name}" → ${selected} · ${judged.mapped} parameter(s) · library ${(() => { try { return JSON.parse(localStorage.getItem("soundgineer.presets.v1") ?? "[]").length; } catch { return "?"; } })()}`);
     } catch (e) {
       say("the import stopped unexpectedly: " + (e?.message ?? e), true);

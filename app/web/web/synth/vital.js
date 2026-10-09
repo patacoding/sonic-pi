@@ -755,3 +755,43 @@ export function vitalUnknownTopLevel(document) {
   const known = new Set(['author', 'comments', 'macro1', 'macro2', 'macro3', 'macro4', 'preset_name', 'preset_style', 'synth_version', 'settings']);
   return Object.keys(document ?? {}).filter((k) => !known.has(k));
 }
+
+
+/**
+ * A conversion report in three layers, because one number would conflate three different things.
+ *
+ *   parsed  -- the file was read: it is JSON, it has settings, and which structured regions it carries
+ *   mapped  -- what the converter produced: parameters written, parameters deliberately skipped, wiring and shapes
+ *   applied -- what the ENGINE actually holds afterwards, read back from it rather than inferred from the calls made
+ *
+ * The review's point is exactly this: a high parse rate says nothing about how much of the sound survived, and a
+ * parameter count says nothing about whether the engine kept it.
+ */
+export function vitalLayerReport({ parsed, mapping, extra, routes, shapes, applied }) {
+  const mappedParams = Object.keys(mapping?.mapped ?? {}).length + Object.keys(extra?.mapped ?? {}).length;
+  const skipped = Object.keys(mapping?.dropped ?? {}).length + Object.keys(extra?.dropped ?? {}).length;
+  const approximated = [
+    ...Object.keys(mapping?.dropped ?? {}).filter((k) => /approximat|semitones|relative/.test(String(mapping.dropped[k]))),
+    ...Object.keys(extra?.dropped ?? {}).filter((k) => /approximat|semitones|relative/.test(String(extra.dropped[k]))),
+  ];
+  const verified = applied?.verifiedParams ?? null, of = applied?.ofParams ?? null;
+  const line = [
+    `parsed ${parsed?.ok ? "ok" : "FAILED"}`,
+    `mapped ${mappedParams} parameter(s)${skipped ? `, ${skipped} skipped` : ""}${approximated.length ? `, ${approximated.length} approximate` : ""}`,
+    `${routes ?? 0} route(s), ${shapes ?? 0} shape(s)`,
+    applied ? `applied: ${applied.slots ?? "?"} slot(s), ${applied.shapes ?? "?"} shape(s)${of ? `, ${verified}/${of} parameter(s) read back` : ""}` : "applied: not checked",
+  ].join(" | ");
+  return { parsed, mapped: { parameters: mappedParams, skipped, approximated, routes: routes ?? 0, shapes: shapes ?? 0 }, applied: applied ?? null, line };
+}
+
+/** Read the engine back: how many of the parameters we wrote does it actually hold, within a tolerance? */
+export function verifyApplied(engine, paramIndex, wanted, tolerance = 1e-4) {
+  let verified = 0, missing = [];
+  for (const [id, norm] of Object.entries(wanted ?? {})) {
+    const i = paramIndex(id);
+    if (i === undefined || i < 0) { missing.push(id); continue; }
+    const got = engine.getParam(i);
+    if (Number.isFinite(got) && Math.abs(got - norm) < tolerance) verified++; else missing.push(id);
+  }
+  return { verified, of: Object.keys(wanted ?? {}).length, missing: missing.slice(0, 8) };
+}
