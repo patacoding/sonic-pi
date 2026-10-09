@@ -162,6 +162,10 @@ export function createSynthWindow(api) {
         : (() => { try { return { ok: true, data: JSON.parse(text) }; } catch (e) { return { ok: false, reason: e?.message }; } })();
       if (!parsed.ok) { say(`"${file.name}" could not be read: ${parsed.reason}`, true); return; }
       const vital = parsed.data;
+      try {
+        const unknown = mod.vitalUnknownTopLevel?.(vital) ?? [];
+        if (unknown.length) console.warn("Synth — " + file.name + " has top-level keys Vital does not define: " + unknown.slice(0, 6).join(", ") + (unknown.length > 6 ? ", …" : "") + " (kept in memory, not applied)");
+      } catch { /* the report is a courtesy */ }
       if (parsed.trailing) console.warn(`Synth — ${file.name} has bytes after the preset object; they were ignored (Vital does the same)`);
       const { preset, report } = mod.vitalToPreset(vital, file.name.replace(/\.vital$/i, ""));
       const judged = mod.assessPreset(preset, mod.knownParamIds());

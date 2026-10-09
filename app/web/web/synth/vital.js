@@ -395,11 +395,14 @@ export function matchLocalFile(name, files) {
  * closing brace still load in Vital, because its reader stops at the object's end -- JSON.parse would throw instead and
  * we would reject a file the synth accepts. Bracket depth is tracked with strings and escapes respected.
  */
-export function parseVitalText(text) {
+export function parseVitalText(text, options = {}) {
+  const maxDepth = Number(options.maxDepth ?? 64);
+  const maxBytes = Number(options.maxBytes ?? 32 * 1024 * 1024);
+  if (String(text ?? "").length > maxBytes) return { ok: false, reason: "larger than the 32 MB limit, so it is not read at all" };
   const raw = String(text ?? '').replace(/^\uFEFF/, '');
   const start = raw.indexOf('{');
   if (start < 0) return { ok: false, reason: 'no JSON object in this file' };
-  let depth = 0, inStr = false, esc = false, end = -1;
+  let depth = 0, braces = 0, inStr = false, esc = false, end = -1;
   for (let i = start; i < raw.length; i++) {
     const c = raw[i];
     if (inStr) {
@@ -409,8 +412,18 @@ export function parseVitalText(text) {
       continue;
     }
     if (c === '"') inStr = true;
-    else if (c === '{') depth++;
-    else if (c === '}') { depth--; if (depth === 0) { end = i + 1; break; } }
+    else if (c === '{' || c === '[') {
+      // Count both kinds: a preset's nesting is mostly arrays (wavetables, groups, components, keyframes), so counting
+      // only braces left the depth at one however deep a file really was.
+      depth++;
+      if (c === '{') braces++;
+      if (depth > maxDepth) return { ok: false, reason: "nested deeper than " + maxDepth + " levels, which a preset never is" };
+    }
+    else if (c === '}' || c === ']') {
+      if (c === '}') braces--;
+      depth--;
+      if (braces === 0) { end = i + 1; break; }
+    }
   }
   if (end < 0) return { ok: false, reason: 'the JSON object is not closed (the file looks truncated)' };
   const trailing = raw.slice(end).trim();
@@ -733,4 +746,10 @@ export function vitalExtraParams(vital, api) {
   if (typeof s.distortion_mix === 'number') put('fxdist.mix', s.distortion_mix);
   if (typeof s.distortion_filter_cutoff === 'number') put('fxdist.tone', s.distortion_filter_cutoff);
   return { params, mapped, dropped };
+}
+
+/** Top-level keys Vital does not define. The format reference suggests flagging them rather than dropping them silently. */
+export function vitalUnknownTopLevel(document) {
+  const known = new Set(['author', 'comments', 'macro1', 'macro2', 'macro3', 'macro4', 'preset_name', 'preset_style', 'synth_version', 'settings']);
+  return Object.keys(document ?? {}).filter((k) => !known.has(k));
 }
