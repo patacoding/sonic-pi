@@ -145,7 +145,7 @@ export function createSynthWindow(api) {
     try {
       const mod = await import("./vital.js").catch((e) => { say("the converter could not load: " + (e?.message ?? e), true); return null; });
       if (!mod) return;
-      const engine = api.engineOf?.(selected);
+      let engine = api.engineOf?.(selected);
       if (!engine) { say(`pick a channel first — the selected one, "${selected}", has no sound yet`, true); return; }
       if (file.size > 32 * 1024 * 1024) { say(`"${file.name}" is ${(file.size / 1048576).toFixed(1)} MB, too large to be a preset`, true); return; }
       const text = await file.text();
@@ -188,6 +188,19 @@ export function createSynthWindow(api) {
       if (imported.failures?.length) console.warn("Synth — the conversion reported: " + imported.failures.join("; "));
       const judged = mod.assessPreset(preset, mod.knownParamIds());
       if (!judged.ok) { say(`"${file.name}" was not applied: ${judged.note}`, true); return; }
+
+      // ── SETTLE THE ENGINE FIRST. Importing replaces this channel's engine twice over: setPreset creates it when it is
+      // missing, and rebuilding the view pool can replace it again. Applying parameters and wiring before that and then
+      // patching the wiring afterwards is exactly what left the first import of a session with the right parameters and
+      // no modulation -- intermittently, depending on which of the two events came last.
+      engine.__sgrPreset = "user:" + preset.name;
+      await api.setPreset?.(selected, preset.name);
+      // FORCE the view to be rebuilt: the pool only rebuilds on its own when the preset NAME changes, so re-importing a
+      // name that is already current used to leave the previous option list on screen -- "nothing changed".
+      try { pool.reload(selected); } catch (e) { console.warn("Synth — could not rebuild the editor: " + (e?.message ?? e)); }
+      const setupEngine = engine;
+      engine = api.engineOf?.(selected) ?? engine;          // the instance everything below is applied to, and read back from
+      if (engine !== setupEngine) console.info("Synth — the channel's engine was replaced while the import was being set up; applying to the one it has now");
 
       engine.loadPreset(preset);
       // SAVE IT WHERE THE PLAYER CAN SEE IT: the editor's dropdown is rendered from their user library in localStorage,
@@ -243,22 +256,22 @@ export function createSynthWindow(api) {
         if (skipped?.length) console.warn(`Synth — ${skipped.length} Vital connection(s) have no counterpart here: ` + skipped.slice(0, 3).join("; ") + (skipped.length > 3 ? "; …" : ""));
       } catch (e) { console.warn("Synth — the modulation wiring could not be applied: " + (e?.message ?? e)); }
 
-      engine.__sgrPreset = "user:" + preset.name;
-      await api.setPreset?.(selected, preset.name);
-      // FORCE the view to be rebuilt: the pool only rebuilds on its own when the preset NAME changes, so re-importing a
-      // name that is already current used to leave the previous option list on screen -- "nothing changed".
-      try { pool.reload(selected); } catch (e) { console.warn("Synth — could not rebuild the editor: " + (e?.message ?? e)); }
-      // 1) the wavetables INSIDE this file: use them, so one file is complete
+      // (setPreset and the view rebuild happen once, above, BEFORE anything is applied -- see the settle step.)
+      // 1) the wavetables INSIDE this file: use them, so one file is complete. A closure, because a replaced engine has
+      // to get the whole application again rather than just the wiring.
       const embedded = mod.vitalEmbeddedTables?.(vital) ?? [];
-      for (const table of embedded.filter((x) => x.frames?.length)) {
-        try {
-          const samples = mod.flattenFrames(table.frames, table.frameSize);
-          const name = `${preset.name} osc${table.osc + 1} (${table.kind === "wave" ? "Wave Source" : "Audio File Source"}).wav`;
-          const blob = new Blob([mod.encodeWavFloat32(samples, table.sampleRate ?? 44100)], { type: "audio/wav" });
-          await engine.importWavetableFile(Math.min(table.osc, 2), new File([blob], name, { type: "audio/wav" }));
-          console.info(`Synth — osc${table.osc + 1} ← its embedded table (${table.frames.length} frames of ${table.frameSize})`);
-        } catch (e) { console.warn(`Synth — osc${table.osc + 1} embedded table could not be used: ${e?.message ?? e}`); }
-      }
+      const importEmbeddedTables = async (target) => {
+        for (const table of embedded.filter((x) => x.frames?.length)) {
+          try {
+            const samples = mod.flattenFrames(table.frames, table.frameSize);
+            const name = `${preset.name} osc${table.osc + 1} (${table.kind === "wave" ? "Wave Source" : "Audio File Source"}).wav`;
+            const blob = new Blob([mod.encodeWavFloat32(samples, table.sampleRate ?? 44100)], { type: "audio/wav" });
+            await target.importWavetableFile(Math.min(table.osc, 2), new File([blob], name, { type: "audio/wav" }));
+            console.info(`Synth — osc${table.osc + 1} ← its embedded table (${table.frames.length} frames of ${table.frameSize})`);
+          } catch (e) { console.warn(`Synth — osc${table.osc + 1} embedded table could not be used: ${e?.message ?? e}`); }
+        }
+      };
+      await importEmbeddedTables(engine);
       // Two regions only Vital 1.5.5 writes. They are named rather than ignored so a 1.5.5 preset is not silently partial.
       for (const [key, what] of [['custom_warps', 'custom wavetable warps'], ['random_values', 'randomisation seeds']]) {
         const region = vital?.settings?.[key];
@@ -283,6 +296,22 @@ export function createSynthWindow(api) {
         if (wanted.length) console.warn(`Synth — osc${table.osc + 1} needs "${wanted.map((r) => r.name).join('", "')}", which is not inside this preset; load it with the Import button on that oscillator panel`);
         else console.warn(`Synth — osc${table.osc + 1}'s table is a Vital DSP chain (${table.type}) with no base waveform inside this file; load a wavetable with that panel's Import button`);
       }
+      // ── IDENTITY CHECK. Everything above was applied to `engine`. If the channel now points at a different instance,
+      // that work landed on an object which was then discarded -- the failure this section exists to remove. Do not patch
+      // one piece of it: repeat the WHOLE application on the instance the channel actually has, then verify that one.
+      let identity = "one engine throughout";
+      const current = api.engineOf?.(selected) ?? null;
+      if (current && current !== engine) {
+        console.warn("Synth — the channel's engine changed while the import was being applied; applying everything again to the new one");
+        engine = current;
+        engine.loadPreset(preset);
+        await importEmbeddedTables(engine);
+        if (lastWiring) { try { await api.setWiring?.(selected, lastWiring); } catch (e) { console.warn("Synth — setWiring threw on the retry: " + (e?.message ?? e)); } }
+        identity = api.engineOf?.(selected) === engine
+          ? "the engine was replaced mid-import, so the whole application was repeated on the new one"
+          : "the channel's engine changed again after the repeat; this report is about the instance it now has";
+      }
+
       try {
         const appliedParams = { ...(preset.params ?? {}), ...((extra ?? {}).params ?? {}) };
         const pi = await import("./paramapi.js").catch(() => null);
@@ -306,22 +335,16 @@ export function createSynthWindow(api) {
           `engine: ${keptSlots} modulation slot(s) \u00b7 ${keptShapes} shape(s) \u00b7 ${check ? `${check.verified}/${check.of} parameter(s) read back` : "read-back not checked"}`,
           `modulation: ${wiringUsable} route(s)${(imported.differingLaw ?? []).length ? `, ${imported.differingLaw.length} whose law (bipolar, power or stereo) this engine cannot hold` : ""}${(imported.inactiveRoutes ?? []).length ? `, ${imported.inactiveRoutes.length} bypassed in the preset and left out` : ""}`,
           notKept.length ? `read-back mismatch: ${notKept.slice(0, 4).join(", ")}${notKept.length > 4 ? ", \u2026" : ""}` : "read-back mismatch: none",
+          `engine identity: ${identity}`,
           "not verified: nothing here listens to the result, so the sound is not compared with Vital",
         ].join("\n"));
       } catch (e) { say(`imported "${preset.name}" \u2192 ${selected}, but the report could not be built: ` + (e?.message ?? e), true); }
 
-      // Importing replaces the channel's engine (the view pool rebuilds after the preset is set), and the wiring was
-      // applied to whichever object the import started with -- the on-screen report could say "engine: 3 slots" while
-      // the channel's current engine held none. So if the channel's engine now has none, apply the same wiring to it.
+      // A last identity check, because the report above is only honest if the engine it describes is still the channel's.
       try {
-        const now = api.engineOf?.(selected) ?? null;
-        if (now && lastWiring && wiringUsable > 0 && (now.modSlots ?? []).filter(Boolean).length === 0) {
-          await api.setWiring?.(selected, lastWiring);
-          const kept = (now.modSlots ?? []).filter(Boolean).length;
-          console.info(`Synth — the wiring was re-applied to the channel's current engine: ${kept} slot(s)`);
-          if (kept === 0) say("imported, but this channel's engine did not keep the modulation wiring", true);
-        }
-      } catch (e) { console.warn("Synth — could not re-apply the wiring: " + (e?.message ?? e)); }
+        if (api.engineOf?.(selected) !== engine) say("imported, but this channel's engine changed after the report was written", true);
+        else if (lastWiring && wiringUsable > 0 && (engine.modSlots ?? []).filter(Boolean).length === 0) say("imported, but this channel's engine did not keep the modulation wiring", true);
+      } catch { /* the report already stands on its own */ }
     } catch (e) {
       say("the import stopped unexpectedly: " + (e?.message ?? e), true);
     }
