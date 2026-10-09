@@ -487,3 +487,69 @@ export function vitalLfoShapes(vital) {
   }
   return out.filter((x) => x.numPoints > 0);
 }
+
+
+// ── taking the wiring and the shapes across ──────────────────────────────────────────────────────────────────────
+//
+// Two honest facts, both measured over eight hundred presets. Our engine's modulation sources are only velocity,
+// keytrack, random, modwheel, pitchwheel and aftertouch, while Vital wires mostly from its own lfo_N, env_N and
+// macro_control_N -- so only a minority of connections can be reproduced at all, and the rest are reported rather than
+// dropped silently. LFO shapes need no such compromise: the engine wants LfoPoint[] and that is what the converter
+// already produces.
+
+const SOURCE_ALIASES = {
+  mod_wheel: 'modwheel', pitch_wheel: 'pitchwheel', velocity: 'velocity', aftertouch: 'aftertouch',
+  keytrack: 'keytrack', random: 'random',
+};
+
+/** Vital parameter names to this engine's ids: grouped names flatten (osc_1_level -> osc1.level) with the exceptions
+ *  that the two synths spell differently. Returns null when there is no counterpart at all. */
+export function engineParamIdFromVital(name) {
+  const n = String(name ?? '');
+  if (!n) return null;
+  const aliases = {
+    osc_wave_frame: 'morph', osc_tune: 'fine',
+    reverb_dry_wet: 'mix', delay_dry_wet: 'mix', chorus_dry_wet: 'mix', phaser_dry_wet: 'mix',
+    flanger_dry_wet: 'mix', distortion_dry_wet: 'mix', compressor_dry_wet: 'mix',
+    lfo_frequency: 'rate',
+    distortion_drive: 'drive', distortion_mix: 'mix', distortion_filter_cutoff: 'tone', distortion_on: 'enabled',
+    compressor_on: 'enabled', compressor_threshold: 'threshold', compressor_ratio: 'ratio',
+    compressor_attack: 'attack', compressor_release: 'release', compressor_makeup: 'makeup',
+    reverb_on: 'enabled', delay_on: 'enabled', chorus_on: 'enabled', phaser_on: 'enabled',
+    flanger_on: 'enabled', distortion_filter_on: 'enabled',
+  };
+  // groups spelled the same on both sides, plus the effects that differ
+  const m = /^(osc|filter|lfo|env|noise|sub|chorus|delay|reverb|comp|eq|phaser|flanger|macro|random|filter_fx|distortion|compressor|master)_(\d*)_?(.*)$/.exec(n);
+  if (!m) {
+    if (n === 'distortion_on') return 'fxdist.enabled';
+    return null;
+  }
+  let [, group, index, rest] = m;
+  if (group === 'distortion') return 'fxdist.' + (aliases[`distortion_${rest}`] ?? rest);
+  if (group === 'compressor') return 'comp.' + (aliases[`compressor_${rest}`] ?? rest);
+  if (group === 'filter_fx') return null;                                  // no counterpart
+  if (group === 'random') return null;                                     // a different random source
+  if (group === 'sample') return null;                                     // the engine has no sample oscillator
+  if (group === 'master') return 'master.' + ({ volume: 'volume', bpm: 'bpm', polyphony: 'polyphony' }[rest] ?? rest);
+  const r = aliases[`${group}_${rest}`] ?? rest;
+  return `${group}${index}.${r}`;
+}
+
+/** The connections this engine can actually hold: source in MOD_SOURCES, destination an id it has. */
+export function vitalModRoutes(vital, paramIds, modSources = ['velocity', 'keytrack', 'random', 'modwheel', 'pitchwheel', 'aftertouch']) {
+  const routes = [], skipped = [];
+  for (const c of vitalModulations(vital)) {
+    if (!c.source && !c.destination) continue;
+    const source = SOURCE_ALIASES[c.source] ?? c.source;
+    if (!modSources.includes(source)) { skipped.push(`${c.source} → ${c.destination}: this engine has no ${c.source} as a modulation source`); continue; }
+    const dest = engineParamIdFromVital(c.destination);
+    if (!dest || (paramIds && !paramIds.has(dest))) { skipped.push(`${c.source} → ${c.destination}: no counterpart for ${c.destination}`); continue; }
+    routes.push({ source, dest, depth: typeof c.amount === 'number' ? c.amount : 1, from: c.source, to: c.destination });
+  }
+  return { routes, skipped };
+}
+
+/** The eight LFO shapes, ready for setLfoShape(lfo, points) -- the engine's own LfoPoint shape. */
+export function vitalLfoShapeApplications(vital) {
+  return vitalLfoShapes(vital).filter((x) => x.points && x.numPoints > 0).map((x) => ({ lfo: x.index - 1, points: vitallfoToPoints(x) }));
+}

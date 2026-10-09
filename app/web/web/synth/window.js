@@ -192,6 +192,17 @@ export function createSynthWindow(api) {
       // FORCE the view to be rebuilt: the pool only rebuilds on its own when the preset NAME changes, so re-importing a
       // name that is already current used to leave the previous option list on screen -- "nothing changed".
       try { pool.reload(selected); } catch (e) { console.warn("Synth — could not rebuild the editor: " + (e?.message ?? e)); }
+      // the wiring and the shapes: only the connections this engine can hold, with the rest named rather than dropped
+      try {
+        const ids = mod.knownParamIds ? mod.knownParamIds() : null;
+        const { routes, skipped } = mod.vitalModRoutes?.(vital, ids) ?? { routes: [], skipped: [] };
+        for (const r of routes) engine.addModRoute(r.source, r.dest, r.depth);
+        const shapes = mod.vitalLfoShapeApplications?.(vital) ?? [];
+        for (const sh of shapes) engine.setLfoShape(sh.lfo, sh.points);
+        if (routes.length || shapes.length) console.info(`Synth — ${routes.length} modulation route(s) and ${shapes.length} LFO shape(s) applied`);
+        if (skipped?.length) console.warn(`Synth — ${skipped.length} Vital connection(s) have no counterpart here: ` + skipped.slice(0, 3).join("; ") + (skipped.length > 3 ? "; …" : ""));
+      } catch (e) { console.warn("Synth — the modulation wiring could not be applied: " + (e?.message ?? e)); }
+
       // 1) the wavetables INSIDE this file: use them, so one file is complete
       const embedded = mod.vitalEmbeddedTables?.(vital) ?? [];
       for (const table of embedded.filter((x) => x.frames?.length)) {
