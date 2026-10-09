@@ -642,6 +642,40 @@ export function vitalExtraParams(vital, api) {
   if (typeof s.compressor_attack === 'number') put('comp.attack', s.compressor_attack);
   if (typeof s.compressor_release === 'number') put('comp.release', s.compressor_release);
   if (typeof s.compressor_makeup === 'number') put('comp.makeup', s.compressor_makeup);
+  // The oscillators and the filters. Only pairs whose meaning matches are taken: Vital's frame_spread, spectral morph,
+  // per-oscillator distortion, detune_range/power and filter style have no counterpart here, and a name that looks
+  // similar is not enough to write into a slot.
+  const OSC_KEYS = {
+    level: 'level', pan: 'pan', phase: 'phase', random_phase: 'phase_rand', transpose: 'transpose',
+    unison_voices: 'unison', unison_detune: 'detune', unison_blend: 'blend', stereo_spread: 'spread',
+    wave_frame: 'morph', on: 'enabled',
+  };
+  const OSC_SKIP = ['distortion_amount', 'distortion_type', 'distortion_phase', 'distortion_spread', 'spectral_morph_amount',
+                    'spectral_morph_type', 'spectral_morph_spread', 'spectral_unison', 'frame_spread', 'detune_power',
+                    'detune_range', 'midi_track', 'smooth_interpolation', 'stack_style', 'transpose_quantize', 'view_2d', 'destination'];
+  for (let i = 1; i <= 3; i++) {
+    for (const [vitalKey, mine] of Object.entries(OSC_KEYS)) {
+      const v = s[`osc_${i}_${vitalKey}`];
+      if (typeof v === 'number') put(`osc${i}.${mine}`, v);
+    }
+    // tune is in semitones and this engine's fine control is in cents, so convert rather than pretend they match
+    if (typeof s[`osc_${i}_tune`] === 'number') { const fineDef = def(`osc${i}.fine`); if (fineDef) put(`osc${i}.fine`, s[`osc_${i}_tune`] * 100); }
+    for (const k of OSC_SKIP) {
+      const v = s[`osc_${i}_${k}`];
+      if (typeof v === 'number' && v !== 0) dropped[`osc${i}.${k}`] = 'this engine has no counterpart';
+    }
+  }
+  const FILTER_KEYS = { cutoff: 'cutoff', resonance: 'resonance', drive: 'drive', keytrack: 'keytrack', mix: 'mix', on: 'enabled' };
+  for (let i = 1; i <= 2; i++) {
+    for (const [vitalKey, mine] of Object.entries(FILTER_KEYS)) {
+      const v = s[`filter_${i}_${vitalKey}`];
+      if (typeof v === 'number') put(`filter${i}.${mine}`, v);
+    }
+    for (const k of ['blend', 'blend_transpose', 'formant_x', 'formant_y', 'formant_resonance', 'formant_transpose', 'filter_input', 'style', 'model']) {
+      const v = s[`filter_${i}_${k}`];
+      if (typeof v === 'number' && v !== 0) dropped[`filter${i}.${k}`] = 'this engine has no counterpart';
+    }
+  }
   if (typeof s.distortion_drive === 'number') put('fxdist.drive', s.distortion_drive);
   if (typeof s.distortion_mix === 'number') put('fxdist.mix', s.distortion_mix);
   if (typeof s.distortion_filter_cutoff === 'number') put('fxdist.tone', s.distortion_filter_cutoff);
