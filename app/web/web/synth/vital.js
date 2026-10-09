@@ -426,3 +426,57 @@ function framesFromLineSource(component, frameSize = 2048) {
   }
   return frames;
 }
+
+
+// ── the two structured regions, verified against Vital's own source ───────────────────────────────────────────────
+//
+// LoadSave::loadModulations(synth, json modulations) and loadLfos(synth, json lfos) both take a JSON value, and the
+// format reference describes them as arrays of 64 slots and 8 shapes. The flat settings keys live alongside them:
+// modulation_N_amount/_bipolar/_power/_stereo/_bypass carry a slot's depth while the array carries its wiring, and
+// updateFromOldVersion() is why an older file can look flat. Both forms are read here.
+
+/** The modulation matrix: [{ slot, source, destination }], with the depth read from the flat keys beside it. */
+export function vitalModulations(vital) {
+  const s = vital?.settings ?? {};
+  const out = [];
+  const arr = s.modulations;
+  if (Array.isArray(arr)) {
+    arr.forEach((slot, i) => {
+      const source = String(slot?.source ?? "");
+      const destination = String(slot?.destination ?? "");
+      if (!source && !destination) return;                       // an empty slot is not wiring
+      const amount = typeof s[`modulation_${i + 1}_amount`] === 'number' ? s[`modulation_${i + 1}_amount`] : null;
+      out.push({ slot: i + 1, source, destination, amount,
+                 bipolar: s[`modulation_${i + 1}_bipolar`] ?? null, bypass: s[`modulation_${i + 1}_bypass`] ?? null,
+                 power: s[`modulation_${i + 1}_power`] ?? null });
+    });
+  }
+  if (!out.length) {                                             // the flat form: keys without an array
+    for (const k of Object.keys(s)) {
+      const m = /^modulation_(\d+)_(source|destination)$/.exec(k);
+      if (m) out.push({ slot: Number(m[1]), source: m[2] === 'source' ? String(s[k]) : "", destination: m[2] === 'destination' ? String(s[k]) : "", amount: s[`modulation_${m[1]}_amount`] ?? null });
+    }
+  }
+  return out;
+}
+
+/** The eight LFO shapes: [{ index, name, points, powers, smooth }] where points are flat x/y pairs. */
+export function vitalLfoShapes(vital) {
+  const s = vital?.settings ?? {};
+  const out = [];
+  const arr = s.lfos;
+  const readOne = (src, i, name) => {
+    const points = Array.isArray(src?.points) ? src.points : null;
+    return { index: i + 1, name: name ?? (typeof src?.name === 'string' ? src.name : null),
+             points, powers: Array.isArray(src?.powers) ? src.powers : [], smooth: !!src?.smooth,
+             numPoints: points ? Math.floor(points.length / 2) : 0 };
+  };
+  if (Array.isArray(arr)) arr.forEach((shape, i) => out.push(readOne(shape, i, null)));
+  else {
+    for (let i = 1; i <= 8; i++) {
+      const pts = s[`lfo_${i}_points`];
+      if (Array.isArray(pts)) out.push(readOne({ points: pts, powers: s[`lfo_${i}_powers`], smooth: s[`lfo_${i}_smooth`] }, i - 1, null));
+    }
+  }
+  return out.filter((x) => x.numPoints > 0);
+}
