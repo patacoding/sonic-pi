@@ -291,6 +291,8 @@ export function vitalEmbeddedTables(vital, frameSize = 2048) {
       }
       const wave = framesFromWaveSource(c, frameSize);
       if (wave.length) return { osc, kind: 'wave', type, frames: wave, frameSize: wave[0].length, skipped };
+      const drawn = framesFromLineSource(c, frameSize);
+      if (drawn.length) return { osc, kind: 'line', type, frames: drawn, frameSize: drawn[0].length, skipped, name: c?.keyframes?.[0]?.line?.name };
       if (typeof c?.audio_file === 'string') skipped.push(type + ' (audio present but unusable)');
       if (type) skipped.push(type);
     }
@@ -382,3 +384,45 @@ export function parseVitalText(text) {
 
 /** Bound recursion for anything walking a preset: a forged deep object must not exhaust the stack. */
 export const MAX_WALK_DEPTH = 32;
+
+
+/**
+ * A Line Source IS a waveform: Vital's editor draws it, and the shape lives in keyframe.line as flat x/y points with
+ * per-point powers -- the same shape a .vitallfo uses. Treating it as "a DSP chain with no base waveform" was simply
+ * wrong, and it is not a rare case: every oscillator whose table is a Line Source has no other carrier.
+ */
+function rasterizeLine(line, frameSize = 2048) {
+  const pts = Array.isArray(line?.points) ? line.points : [];
+  const powers = Array.isArray(line?.powers) ? line.powers : [];
+  const n = Math.floor(pts.length / 2);
+  const out = new Float32Array(frameSize);
+  if (n < 1) return out;
+  if (n === 1) { out.fill(pts[1] ?? 0); return out; }
+  const xs = [], ys = [];
+  for (let i = 0; i < n; i++) { xs.push(pts[i * 2]); ys.push(pts[i * 2 + 1]); }
+  // order by x so a shape drawn right-to-left still comes out as a waveform
+  const order = xs.map((_, i) => i).sort((a, b) => xs[a] - xs[b]);
+  const X = order.map((i) => xs[i]), Y = order.map((i) => ys[i]), P = order.map((i) => powers[i] ?? 1);
+  for (let s = 0; s < frameSize; s++) {
+    const x = s / (frameSize - 1);
+    let seg = 0;
+    while (seg < X.length - 2 && X[seg + 1] < x) seg++;
+    const x0 = X[seg], x1 = X[seg + 1], y0 = Y[seg], y1 = Y[seg + 1];
+    const p = P[seg] || 1;
+    const t = x1 === x0 ? 0 : Math.min(1, Math.max(0, (x - x0) / (x1 - x0)));
+    const shaped = p === 1 ? t : Math.pow(t, p);
+    out[s] = y0 + (y1 - y0) * shaped;
+  }
+  return out;
+}
+
+function framesFromLineSource(component, frameSize = 2048) {
+  const keys = Array.isArray(component?.keyframes) ? component.keyframes : [];
+  const frames = [];
+  for (const k of keys) {
+    const line = k?.line;
+    if (!line || !Array.isArray(line.points) || line.points.length < 4) continue;
+    frames.push(rasterizeLine(line, frameSize));
+  }
+  return frames;
+}
