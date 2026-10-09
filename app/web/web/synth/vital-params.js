@@ -38,6 +38,19 @@ export const VITAL_PARAMS = {
   env_5_attack: [0, 2.37842, 0.1495, 'quartic', 'verified'], env_6_attack: [0, 2.37842, 0.1495, 'quartic', 'verified'],
   env_1_hold: [0, 1.4142135624, 0, 'quartic', 'verified'], env_1_decay: [0, 2.37842, 1, 'quartic', 'verified'],
   env_1_release: [0, 2.37842, 0.5476, 'quartic', 'verified'],
+  // All SIX envelopes, not just the first: a preset is full of second, third and later envelopes driving oscillators,
+  // filters and effects, and without these three rows their times fell back to a log approximation instead of the
+  // quartic curve the format really uses. Same declaration family as env_1, so verified with it.
+  env_2_hold: [0, 1.4142135624, 0, 'quartic', 'verified'], env_2_decay: [0, 2.37842, 1, 'quartic', 'verified'],
+  env_2_release: [0, 2.37842, 0.5476, 'quartic', 'verified'],
+  env_3_hold: [0, 1.4142135624, 0, 'quartic', 'verified'], env_3_decay: [0, 2.37842, 1, 'quartic', 'verified'],
+  env_3_release: [0, 2.37842, 0.5476, 'quartic', 'verified'],
+  env_4_hold: [0, 1.4142135624, 0, 'quartic', 'verified'], env_4_decay: [0, 2.37842, 1, 'quartic', 'verified'],
+  env_4_release: [0, 2.37842, 0.5476, 'quartic', 'verified'],
+  env_5_hold: [0, 1.4142135624, 0, 'quartic', 'verified'], env_5_decay: [0, 2.37842, 1, 'quartic', 'verified'],
+  env_5_release: [0, 2.37842, 0.5476, 'quartic', 'verified'],
+  env_6_hold: [0, 1.4142135624, 0, 'quartic', 'verified'], env_6_decay: [0, 2.37842, 1, 'quartic', 'verified'],
+  env_6_release: [0, 2.37842, 0.5476, 'quartic', 'verified'],
   // oscillators
   osc_1_level: [0, 1, 0.70710678119, 'quadratic', 'partial'], osc_2_level: [0, 1, 0.70710678119, 'quadratic', 'partial'],
   osc_3_level: [0, 1, 0.70710678119, 'quadratic', 'partial'],
@@ -49,7 +62,10 @@ export const VITAL_PARAMS = {
   // filters: the cutoff is SEMITONES RELATIVE TO THE PLAYED NOTE -- the source declares units "semitones" with a
   // post_offset of -60 (so the display is stored - 60, ranging -52..+76), not a MIDI note number as I first assumed.
   // A single hertz value cannot be derived at import time without knowing the note, so it stays unmapped and reported.
-  filter_1_cutoff: [8, 136, 60, 'linear', 'unsupported'], filter_2_cutoff: [8, 136, 60, 'linear', 'unsupported'],
+  // Mapped, but as an approximation with a stated premise: the stored value is semitones relative to the played note,
+  // so it is evaluated at A4 (440 Hz) and the filter is keytracked to follow the keyboard. Marked approximate rather
+  // than verified because the premise is mine, even though the arithmetic is exact.
+  filter_1_cutoff: [8, 136, 60, 'linear', 'approximate'], filter_2_cutoff: [8, 136, 60, 'linear', 'approximate'],
   filter_1_resonance: [0, 1, 0.5, 'linear', 'partial'], filter_1_drive: [0, 20, 0, 'linear', 'partial'],
   filter_1_keytrack: [-1, 1, 0, 'linear', 'partial'],
   // lfos

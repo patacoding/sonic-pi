@@ -713,13 +713,21 @@ export function vitalExtraParams(vital, api) {
     }
   }
   const FILTER_KEYS = { cutoff: 'cutoff', resonance: 'resonance', drive: 'drive', keytrack: 'keytrack', mix: 'mix', on: 'enabled' };
-  // The cutoff family is a MIDI note number (60 = middle C), not hertz, so it goes to hertz before the engine's converter.
-  const FILTER_MIDI = { cutoff: 'cutoff' };
+  // The cutoff family: the source declares units "semitones" with a post_offset of -60, so the stored value IS the
+  // cutoff in semitones relative to the PLAYED NOTE -- the default 60 means "at the note itself", not "middle C" as I
+  // first read it. That relative definition is a definite frequency once a reference note is fixed, and it inherently
+  // follows the keyboard. So: value it at A4 (MIDI 69, 440 Hz), and ask the engine to keytrack the filter, which is what
+  // the relative definition means. This is a mapping with a stated premise, and the premise is in this comment.
   for (let i = 1; i <= 2; i++) {
     for (const [vitalKey, mine] of Object.entries(FILTER_KEYS)) {
       const v = s[`filter_${i}_${vitalKey}`];
       if (typeof v !== 'number') continue;
-      if (vitalKey === 'cutoff') { dropped[`filter${i}.cutoff`] = 'it is semitones relative to the played note (the source declares units "semitones" with a post_offset of -60), so a single hertz value cannot be derived at import time'; continue; }
+      if (vitalKey === 'cutoff') {
+        put(`filter${i}.cutoff`, 440 * Math.pow(2, (v - 60) / 12));
+        // only when the preset does not say: a cutoff defined relative to the note tracks the keyboard in full
+        if (typeof s[`filter_${i}_keytrack`] !== 'number') put(`filter${i}.keytrack`, 1);
+        continue;
+      }
       put(`filter${i}.${mine}`, vitalKey === 'drive' ? v / 20 : v);
     }
     for (const k of ['blend', 'blend_transpose', 'formant_x', 'formant_y', 'formant_resonance', 'formant_transpose', 'filter_input', 'style', 'model']) {
