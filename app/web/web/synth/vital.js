@@ -67,12 +67,31 @@ export function vitalToPreset(vital, fallbackName = 'Imported Vital', api = null
 
   // six envelopes x nine parameters: the closest thing the two engines share
   for (let e = 1; e <= 6; e++) {
-    for (const key of ['delay', 'attack', 'hold', 'decay', 'sustain', 'release',
-                       'delay_curve', 'attack_curve', 'decay_curve', 'release_curve']) {
+    for (const key of ['delay', 'attack', 'hold', 'decay', 'sustain', 'release']) {
       const v = s[`env_${e}_${key}`];
       if (typeof v !== 'number') continue;
-      const target = `env${e}.${key.replace('_curve', '_curve')}`;
-      put(target, envNorm(key, v, api, `env${e}.${key}`));
+      put(`env${e}.${key}`, envNorm(key, v, api, `env${e}.${key}`));
+    }
+    // The curve of each stage is a separate parameter, and it is called _power, not _curve: envelope_module.cpp plugs
+    // env_N_attack_power / _decay_power / _release_power into Envelope::kAttackPower and its two siblings. The four
+    // _curve keys this loop used to read do not exist in Vital, so that path was writing nothing at all.
+    //
+    // Only the attack can be matched, and only approximately: both engines read "positive = slow start" there, but the
+    // laws are different families -- Vital is (e^{p v} - 1) / (e^p - 1) and this engine is v ** (2 ** (3c)). The value is
+    // fitted so the two curves agree at the midpoint. The decay and release laws invert the curve inside this engine's
+    // own formula and I could not establish Vital's direction from the sources I have, so those are named, not guessed.
+    const attack_power = s[`env_${e}_attack_power`];
+    if (typeof attack_power === 'number') {
+      // the fit gives a REAL value in the engine's -1..1 range, and this function's put() takes normalised 0..1, so the
+      // engine's own converter does the last step. Passing the real value straight in clamped every curve to zero.
+      const curve = vitalPowerToEngineCurve(attack_power);
+      const def = api?.paramDef?.(`env${e}.atk_curve`);
+      const norm = def && api?.valueToNorm ? api.valueToNorm(def, curve) : (curve + 1) / 2;
+      if (Number.isFinite(norm)) put(`env${e}.atk_curve`, norm);
+    }
+    for (const [key, id] of [['decay_power', 'dec_curve'], ['release_power', 'rel_curve']]) {
+      const v = s[`env_${e}_${key}`];
+      if (typeof v === 'number' && v !== 0) report.dropped[`env${e}.${id}`] = 'Vital bends this stage with an exponential curve; the matching law here is unproven, so it is not applied';
     }
   }
 
@@ -796,6 +815,26 @@ export function vitalLayerReport({ parsed, mapping, extra, routes, shapes, appli
     applied ? `applied: ${applied.slots ?? "?"} slot(s), ${applied.shapes ?? "?"} shape(s)${of ? `, ${verified}/${of} parameter(s) read back` : ""}` : "applied: not checked",
   ].join(" | ");
   return { parsed, mapped: { parameters: mappedParams, skipped, approximated, routes: routes ?? 0, shapes: shapes ?? 0 }, applied: applied ?? null, line };
+}
+
+
+/**
+ * Vital's stage curve to this engine's, fitted at the midpoint because the two laws are different families.
+ *
+ *   Vital        powerScale(v, p) = (e ** (p v) - 1) / (e ** p - 1)     exponential, p = 0 is linear
+ *   this engine  curveShape(t, c) = t ** (2 ** (3 c))                   power, c = 0 is linear, positive = slow start
+ *
+ * Both read positive as a slow start, so the sign carries over; the magnitude is chosen so the two curves take the same
+ * value at v = 0.5. Beyond that they diverge, which is why a stage using this is reported as an approximation.
+ */
+export function vitalPowerToEngineCurve(power) {
+  const p = Number(power);
+  if (!Number.isFinite(p) || Math.abs(p) < 0.01) return 0;             // Vital treats |p| < 0.01 as linear
+  const mid = (Math.exp(p * 0.5) - 1) / (Math.exp(p) - 1);             // Vital's curve at the midpoint
+  if (!(mid > 0 && mid < 1)) return 0;
+  const exponent = Math.log(mid) / Math.log(0.5);                      // the exponent the engine needs there
+  if (!(exponent > 0)) return 0;
+  return Math.max(-1, Math.min(1, Math.log2(exponent) / 3));            // c = log2(exponent) / 3
 }
 
 /**
