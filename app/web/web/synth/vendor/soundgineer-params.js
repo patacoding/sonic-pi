@@ -1,4 +1,4 @@
-// ../soundgineer/src/shared/params.ts
+// ../../../../soundgineer/src/shared/params.ts
 var FILTER_TYPES = ["LP 12", "LP 24", "HP 12", "HP 24", "BP 12", "BP 24", "Notch", "Comb", "Formant"];
 var SUB_SHAPES = ["Sine", "Triangle", "Saw", "Square"];
 var NOISE_TYPES = ["White", "Pink", "Sample"];

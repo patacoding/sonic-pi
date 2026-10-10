@@ -1,7 +1,7 @@
 // sg-worker:worker-url
 var worker_url_default = new URL("./soundgineer-worklet.js", import.meta.url).href;
 
-// ../soundgineer/src/shared/params.ts
+// ../../../../soundgineer/src/shared/params.ts
 var FILTER_TYPES = ["LP 12", "LP 24", "HP 12", "HP 24", "BP 12", "BP 24", "Notch", "Comb", "Formant"];
 var SUB_SHAPES = ["Sine", "Triangle", "Saw", "Square"];
 var NOISE_TYPES = ["White", "Pink", "Sample"];
@@ -157,7 +157,7 @@ function defaultValues() {
   return a;
 }
 
-// ../soundgineer/src/shared/messages.ts
+// ../../../../soundgineer/src/shared/messages.ts
 var MOD_SOURCES = [
   ...Array.from({ length: 6 }, (_, i) => ({ id: `env${i + 1}`, name: `Env ${i + 1}`, perVoice: true, bipolar: false })),
   ...Array.from({ length: 8 }, (_, i) => ({ id: `lfo${i + 1}`, name: `LFO ${i + 1}`, perVoice: true, bipolar: false })),
@@ -186,7 +186,7 @@ function defaultLfoShape() {
   ];
 }
 
-// ../soundgineer/src/shared/fft.ts
+// ../../../../soundgineer/src/shared/fft.ts
 function fft(re, im) {
   const n = re.length;
   if ((n & n - 1) !== 0) throw new Error("fft size must be a power of two");
@@ -284,7 +284,7 @@ function resampleCycle(input, size) {
   return outRe;
 }
 
-// ../soundgineer/src/shared/wavetable-gen.ts
+// ../../../../soundgineer/src/shared/wavetable-gen.ts
 var FRAME_SIZE = 2048;
 var NUM_MIPS = 11;
 function buildMips(data, frameSize, numFrames) {
@@ -510,7 +510,7 @@ function wavToWavetable(name, wav) {
   return { name, frameSize: FRAME_SIZE, numFrames: 16, data };
 }
 
-// ../soundgineer/src/audio/engine.ts
+// ../../../../soundgineer/src/audio/engine.ts
 var OSC_WT_IDX = [1, 2, 3].map((o) => paramIndex(`osc${o}.wavetable`));
 var CUSTOM_WT = WAVETABLE_NAMES.indexOf("Custom");
 var SynthEngine = class {

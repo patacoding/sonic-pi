@@ -11,30 +11,82 @@
 <body>
   <div id="app"></div>
   <script type="module">
-    import { buildApp } from "./vendor/soundgineer-ui.js";
+    // Namespace import, deliberately: a named import of something an older engine build does not export fails at link
+    // time and takes the whole frame with it. Through the namespace, a missing hook is just a missing property.
+    import * as ui from "./vendor/soundgineer-ui.js";
+    const { buildApp } = ui;
+
+    // Our mined built-in voices, grouped by category in the preset menu. Registered HERE, before anything mounts, and
+    // awaited at the top level so the menu's first render already has them; every step is guarded, because a missing file
+    // or an engine without the hook must leave this frame exactly as it was.
+    try {
+      if (typeof ui.registerFactoryPresets !== "function") {
+        console.info("Synth — this engine build has no preset registration hook; built-in voices are not offered");
+      } else {
+        const res = await fetch("./builtin-voices.json", { cache: "no-store" });
+        if (!res.ok) console.info(`Synth — no built-in voices file beside this frame (HTTP ${res.status})`);
+        else {
+          const data = await res.json();
+          const voices = (Array.isArray(data) ? data : data.voices) ?? [];
+          const total = ui.registerFactoryPresets(voices.map((v) => ({ ...v, version: 1, fxOrder: v.fxOrder ?? [] })));
+          console.info(`Synth — ${voices.length} built-in voice(s) registered (${total} factory presets in the menu)`);
+        }
+      }
+    } catch (e) { console.warn("Synth — built-in voices could not be registered: " + (e?.message ?? e)); }
 
     // ONE view, built once, against this proxy. Its whole job is to guarantee that the UI is mapped to the SELECTED
     // channel's preset data -- for reading and for writing -- without anything ever being created or destroyed:
     // rebuilding their app per switch left their module-level knob registry holding dead canvases and leaked a WebGL
     // context every time, until Chrome evicted the oldest one (the Shadertoy preview) and it went black.
-    console.info("Synth build: frame.html presets-final-1");   // which frame build this document is actually running
+    console.info("Synth build: frame.html b100b4");   // which frame build this document is actually running
     let current = null;
     let builds = 0;               // how many times their app was actually built: it must stay 1
     const subs = new Map();      // param index -> { fn, off }
     const notes = new Set();     // their onNote callbacks, so the keyboard follows the channel too
 
+    // SP-EXT: resolve the engine WHEN A CALL IS MADE, not when this frame was mounted. Importing a preset replaces the
+    // channel's engine and nothing re-mounts this frame afterwards, so a cached reference kept sending every UI write --
+    // and every preset chosen from the menu -- to the engine that had been discarded. The built-in voices all sounded
+    // alike because of it, while the engine the sound came from held the same stale preset throughout. The host is
+    // same-origin and exposes engineOf, so the frame can ask for the channel's current engine itself: it learns which
+    // channel it is by finding the one whose engine it was mounted with, and re-checks that on every call.
+    let channel = null;
+    const hostParts = () => {
+      // The synth lives in our own window and this frame inside it, while the store is published on the app's top document,
+      // so look there first and fall back to the immediate parent.
+      for (const w of [window.top, window.parent]) {
+        try { if (w && w !== window && w.sonicPiParts) return w.sonicPiParts; } catch { /* cross-origin or gone */ }
+      }
+      return null;
+    };
+    const channelOf = (engine) => {
+      const parts = hostParts();
+      const names = parts && parts.list ? parts.list() || [] : [];
+      for (const name of names) { try { if (parts.engineOf(name) === engine) return name; } catch { /* keep looking */ } }
+      return null;
+    };
+    const resolveEngine = () => {
+      try {
+        const parts = hostParts();
+        const wanted = channel || (parts && parts.state ? parts.state().selected : null);
+        const live = wanted && parts && parts.engineOf ? parts.engineOf(wanted) : null;
+        return live || current;
+      } catch { return current; }
+    };
+
     const view = new Proxy({}, {
       get(_t, key) {
+        const engine = resolveEngine();
         if (key === "onParam") return (index, fn) => {
-          subs.set(index, { fn, off: current?.onParam?.(index, fn) });
+          subs.set(index, { fn, off: engine?.onParam?.(index, fn) });
           return () => { try { subs.get(index)?.off?.(); } catch { /* already off */ } subs.delete(index); };
         };
         if (key === "onNote") return (fn) => { notes.add(fn); return () => notes.delete(fn); };
-        const v = current?.[key];
-        return typeof v === "function" ? v.bind(current) : v;
+        const v = engine?.[key];
+        return typeof v === "function" ? v.bind(engine) : v;
       },
-      set(_t, key, value) { if (current) current[key] = value; return true; },
-      has(_t, key) { return current ? key in current : false; },
+      set(_t, key, value) { const engine = resolveEngine(); if (engine) engine[key] = value; return true; },
+      has(_t, key) { const engine = resolveEngine(); return engine ? key in engine : false; },
     });
 
     // THE SWITCH: the only place that decides which engine the view is looking at. Synchronous on purpose -- nothing
@@ -43,6 +95,7 @@
       if (!engine || engine === current) return false;
       for (const [index, sub] of subs) { try { sub.off?.(); } catch { /* already off */ } sub.off = engine.onParam?.(index, sub.fn); }
       current = engine;
+      channel = channelOf(engine) || channel;      // which channel this frame speaks for, learned from the engine itself
       for (const [index, sub] of subs) { try { sub.fn(engine.getParam?.(index)); } catch { /* a knob mid-teardown */ } }
       return true;
     };
@@ -50,9 +103,11 @@
     window.__builds = () => builds;
     // which engine the single view in THIS document is looking at -- the diagnostic that was lost in a revert
     window.__view = () => current;
+    window.__channel = () => channel;
     window.__mount = (engine) => {
       if (current) return window.__focus(engine), document.getElementById("app").children.length;
       current = engine;
+      channel = channelOf(engine) || channel;
       builds++;
       const app = document.getElementById("app");
       app.textContent = "";
