@@ -2,7 +2,7 @@
 // editor. Nothing of Sonic Pi's UI is touched: this element covers the page, it never rearranges it, and no state of
 // ours is persisted.
 import { createEditorPool } from "./editors.js";
-console.info("Synth build: window.js presets-final-1");
+console.info("Synth build: window.js presets-final-2");
 
 const STYLE = `
   #synth-btn { position: fixed; right: 0; top: calc(50% + 6.3em); z-index: 101; writing-mode: vertical-rl; height: 5.4em;
@@ -49,7 +49,7 @@ const STYLE = `
   #synth-midi { font: 11px/1.4 ui-monospace, monospace; opacity: .7; max-height: 4em; overflow: auto; }
 `;
 
-console.info("Synth build: window.js presets-final-1");
+console.info("Synth build: window.js presets-final-2");
 
 export function createSynthWindow(api) {
   if (!document.getElementById("synth-style")) {
@@ -88,7 +88,7 @@ export function createSynthWindow(api) {
     const bar = win.querySelector("#synth-bar") ?? win.firstElementChild;
     const stamp = document.createElement("span");
     stamp.id = "synth-build-stamp";
-    stamp.textContent = " build presets-final-1";
+    stamp.textContent = " build presets-final-2";
     stamp.style.cssText = "font:10px/1 ui-monospace,monospace;opacity:.6;margin-left:6px";
     bar?.appendChild(stamp);
   } catch { /* cosmetic */ }
