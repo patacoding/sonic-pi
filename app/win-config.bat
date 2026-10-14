@@ -59,11 +59,20 @@ set "VCPKG_FORCE_SYSTEM_BINARIES=1"
 
 REM No -G: cmake honours %CMAKE_GENERATOR% if set, otherwise picks the
 REM newest installed Visual Studio. CI can pin via env on the workflow.
+REM
+REM -DCLOCKWORK_PLUGINS=ON is ASKED FOR, not inherited. Upstream turned the
+REM option's default to OFF ("off until Sonic Pi ships it"), and with it go the
+REM plugin bridge, the GUI's Tracks tab and Spider's track functions
+REM (external/CMakeLists.txt, gui/utils/plugins.h). Plugin tracks are a feature
+REM this fork uses, so the Windows build states it here where the value is
+REM visible, instead of depending on a default that upstream is free to move.
+REM A caller can still override it through %EXTRA_CMAKE_ARGS%.
 cmake -A %CMAKE_ARCH% ^
       -DCMAKE_BUILD_TYPE=%CONFIG% ^
       -DCMAKE_TOOLCHAIN_FILE="%VCPKG_TOOLCHAIN%" ^
       -DVCPKG_TARGET_TRIPLET=%VCPKG_TRIPLET% ^
       -DKISSFFT_TOOLS=OFF -DKISSFFT_PKGCONFIG=OFF ^
+      -DCLOCKWORK_PLUGINS=ON ^
       %EXTRA_CMAKE_ARGS% ^
       ..\
 
