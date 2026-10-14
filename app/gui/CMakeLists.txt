@@ -160,6 +160,10 @@ set(QT_SOURCES
     ${QTAPP_ROOT}/widgets/linkaudiostreamswidget.h
     ${QTAPP_ROOT}/widgets/linkvisibilitytoggle.cpp
     ${QTAPP_ROOT}/widgets/linkvisibilitytoggle.h
+    ${QTAPP_ROOT}/widgets/metricslog.cpp
+    ${QTAPP_ROOT}/widgets/metricslog.h
+    ${QTAPP_ROOT}/widgets/metricvalue.cpp
+    ${QTAPP_ROOT}/widgets/metricvalue.h
     ${QTAPP_ROOT}/widgets/sonicpitooltip.cpp
     ${QTAPP_ROOT}/widgets/sonicpitooltip.h
     ${QTAPP_ROOT}/mainwindow.cpp
@@ -191,10 +195,12 @@ set(QT_SOURCES
     ${QTAPP_ROOT}/widgets/splashwidget.cpp
     ${QTAPP_ROOT}/widgets/splashwidget.h
     ${QTAPP_ROOT}/widgets/quickstartpane.cpp
+    ${QTAPP_ROOT}/widgets/codecard.cpp
+    ${QTAPP_ROOT}/widgets/carddeck.cpp
     ${QTAPP_ROOT}/widgets/quickstartpane.h
     ${QTAPP_ROOT}/widgets/zoombar.cpp
     ${QTAPP_ROOT}/widgets/zoombar.h
-    ${QTAPP_ROOT}/widgets/tutscope.h
+    ${QTAPP_ROOT}/widgets/scopesampler.h
     ${QTAPP_ROOT}/widgets/cardscope.h
     ${QTAPP_ROOT}/widgets/icontabbar.h
     ${QTAPP_ROOT}/utils/flash_style.h
@@ -211,6 +217,7 @@ set(SOURCES
     ${QTAPP_ROOT}/utils/setbundle.h
     ${QTAPP_ROOT}/utils/completion_context.cpp
     ${QTAPP_ROOT}/utils/framepacer.cpp
+    ${QTAPP_ROOT}/utils/opaque.h
     ${QTAPP_ROOT}/utils/framepacer.h
     ${QTAPP_ROOT}/utils/reducedmotion.cpp
     ${QTAPP_ROOT}/utils/reducedmotion.h
@@ -377,6 +384,11 @@ if (APPLE)
 else()
   add_executable(${APP_NAME} WIN32 ${ALL_SOURCES} ${RESOURCES}) # Win32 ignored on non-windows
 endif()
+
+# Plugin hosting is the build's (CLOCKWORK_PLUGINS, external/CMakeLists.txt):
+# only a build with it shows the Tracks tab and the track functions, and tells
+# Spider so (utils/plugins.h).
+target_compile_definitions(${APP_NAME} PRIVATE SONIC_PI_PLUGINS=$<BOOL:${CLOCKWORK_PLUGINS}>)
 
 # Translations: Convert the .ts files into .qm files
 set_source_files_properties(${TS_FILES} PROPERTIES OUTPUT_LOCATION ${QTAPP_ROOT}/lang)

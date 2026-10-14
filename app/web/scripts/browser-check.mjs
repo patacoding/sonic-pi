@@ -41,6 +41,39 @@ const stillness = (pg, ms = 2500) => pg.evaluate((ms) => new Promise((resolve) =
 const still = (heard) => !Object.keys(heard).length;
 // what only one engine can be asked: said with its reason, and counted apart from what passed
 const skip = (name, why) => { results.push({ engine, name, ok: true, skipped: true }); say("skip", name, why); };
+// The editor's foot (the caret readout, the buffers) floats over the code's last lines rather than taking a row of its
+// own (style.css #editor-foot): the code is padded by the foot's measured height (main.js --editor-foot-h), so its last
+// line, and the caret on it, scroll clear of the foot, and a tap in the foot's gaps reaches the code. Asked of a long
+// program with the caret at its end; the buffer is put back as it was.
+const footFloats = async (pg, where) => {
+  const r = await pg.evaluate(async () => {
+    const ed = window.sonicPi.editor, view = ed.view;
+    const before = view.state.doc.toString();
+    ed.setCode(Array.from({ length: 150 }, (_, i) => `# line ${i + 1}`).join("\n"));
+    view.focus();
+    view.dispatch({ selection: { anchor: view.state.doc.length }, scrollIntoView: true });
+    await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+    const foot = document.getElementById("editor-foot"), column = document.getElementById("editor-column");
+    const f = foot.getBoundingClientRect();
+    const caret = view.coordsAtPos(view.state.doc.length);
+    // the foot's padding strip above its chips: the foot itself, not a chip, is under the pointer there
+    const hit = document.elementFromPoint(f.left + f.width / 2, f.top + 1);
+    const out = {
+      position: getComputedStyle(foot).position, footBottom: f.bottom, columnBottom: column.getBoundingClientRect().bottom,
+      footTop: f.top, footH: parseFloat(getComputedStyle(column).getPropertyValue("--editor-foot-h")), measured: foot.offsetHeight,
+      pad: parseFloat(getComputedStyle(view.contentDOM).paddingBottom), caretBottom: caret?.bottom ?? null, hit: hit?.id || hit?.tagName,
+    };
+    ed.setCode(before);
+    return out;
+  });
+  check(`${where}: the editor's foot floats over the code's last lines`, r.position === "absolute" && Math.abs(r.footBottom - r.columnBottom) < 1,
+    `${r.position}, foot ends at ${r.footBottom}, the column at ${r.columnBottom}`);
+  check(`${where}: the code is padded by the foot's height, as measured`, r.footH === r.measured && r.pad === r.footH,
+    `--editor-foot-h ${r.footH}, foot ${r.measured}, padding ${r.pad}`);
+  check(`${where}: the last line, and the caret on it, scroll clear of the foot`, r.caretBottom !== null && r.caretBottom <= r.footTop + 0.5,
+    `caret ends at ${r.caretBottom}, the foot starts at ${r.footTop}`);
+  check(`${where}: a tap in the foot's gaps reaches the code`, r.hit === "editor-mount", `under the pointer: ${r.hit}`);
+};
 // the dev server speaks https with a certificate it signed itself (scripts/serve.mjs): the browser is told to go on
 const HTTPS = { ignoreHTTPSErrors: BASE.startsWith("https:") };
 
@@ -103,6 +136,8 @@ for (const [name, engineType] of [["chromium", chromium], ["webkit", webkit]]) {
       if ((await page.evaluate(() => document.body.dataset.drawer)) !== name) await page.click(`#drawer-rail button[data-drawer='${name}']`);   // a pane already open stays so (its rail button would shut it)
     };
     const caretToEnd = () => page.evaluate(() => { const v = window.sonicPi.editor.view; v.focus(); v.dispatch({ selection: { anchor: v.state.doc.length } }); });
+
+    await footFloats(page, "desktop");
 
     // highlighting: native's lexer keys. A cleared buffer has none of them in it, so the code is put there first
     await setCode("live_loop :beat do    # a comment\n  sample :bd_haus, amp: 2\n  sleep 1\nend");
@@ -430,7 +465,10 @@ for (const [name, engineType] of [["chromium", chromium], ["webkit", webkit]]) {
     const tipText = (await page.locator(".roll-tip:not([hidden])").textContent().catch(() => "")) ?? "";
     check("pointing at a note names it, its synth and its line", /^[A-G][♯♭]?\d \(\d+\) · :tb303 · amp 1 · 0\.2 s · :bass · line 7$/.test(tipText), tipText);
     await page.mouse.move(0, 0);
-    await page.locator(".insight-pause", { hasText: "Resume" }).click();
+    // Pause is a toggle: pressed while it holds, its name the same either way
+    const pauseHeld = await pause.evaluate((b) => ({ pressed: b.getAttribute("aria-pressed"), text: b.textContent.trim() }));
+    check("Pause is a toggle, pressed while it holds and named the same", pauseHeld.pressed === "true" && pauseHeld.text === "Pause", JSON.stringify(pauseHeld));
+    await pause.click();
     // the roll has notes still to sound (the bass is a second ahead) once it has drawn again after the resume: waited
     // for, not a fixed pause, which a slow machine's drawing can outlast
     const aheadNow = () => { const now = window.sonicPi.session.clockNow(); return window.sonicPi.pianoRoll().notes.filter((n) => n.start > now).length; };
@@ -442,6 +480,23 @@ for (const [name, engineType] of [["chromium", chromium], ["webkit", webkit]]) {
     // none ahead: say what the roll had, and when, for a machine where it fails
     const rollSaid = ahead > 0 ? "" : ` (stopped at ${stoppedAt}: the roll had ${rollStopped.notes.length} notes, the latest starting ${Math.max(...rollStopped.notes.map((n) => n.start))})`;
     check("Stop takes the notes that will now never sound off the piano roll", ahead > 0 && rollStopped.notes.every((n) => n.start <= stoppedAt && n.end <= stoppedAt + 1e-6) && rollStopped.hits.every((h) => h.time <= stoppedAt), `${ahead} ahead before, ${rollStopped.notes.filter((n) => n.start > stoppedAt).length} after the stop${rollSaid}`);
+    // Clear drops the record and cannot bring it back, so it asks twice (ui/ask-twice.js): the first press arms it,
+    // left alone it settles back with the record kept, and only a second press clears
+    {
+      const clearBtn = page.locator(".insight-clear");
+      const rows = () => page.locator(".insight-table tbody .insight-chip").count();   // a thread's row; not the empty table's line
+      const state = () => clearBtn.evaluate((b) => ({ armed: b.classList.contains("armed"), text: b.textContent.trim() }));
+      const before = await rows();
+      await clearBtn.click();
+      const armed = await state(), keptArmed = await rows();
+      await page.waitForTimeout(3300);   // a finished thread may leave the table meanwhile, as it would anyway
+      const settled = await state(), keptSettled = await rows();
+      // the two presses and the count in one task: a record arriving a moment later is the next one's, not the cleared
+      const after = await clearBtn.evaluate((b) => { b.click(); b.click(); return b.getRootNode().querySelectorAll(".insight-table tbody .insight-chip").length; });
+      check("Clear asks twice: armed by a press, settled back if left, the record gone only with a second press",
+        before > 0 && armed.armed && armed.text === "Clear for good" && keptArmed === before && !settled.armed && settled.text === "Clear" && keptSettled > 0 && after === 0,
+        `rows ${before} → armed ${keptArmed} (${armed.text}) → settled ${keptSettled} (${settled.text}) → ${after}`);
+    }
     await setCode("n = play 60, release: 2\nsleep 0.25\ncontrol n, note: 72\nset :answer, 42\nputs get(:answer)\nputs spread(3, 8)\nmidi_note_on 60\nputs chord_invert(chord(:c4, :major), 1)");
     await page.click("#btn-run");
     await page.waitForFunction(() => /\(ring 64, 67, 72\)/.test(document.getElementById("log").shadowRoot.textContent), null, { timeout: 10000 }).catch(() => {});
@@ -990,6 +1045,34 @@ for (const [name, engineType] of [["chromium", chromium], ["webkit", webkit]]) {
     const lit = await ph.locator("#buffer-tabs .buffer-tab.active").getAttribute("data-idx");
     check("on a phone the buffers are pads across the foot, and a tap switches",
           !caretShown && pads === size && activeBuffer === 2 && lit === "2", `caret ${caretShown}, ${pads} pads of ${size}, active ${activeBuffer}, lit ${lit}`);
+    await footFloats(ph, "on a phone");
+    // a tap on the divider's chevron leaves neither it nor the bar lit: a touch screen keeps :hover on what was tapped,
+    // so the highlight is only for a pointer that hovers (style.css, @media (hover: hover))
+    {
+      const name = "on a phone a tapped divider is not left lit";
+      if (await ph.evaluate(() => matchMedia("(hover: hover)").matches)) skip(name, "this engine's phone reports a pointer that hovers");
+      else {
+        if (!(await ph.evaluate(() => !!document.body.dataset.drawer))) await ph.click("#btn-help");
+        const shown = await ph.waitForFunction(() => document.getElementById("divider-grip").getBoundingClientRect().height > 0, null, { timeout: 3000 }).then(() => true).catch(() => false);
+        if (!shown) skip(name, "no divider shows on a phone");
+        else {
+          await ph.tap("#divider-grip");
+          await ph.waitForTimeout(300);
+          const lit = await ph.evaluate(() => {
+            const probe = document.createElement("div");
+            probe.style.background = "var(--HighlightedBackground)";
+            document.body.append(probe);
+            const hi = getComputedStyle(probe).backgroundColor;
+            probe.remove();
+            const bg = (id) => getComputedStyle(document.getElementById(id)).backgroundColor;
+            return { hi, bar: bg("drawer-divider"), grip: bg("divider-grip") };
+          });
+          check(name, lit.bar !== lit.hi && lit.grip !== lit.hi, JSON.stringify(lit));
+          await ph.tap("#divider-grip");   // the panel back, as it was
+          await ph.waitForTimeout(300);
+        }
+      }
+    }
     // the rail's zoom pair (the drawer head, with native's ZoomBar, is hidden on a phone) zooms the pane and leaves it open
     await ph.evaluate(() => document.querySelector("#drawer-rail [data-drawer=docs]").click());   // Help would toggle whatever pane is open
     await ph.waitForFunction(() => document.body.dataset.drawer === "docs");

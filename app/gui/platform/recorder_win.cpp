@@ -18,6 +18,11 @@
 
 // windows.h's min/max macros collide with std::min in recorder_audio_mix.h - same reason and same fix as
 // app/gui/widgets/settingswidget.cpp:36 and app/gui/graphics/rendering/GraphicsPacer.cpp:22.
+//
+// STILL OURS, and still needed: upstream added the include below (0784e6248) but not this. That header is
+// the only place upstream calls std::min, and on Windows it arrives after windows.h, so without this the
+// build stops at "error C2589: '(': illegal token on right side of '::'". If upstream ever sets NOMINMAX
+// somewhere that covers this file, this goes.
 #ifndef NOMINMAX
 #  define NOMINMAX
 #endif
@@ -25,21 +30,6 @@
 #include "windows.h"
 #include "wgc_d3d_interop.h"
 #include "mp4_soft_remux.h"
-// The stereo-mix helpers this file calls: recordedChannels() and pickRecordedChannels().
-//
-// NOT AN OPTIONAL INCLUDE. Upstream's recorder rework - the commits that took the session recorder from
-// "8-channel devices take the app down" to a fixed stereo mix - split that mix into recorder_audio_mix.h and
-// called it from BOTH platform recorders, but added the header only to the macOS SOURCES list and never
-// added the include here. The Windows build therefore fails on upstream's own code:
-//
-//     recorder_win.cpp(100): error C2039: 'recordedChannels': is not a member of 'SonicPi'
-//     recorder_win.cpp(682): error C2039: 'pickRecordedChannels': is not a member of 'SonicPi'
-//
-// Checked against upstream/dev itself (git show upstream/dev:app/gui/platform/recorder_win.cpp has the two
-// calls and no include), so this is an upstream gap rather than a merge accident. That header was also only
-// ever compiled by the macOS build, which is why nothing noticed its std::min: on Windows it arrives after
-// windows.h unless NOMINMAX is set. Recorded in docs/native-upstream-divergence.md 3.7; if upstream adds the
-// include, take theirs and drop this line.
 #include "recorder_audio_mix.h"
 
 #include <d3d11_4.h>

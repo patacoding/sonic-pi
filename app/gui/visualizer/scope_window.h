@@ -13,6 +13,8 @@
 #pragma once
  
 #include <QWidget>
+
+#include "utils/opaque.h"
 #include <QPen>
 #include <QLine>
 #include <QImage>
@@ -78,7 +80,7 @@ struct ScopeWindowPanel
 
 class ScopePauseButton;
 
-class ScopeWindow : public QWidget
+class ScopeWindow : public SonicPi::KeptOpaque<QWidget>
 {
     Q_OBJECT
 
@@ -212,7 +214,7 @@ private:
     // reserved scope slot (see etc/synthdefs/designs/supercollider/mixer.scd).
     // How far that input pushes past the ceiling is what the limiter must
     // take off — drawn as the bar's tip crossing into the hot zone.
-    shm_scope_stream_reader m_preLimReader;
+    shm_tap_stream_reader m_preLimReader;
     uint64_t m_preLimLastEnd = 0;
     std::vector<float> m_grScratch;
     float m_grTargetDb = 0.0f;    // latest window's dB past the ceiling

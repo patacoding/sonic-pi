@@ -94,11 +94,13 @@
 #include "widgets/sonicpitooltip.h"
 #include <QFileOpenEvent>
 
+#include "utils/dockshown.h"
 #include "utils/audiodevicepolicy.h"
 #include "utils/reducedmotion.h"
 #include "utils/gui_settings.h"
 #include "utils/scintilla_api.h"
 #include "utils/setbundle.h"
+#include "utils/plugins.h"
 #include "widgets/sonicpilexer.h"
 #include "widgets/sonicpiscintilla.h"
 #include "widgets/sonicpierrorcard.h"
@@ -518,6 +520,9 @@ void MainWindow::initPaths()
     QString settings_path = sonicPiConfigPath() + QDir::separator() + "v5-gui-settings.ini";
     SonicPi::setGuiSettingsPath(settings_path);
     gui_settings = new QSettings(settings_path, QSettings::IniFormat);
+    // Before anything is started: whether this build hosts plugins is read by
+    // all of it.
+    SonicPi::adoptPluginsBuild();
 
     QString root_path = rootPath();
 
@@ -1071,14 +1076,7 @@ void MainWindow::setupWindowStructure()
     metroWidget->setFocusPolicy(Qt::NoFocus);
     metroWidget->setFeatures(QDockWidget::NoDockWidgetFeatures);
     metroWidget->setAllowedAreas(Qt::RightDockWidgetArea);
-    metroWidget->setMaximumHeight(ScaleHeightForDPI(110));
-    metroWidget->setWidget(metroPane);
-    // Let the dock grow when the streams panel expands, shrink on collapse.
-    connect(metroPane, &SonicPiMetro::linkAudioStreamsExpandedChanged, this,
-            [this](bool expanded) {
-                metroWidget->setMaximumHeight(
-                    expanded ? QWIDGETSIZE_MAX : ScaleHeightForDPI(110));
-            });
+    metroWidget->setWidget(metroPane);   // as tall as the pane needs (SonicPiMetro::fitHeightToContent)
 
     addDockWidget(Qt::RightDockWidgetArea, outputWidget);
     addDockWidget(Qt::RightDockWidgetArea, incomingWidget);
@@ -1113,7 +1111,7 @@ void MainWindow::setupWindowStructure()
     right->setContext(Qt::WidgetWithChildrenShortcut);
     connect(right, SIGNAL(activated()), this, SLOT(docNextTab()));
 
-    tutorialPane = new TutorialPane(lexer, theme);
+    tutorialPane = new TutorialPane(theme);
     tutorialPane->setAudioApi(m_spAPI);
     // The A-/A+ bar governs the whole help tab, not just the content pane:
     // the topic lists and their filter fields scale with it too, so someone
@@ -1197,6 +1195,11 @@ void MainWindow::setupWindowStructure()
     });
     connect(tutorialPane, &TutorialPane::announceRequested, this,
             [this](const QString& msg) { announce(msg); });
+    connect(tutorialPane, &TutorialPane::dragEnded, this, &MainWindow::cancelCardPreview);
+    connect(tutorialPane, &TutorialPane::insertPreviewRequested, this, &MainWindow::previewCardCode);
+    connect(tutorialPane, &TutorialPane::insertPreviewCleared, this, &MainWindow::cancelCardPreview);
+    connect(tutorialPane, &TutorialPane::insertRequested, this, &MainWindow::insertCardCode);
+    connect(tutorialPane, &TutorialPane::copyRequested, this, &MainWindow::copyCardCode);
     connect(tutorialPane, &TutorialPane::linkClicked, this, &MainWindow::docLinkClicked);
     connect(tutorialPane, &TutorialPane::navigateRequested, this, [this](int delta) {
         QListWidget* list = helpLists.value((int)DocTab::Tutorial);
@@ -1209,6 +1212,10 @@ void MainWindow::setupWindowStructure()
             tutorialPane, &TutorialPane::runStarted);
     connect(m_spClient.get(), &SonicPi::QtAPIClient::RunEndedReceived,
             tutorialPane, &TutorialPane::runEnded);
+    connect(m_spClient.get(), &SonicPi::QtAPIClient::RunOutputReceived,
+            tutorialPane, &TutorialPane::runOutput);
+    connect(m_spClient.get(), &SonicPi::QtAPIClient::RunErrorReceived,
+            tutorialPane, &TutorialPane::runError);
     // Job -> workspace, so errors can tell an editor run from a help-system
     // one (help errors must never scribble markers on the editor).
     connect(m_spClient.get(), &SonicPi::QtAPIClient::RunStartedReceived, this,
@@ -1253,52 +1260,13 @@ void MainWindow::setupWindowStructure()
             });
     connect(quickstartPane, &QuickstartPane::stopJobRequested, this,
             [this](int jobId) { m_spAPI->StopJob(jobId); });
-    connect(quickstartPane, &QuickstartPane::dragEnded, this, [this] {
-        // A drop on the editor already committed (dropEvent). Anything still
-        // previewing here means the card was released off the editor: cancel it,
-        // don't turn a fumbled drag into real code.
-        for (int i = 0; i < workspace_max; i++)
-            workspaces[i]->cancelInsertPreview();
-    });
-    connect(quickstartPane, &QuickstartPane::insertPreviewRequested, this,
-            [this](const QString& title, const QString& code) {
-                if (SonicPiScintilla* ws = getCurrentWorkspace())
-                    ws->previewInsertAtCursor(code, title);
-            });
-    connect(quickstartPane, &QuickstartPane::insertPreviewCleared, this, [this] {
-        // All workspaces, not just the current one: the preview went into
-        // whichever buffer was current at hover time, and the user may have
-        // switched buffers since (cancel is a no-op where nothing previews).
-        for (int i = 0; i < workspace_max; i++)
-            workspaces[i]->cancelInsertPreview();
-    });
-    connect(quickstartPane, &QuickstartPane::insertRequested, this,
-            [this](const QString& title, const QString& code) {
-                SonicPiScintilla* ws = getCurrentWorkspace();
-                if (!ws)
-                    return;
-                // Drop any stale hover preview everywhere (it may live in
-                // another buffer after a switch), then place + commit fresh in
-                // the current one.
-                for (int i = 0; i < workspace_max; i++)
-                    workspaces[i]->cancelInsertPreview();
-                ws->previewInsertAtCursor(code, title);
-                ws->finaliseDropPreview();
-                ws->setFocus();
-                showStatusAndAnnounce(
-                    title.isEmpty()
-                        ? tr("Inserted the card's code at the cursor. Press Run to hear it.")
-                        : tr("Inserted %1 at the cursor. Press Run to hear it.").arg(title),
-                    5000);
-            });
-    connect(quickstartPane, &QuickstartPane::copyRequested, this,
-            [this](const QString& title, const QString& code) {
-                QApplication::clipboard()->setText(code);
-                showStatusAndAnnounce(
-                    title.isEmpty() ? tr("Copied the card's code to the clipboard.")
-                                    : tr("Copied %1 to the clipboard.").arg(title),
-                    5000);
-            });
+    // A drop on the editor already committed (dropEvent): a preview still
+    // showing when a drag ends means the card was released off the editor.
+    connect(quickstartPane, &QuickstartPane::dragEnded, this, &MainWindow::cancelCardPreview);
+    connect(quickstartPane, &QuickstartPane::insertPreviewRequested, this, &MainWindow::previewCardCode);
+    connect(quickstartPane, &QuickstartPane::insertPreviewCleared, this, &MainWindow::cancelCardPreview);
+    connect(quickstartPane, &QuickstartPane::insertRequested, this, &MainWindow::insertCardCode);
+    connect(quickstartPane, &QuickstartPane::copyRequested, this, &MainWindow::copyCardCode);
     connect(quickstartPane, &QuickstartPane::announceRequested, this,
             [this](const QString& msg) {
                 announce(msg, false, SonicPi::Announcement::Navigation);
@@ -1307,16 +1275,23 @@ void MainWindow::setupWindowStructure()
             quickstartPane, &QuickstartPane::runStarted);
     connect(m_spClient.get(), &SonicPi::QtAPIClient::RunEndedReceived,
             quickstartPane, &QuickstartPane::runEnded);
-    connect(m_spClient.get(), &SonicPi::QtAPIClient::FlashReceived, quickstartPane,
+    connect(m_spClient.get(), &SonicPi::QtAPIClient::RunOutputReceived,
+            quickstartPane, &QuickstartPane::runOutput);
+    connect(m_spClient.get(), &SonicPi::QtAPIClient::RunErrorReceived,
+            quickstartPane, &QuickstartPane::runError);
+    connect(m_spClient.get(), &SonicPi::QtAPIClient::FlashReceived, this,
             [this](const QString& workspace, int line) {
                 // Same pref gate and output-latency delay as the editor flash.
                 if (!piSettings->flash_code)
                     return;
-                if (m_visualLatencyMs > 0)
-                    QTimer::singleShot(m_visualLatencyMs, quickstartPane,
-                                       [this, workspace, line]() { quickstartPane->flashLine(workspace, line); });
-                else
+                auto flash = [this, workspace, line] {
                     quickstartPane->flashLine(workspace, line);
+                    tutorialPane->flashLine(workspace, line);
+                };
+                if (m_visualLatencyMs > 0)
+                    QTimer::singleShot(m_visualLatencyMs, this, flash);
+                else
+                    flash();
             });
     southTabs->setTabToolTip(southTabs->addTab(quickstartPane, tr("Cards")),
                              tr("Quickstart cards: small runnable snippets to get going."));
@@ -1417,7 +1392,8 @@ void MainWindow::setupWindowStructure()
     QWidget* cardsZoomControls = quickstartPane->zoomControls();
     logsZoom = new ZoomBar(theme, tr("logs"), this);
     debugZoom = new ZoomBar(theme, tr("metrics"), this);
-    tracksZoom = new ZoomBar(theme, tr("tracks"), this);
+    if (SonicPi::kPluginsBuilt)
+        tracksZoom = new ZoomBar(theme, tr("tracks"), this);
     QWidget* helpZoomFoot = new QWidget;
     QVBoxLayout* helpZoomLayout = new QVBoxLayout(helpZoomFoot);
     helpZoomLayout->setContentsMargins(0, 0, 0, ScaleHeightForDPI(6));
@@ -1425,7 +1401,7 @@ void MainWindow::setupWindowStructure()
     for (QWidget* zoom : { docZoomControls, cardsZoomControls,
                            static_cast<QWidget*>(logsZoom), static_cast<QWidget*>(debugZoom),
                            static_cast<QWidget*>(tracksZoom) })
-        helpZoomLayout->addWidget(zoom, 0, Qt::AlignHCenter);
+        if (zoom) helpZoomLayout->addWidget(zoom, 0, Qt::AlignHCenter);
     southTabs->setFootWidget(helpZoomFoot);
     auto syncDocZoomVisible = [this, docZoomControls, cardsZoomControls]() {
         QWidget* current = southTabs->currentWidget();
@@ -1433,7 +1409,7 @@ void MainWindow::setupWindowStructure()
         cardsZoomControls->setVisible(current == quickstartPane);
         logsZoom->setVisible(current == debugLogPanel);
         debugZoom->setVisible(current == metricsPanel);
-        tracksZoom->setVisible(tracksPanel && current == tracksPanel);
+        if (tracksZoom) tracksZoom->setVisible(tracksPanel && current == tracksPanel);
         // The title names the current tab so the row reads as a heading for
         // what's actually on screen, not just the dock.
         QString suffix;
@@ -2189,47 +2165,52 @@ void MainWindow::createDebugAndLogTabs()
     southTabs->setTabToolTip(southTabs->addTab(metricsPanel, tr("Debug")),
                              tr("Live metrics, node tree and message logs for the SuperSonic audio engine."));
 
-    // Tracks: the plugin host's named lanes, each with a chain of VST3 or
-    // CLAP plugins arranged here and played from code by name
-    // (live_track, with_send, use_track and track_midi).
-    tracksPanel = new TracksPanel(m_spAPI, this);
-    tracksPanel->applyTheme(theme);
-    tracksPanel->setUserZoom(gui_settings->value("prefs/tracks-zoom", 0).toInt());
-    connect(tracksZoom, &ZoomBar::zoomStep, this,
-            [this](int delta) { tracksPanel->setUserZoom(tracksPanel->userZoom() + delta); });
-    southTabs->setTabToolTip(southTabs->addTab(tracksPanel, tr("Tracks")),
-                             tr("VST3 and CLAP plugins hosted by the SuperSonic audio engine, "
-                                "on tracks your code plays by name."));
-    // The same editor and status contract the cards use.
-    connect(tracksPanel, &TracksPanel::insertRequested, this,
-            [this](const QString& title, const QString& code) {
-                SonicPiScintilla* ws = getCurrentWorkspace();
-                if (!ws)
-                    return;
-                for (int i = 0; i < workspace_max; i++)
-                    workspaces[i]->cancelInsertPreview();
-                ws->previewInsertAtCursor(code, title);
-                ws->finaliseDropPreview();
-                ws->setFocus();
-                showStatusAndAnnounce(tr("Inserted %1 at the cursor.").arg(title), 5000);
-            });
-    connect(tracksPanel, &TracksPanel::copyRequested, this,
-            [this](const QString& title, const QString& code) {
-                QApplication::clipboard()->setText(code);
-                showStatusAndAnnounce(tr("Copied %1 to the clipboard.").arg(title), 5000);
-            });
-    connect(tracksPanel, &TracksPanel::announceRequested, this,
-            [this](const QString& msg) {
-                announce(msg, false, SonicPi::Announcement::Navigation);
-            });
-    // The plugins' own parameters, so `track_midi :e3, ` on the track from
-    // use_track offers `filter_1_cutoff:` with a slider over its range, and
-    // `track_control "` completes "Filter 1 Cutoff" rather than leaving it
-    // to memory.
-    connect(tracksPanel, &TracksPanel::trackParamsChanged, this,
-            [this](const QString& track, const QList<SonicPi::TrackParam>& params) {
-                if (autocomplete) autocomplete->updateTrackParams(track, params);
-            });
+    // Tracks need plugin hosting: a build without it has no panel, so no
+    // plugin scan and no rig to restore.
+    if (SonicPi::kPluginsBuilt)
+    {
+        // Tracks: the plugin host's named lanes, each with a chain of VST3 or
+        // CLAP plugins arranged here and played from code by name
+        // (live_track, with_send, use_track and track_midi).
+        tracksPanel = new TracksPanel(m_spAPI, this);
+        tracksPanel->applyTheme(theme);
+        tracksPanel->setUserZoom(gui_settings->value("prefs/tracks-zoom", 0).toInt());
+        connect(tracksZoom, &ZoomBar::zoomStep, this,
+                [this](int delta) { tracksPanel->setUserZoom(tracksPanel->userZoom() + delta); });
+        southTabs->setTabToolTip(southTabs->addTab(tracksPanel, tr("Tracks")),
+                                 tr("VST3 and CLAP plugins hosted by the SuperSonic audio engine, "
+                                    "on tracks your code plays by name."));
+        // The same editor and status contract the cards use.
+        connect(tracksPanel, &TracksPanel::insertRequested, this,
+                [this](const QString& title, const QString& code) {
+                    SonicPiScintilla* ws = getCurrentWorkspace();
+                    if (!ws)
+                        return;
+                    for (int i = 0; i < workspace_max; i++)
+                        workspaces[i]->cancelInsertPreview();
+                    ws->previewInsertAtCursor(code, title);
+                    ws->finaliseDropPreview();
+                    ws->setFocus();
+                    showStatusAndAnnounce(tr("Inserted %1 at the cursor.").arg(title), 5000);
+                });
+        connect(tracksPanel, &TracksPanel::copyRequested, this,
+                [this](const QString& title, const QString& code) {
+                    QApplication::clipboard()->setText(code);
+                    showStatusAndAnnounce(tr("Copied %1 to the clipboard.").arg(title), 5000);
+                });
+        connect(tracksPanel, &TracksPanel::announceRequested, this,
+                [this](const QString& msg) {
+                    announce(msg, false, SonicPi::Announcement::Navigation);
+                });
+        // The plugins' own parameters, so `track_midi :e3, ` on the track from
+        // use_track offers `filter_1_cutoff:` with a slider over its range, and
+        // `track_control "` completes "Filter 1 Cutoff" rather than leaving it
+        // to memory.
+        connect(tracksPanel, &TracksPanel::trackParamsChanged, this,
+                [this](const QString& track, const QList<SonicPi::TrackParam>& params) {
+                    if (autocomplete) autocomplete->updateTrackParams(track, params);
+                });
+    }
     // Reopen on whichever tab was last in use; Docs is the fallback for a
     // profile that has never set one.
     {
@@ -3570,14 +3551,14 @@ void MainWindow::applyHelpPanel()
     m_applyingHelpPanel = true;   // the dock's own signals land back here
     const SonicPi::HelpPanelModel& m = m_helpPanel;
 
-    if (m.panelVisible() && !docWidget->isVisible())
+    if (m.panelVisible() && !SonicPi::dockShown(docWidget))
     {
         docWidget->show();
         const int h = (m_savedDockH > 0) ? m_savedDockH : (height() / 3);
         resizeDocks({ docWidget }, { h }, Qt::Vertical);
         ensureDocsSelection();   // never land on a blank pane
     }
-    else if (!m.panelVisible() && docWidget->isVisible())
+    else if (!m.panelVisible() && SonicPi::dockShown(docWidget))
     {
         m_savedDockH = docWidget->height();   // for the way back
         docWidget->hide();
@@ -4048,7 +4029,12 @@ void MainWindow::createExamplesMenu()
     };
 
     // Same glob + sort as qt-doc.rb, so the running row index lines up with
-    // the entries in the help pane's Examples tab.
+    // the entries in the help pane's Examples tab; named as qt-doc.rb and the
+    // web name them, from the examples' cards.
+    QHash<QString, SonicPi::ExampleCard> cards;
+    QFile cardsFile(rootPath() + "/etc/examples/cards.json");
+    if (cardsFile.open(QIODevice::ReadOnly))
+        cards = SonicPi::TutorialDocs::exampleCardsFromJson(cardsFile.readAll());
     int helpRow = 0;
     for (const auto& category : categories)
     {
@@ -4059,16 +4045,11 @@ void MainWindow::createExamplesMenu()
         {
             QString base = fname;
             base.chop(3);
-            QStringList words = base.split('_');
-            for (QString& word : words)
-            {
-                if (!word.isEmpty())
-                    word[0] = word[0].toUpper();
-            }
-            QString title = words.join(' ');
+            const QString title = SonicPi::TutorialDocs::exampleTitle(base, cards);
             QString path = dir.filePath(fname);
             examplePaths << path;
             exampleTitles << title;
+            exampleBlurbs << cards.value(base).blurb;
             int row = helpRow++;
             QAction* act = categoryMenu->addAction(title);
             connect(act, &QAction::triggered, this, [this, path, title, row]() {
@@ -4101,6 +4082,46 @@ void MainWindow::createExamplesMenu()
         showHelpListTab((int)DocTab::Fx, -1);
     });
     examplesMenu->addAction(browseFxAct);
+}
+
+void MainWindow::insertCardCode(const QString& title, const QString& code)
+{
+    SonicPiScintilla* ws = getCurrentWorkspace();
+    if (!ws)
+        return;
+    // Drop any stale hover preview everywhere (it may live in another buffer
+    // after a switch), then place + commit fresh in the current one.
+    cancelCardPreview();
+    ws->previewInsertAtCursor(code, title);
+    ws->finaliseDropPreview();
+    ws->setFocus();
+    showStatusAndAnnounce(title.isEmpty()
+                              ? tr("Inserted the card's code at the cursor. Press Run to hear it.")
+                              : tr("Inserted %1 at the cursor. Press Run to hear it.").arg(title),
+                          5000);
+}
+
+void MainWindow::previewCardCode(const QString& title, const QString& code)
+{
+    if (SonicPiScintilla* ws = getCurrentWorkspace())
+        ws->previewInsertAtCursor(code, title);
+}
+
+void MainWindow::cancelCardPreview()
+{
+    // All workspaces, not just the current one: the preview went into
+    // whichever buffer was current at hover time, and the user may have
+    // switched buffers since (cancel is a no-op where nothing previews).
+    for (int i = 0; i < workspace_max; i++)
+        workspaces[i]->cancelInsertPreview();
+}
+
+void MainWindow::copyCardCode(const QString& title, const QString& code)
+{
+    QApplication::clipboard()->setText(code);
+    showStatusAndAnnounce(title.isEmpty() ? tr("Copied the card's code to the clipboard.")
+                                          : tr("Copied %1 to the clipboard.").arg(title),
+                          5000);
 }
 
 void MainWindow::showExamplesHelpTab(int row)
@@ -4960,9 +4981,13 @@ void MainWindow::toggleHelpIcon()
     // follows the state. Nothing else reads the dock to decide anything.
     if (!docWidget)
         return;
-    if (docWidget->isVisible() != m_helpPanel.panelVisible())
+    // By the dock's own setting (dockShown): this runs straight after the
+    // saved layout is restored, before the window is shown, when isVisible()
+    // says no for every dock.
+    const bool shown = SonicPi::dockShown(docWidget);
+    if (shown != m_helpPanel.panelVisible())
     {
-        if (docWidget->isVisible()) m_helpPanel.show();
+        if (shown) m_helpPanel.show();
         else m_helpPanel.away();
     }
     applyHelpPanel();
@@ -8409,8 +8434,6 @@ void MainWindow::restoreWindows()
     toggleHelpIcon();
     applySideColumn();
 
-    auto current_state = saveState();
-
     resize(size);
     move(pos);
 
@@ -8898,7 +8921,8 @@ bool MainWindow::showInTutorialPane(int tabIdx, int row)
         QString code = readFile(examplePaths[row]);
         if (!code.isEmpty())
         {
-            tutorialPane->showCodePage(exampleTitles.value(row), code);
+            tutorialPane->showExamplePage(QFileInfo(examplePaths[row]).completeBaseName(),
+                                          exampleTitles.value(row), code, exampleBlurbs.value(row));
             built = true;
         }
     }
@@ -8995,8 +9019,20 @@ void MainWindow::addHelpPage(QListWidget* nameList,
     struct help_entry entry;
     entry.pageIndex = docsNavTabs->count() - 1;
 
+    // The Lang functions that need plugin hosting are offered only by a build
+    // with it: not listed, not completed. Which they are is in the generated
+    // Lang reference.
+    QSet<QString> needPlugins;
+    if ((DocTab)entry.pageIndex == DocTab::Lang && !SonicPi::kPluginsBuilt)
+    {
+        loadNativeDocs();
+        needPlugins = SonicPi::pluginLangKeywords(langDocPages);
+    }
+
     for (i = 0; i < len; i++)
     {
+        if (needPlugins.contains(QString(helpPages[i].keyword)))
+            continue;
         QListWidgetItem* item = new QListWidgetItem(helpPages[i].title);
         item->setData(32, QVariant(helpPages[i].url));
         // Searchable symbol (bass_foundation) alongside the display title
@@ -10413,7 +10449,7 @@ void MainWindow::onSupersonicSetup(int sampleRate, int bufferSize)
     // not initial boot (SupersonicEngine gates the emit on mWorldRebuilt);
     // first-boot attach is handled by onSpiderReady.
     m_spAPI->AudioProcessor_ResetConnection();
-    if (tracksPanel) tracksPanel->onEngineReady();
+    onEngineReady();
 }
 
 void MainWindow::onSpiderReady()
@@ -10424,7 +10460,13 @@ void MainWindow::onSpiderReady()
     // First-boot scope-reader attach. /clockwork/setup covers
     // subsequent cold-swap re-attaches; the two handlers are disjoint.
     m_spAPI->AudioProcessor_ResetConnection();
+    onEngineReady();
+}
+
+void MainWindow::onEngineReady()
+{
     if (tracksPanel) tracksPanel->onEngineReady();
+    if (metroPane) metroPane->onEngineReady();
 }
 
 void MainWindow::onAudioSwitchDone(const SonicPi::AudioSwitchOutcome& outcome)

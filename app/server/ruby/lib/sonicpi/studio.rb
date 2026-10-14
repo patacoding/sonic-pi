@@ -9,6 +9,7 @@ require_relative "server"
 require_relative "note"
 require_relative "samplebuffer"
 require_relative "studio_ready_gate"
+require_relative "plugins"
 
 require 'set'
 require 'fileutils'
@@ -49,11 +50,10 @@ module SonicPi
       # safety check would otherwise treat as the thread running
       # behind and kill the live_loop).
       @last_cold_swap_completed_at = nil
-      # [peer, channel] tuple => AudioBus subscribed via Link Audio. Each
-      # tuple is a separate stream, kept across :stop / re-trigger so the
-      # same identity always lands on the same bus. Cleared on reboot /
-      # cold-swap by reset_and_setup_groups_and_busses (@server.reset!
-      # wipes the bus allocator, so these references would dangle).
+      # [peer, channel] => the bus its Link Audio stream arrives on
+      # (ensure_link_audio_input): the streams that are open, for :stop.
+      # Cleared on reboot / cold swap, when the engine's subscriptions go
+      # with the world.
       @link_audio_subs = {}
       @link_audio_mut  = Mutex.new
       # The engine's tracks, by name, as last broadcast on /clockwork/track/list.
@@ -371,7 +371,9 @@ module SonicPi
 
     # ── Tracks ──────────────────────────────────────────────────────────────
 
+    # Only in a build with plugin hosting: without it there are no tracks.
     def request_track_list
+      return unless Plugins.available?
       @server.osc "/clockwork/track/list"
     rescue Exception => e
       STDOUT.puts "Studio - track list request failed: #{e.message}"
@@ -701,19 +703,22 @@ module SonicPi
       track_lookup!(name)[:return] + 1
     end
 
-    # Ensure a Link Audio subscription is active for (peer, channel) and
-    # return its audio bus index. Each tuple gets its own bus pair,
-    # allocated lazily and kept across :stop / re-trigger so a user FX
-    # chain pointing at it keeps working.
+    # Open (peer, channel)'s Link Audio stream and return the bus
+    # link_audio's synth reads it on, or nil if the engine refused. The
+    # engine chooses where the stream arrives, a stereo pair of its input
+    # channels, and says which; scsynth lays its outputs out first, so input
+    # channel N is bus num_output_busses + N. The same (peer, channel) again
+    # keeps its pair, so a re-trigger reads where it already was.
     def ensure_link_audio_input(peer, channel, link_api)
       check_for_server_rebooting!(:ensure_link_audio_input)
       key = [peer, channel]
       @link_audio_mut.synchronize do
-        bus = @link_audio_subs[key] ||= @server.allocate_audio_bus
-        # Idempotent on (peer, channel); re-issuing keeps the receive
-        # buffer alive. Stream is rendered stereo into (bus, bus+1).
-        link_api.link_audio_input_set!(peer, channel, bus.to_i)
-        bus.to_i
+        input = link_api.link_audio_input_add!(peer, channel)
+        unless input
+          @link_audio_subs.delete(key)
+          return nil
+        end
+        @link_audio_subs[key] = @server.scsynth_info[:num_output_busses] + input
       end
     end
 
@@ -1098,6 +1103,12 @@ module SonicPi
         # device channel count changed (mic feedback, synths bypassing
         # the mixer).
         begin
+          # Make sure the graph is running before the probe goes in. The
+          # jobs stopped by the device change pause it when they finish,
+          # and that pause can reach the new World before we get here. A
+          # probe in a paused graph never answers. If the studio should be
+          # paused, it's paused again at the end of the rebuild.
+          @server.node_run(0, true)
           @server.fetch_scsynth_info!(5)
           reset_and_setup_groups_and_busses
           STDOUT.puts "Studio - Phase 3: Server info + Groups (#{(Time.now - start).round(2)}s)"
@@ -1156,6 +1167,12 @@ module SonicPi
           rescue Exception => e
             log_phase_err.call("in init_studio", e)
           end
+
+          # Phase 3 left the graph running. If nothing is playing, pause it
+          # again, as Studio#pause would have. A pause or start that arrived
+          # during the rebuild has been waiting at the gate, and runs once
+          # the rebuild finishes.
+          @recording_mutex.synchronize { __pause_graph if @paused }
 
           message "Reinitialisation complete (#{(Time.now - start).round(2)}s)"
         end
@@ -1299,8 +1316,8 @@ module SonicPi
     def reset_and_setup_groups_and_busses
       log_message "Reset and setup groups and busses"
       log_message "Clearing scsynth"
-      # AudioBus allocator is about to be wiped; drop subscription records
-      # so a post-reset link_audio call allocates fresh.
+      # The engine's Link Audio subscriptions are gone with the world; so
+      # are the records of them.
       @link_audio_mut.synchronize { @link_audio_subs.clear }
       # Every live_track is gone with the server, and none is coming back
       # to claim: every track is heard on the main mix from the restart.
@@ -1412,6 +1429,7 @@ module SonicPi
       new_group new_synth_group new_fx_group new_fx_bus
       recording_start recording_stop
       control_bus
+      pause start
     ].freeze
 
     _gate_module = Module.new

@@ -47,6 +47,10 @@ public:
   void setFocusTimeWarpScrubber();
   void toggleLink();   // Flips the Link button.
 
+  // The Link settings, sent whenever an engine is ready: on first boot and
+  // after every restart. A new engine starts with none of them.
+  void onEngineReady();
+
   // Expand or collapse the inline Link Audio Streams panel below the
   // main metro row.
   void toggleLinkAudioStreams();
@@ -58,10 +62,6 @@ signals:
   // network visibility). MainWindow routes this to the status bar and the
   // screen reader via showStatusAndAnnounce().
   void statusMessage(const QString& message);
-  // Emitted when the inline Link Audio Streams panel is shown/hidden.
-  // MainWindow listens to resize the surrounding dock — the metro
-  // dock is hard-capped to a small height when collapsed.
-  void linkAudioStreamsExpandedChanged(bool expanded);
 
 public slots:
   void tapTempo(int flashDelay=250);
@@ -74,6 +74,7 @@ protected:
   void paintEvent(QPaintEvent *event);
 
 private:
+  void fitHeightToContent(bool streamsOpen);
   QPushButton *enableLinkButton = nullptr;
   QPushButton *linkStreamsButton;
   QPushButton *tapButton;

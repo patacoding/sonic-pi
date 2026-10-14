@@ -31,9 +31,11 @@ if(NOT EXISTS ${GUI_ROOT}/utils/completion_argkinds.gen.h OR
 endif()
 
 set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)   # the app's images and themes, compiled in below: a widget under test loads them as the app does
 
 add_executable(${PROJECT_NAME}
     ${GUI_TESTS_ROOT}/main.cpp
+    ${GUI_ROOT}/SonicPi.qrc
     ${GUI_TESTS_ROOT}/completionpopup_a11y.test.cpp
     ${GUI_TESTS_ROOT}/completionpopup_select.test.cpp
     ${GUI_TESTS_ROOT}/announcementpolicy.test.cpp
@@ -61,8 +63,27 @@ add_executable(${PROJECT_NAME}
     ${GUI_TESTS_ROOT}/nodetreemotion.test.cpp
     ${GUI_TESTS_ROOT}/nodetreegraph_look.test.cpp
     ${GUI_TESTS_ROOT}/loopscope_lifecycle.test.cpp
+    ${GUI_TESTS_ROOT}/metricslog.test.cpp
+    ${GUI_TESTS_ROOT}/metricspanel_font.test.cpp
+    ${GUI_TESTS_ROOT}/metricvalue.test.cpp
+    ${GUI_TESTS_ROOT}/opaque_widgets.test.cpp
+    ${GUI_TESTS_ROOT}/window_layout.test.cpp
+    ${GUI_TESTS_ROOT}/repaint_pacing.test.cpp
+    ${GUI_TESTS_ROOT}/linkaudio_engine_ready.test.cpp
+    ${GUI_TESTS_ROOT}/plugins.test.cpp
+    ${GUI_TESTS_ROOT}/card_deck.test.cpp
+    ${GUI_TESTS_ROOT}/quickstart_card.test.cpp
+    ${GUI_TESTS_ROOT}/tutorial_cards.test.cpp
     ${GUI_ROOT}/widgets/nodetreegraph.cpp
+    ${GUI_ROOT}/widgets/metricslog.cpp
+    ${GUI_ROOT}/widgets/metricspanel.cpp
+    ${GUI_ROOT}/widgets/metricvalue.cpp
     ${GUI_ROOT}/widgets/trackspanel.cpp
+    ${GUI_ROOT}/widgets/quickstartpane.cpp
+    ${GUI_ROOT}/widgets/codecard.cpp
+    ${GUI_ROOT}/widgets/carddeck.cpp
+    ${GUI_ROOT}/widgets/linkaudiostreamswidget.cpp
+    ${GUI_ROOT}/widgets/linkvisibilitytoggle.cpp
     ${GUI_ROOT}/widgets/tutorialpane.cpp
     ${GUI_ROOT}/widgets/sonicpiscintilla.cpp
     ${GUI_ROOT}/widgets/sonicpilexer.cpp
@@ -123,7 +144,8 @@ endif()
 )
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE
-    SP_ROOT="${SP_APP_ROOT}/..")
+    SP_ROOT="${SP_APP_ROOT}/.."
+    SONIC_PI_PLUGINS=$<BOOL:${CLOCKWORK_PLUGINS}>)   # as the GUI's (gui/CMakeLists.txt)
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
     sonic-pi-api

@@ -256,6 +256,7 @@ public slots:
     void onMixerSettings(double drive, double outputVolume);
     void onAudioSwitchDone(const SonicPi::AudioSwitchOutcome& outcome);
     void onAudioDeviceReopenReply(bool accepted, QString reason);
+    void onAudioStateChanged(const QString& state, const QString& reason);   // the engine's own fallback: say where the sound went
     void changeBufferSize(int size);
     void resetAudioDevice();
 
@@ -276,6 +277,7 @@ private:
     // startup never finished (see audioBootDecision); say so once we are up.
     bool m_audioPrefsSkippedAtBoot = false;
     bool m_audioDevicesSeen = false;
+    bool m_announceDeviceAfterRollback = false;   // the next device list names where the engine's fallback went
     bool m_audioInputDevicesSeen = false;
     bool m_audioDeviceConfigSeen = false;
     SonicPi::AudioDevicesInfo      m_lastAudioDevices;
@@ -536,6 +538,12 @@ private slots:
     // Status-bar message that is also spoken — for state changes whose only
     // other feedback is visual.
     void showStatusAndAnnounce(const QString& message, int timeoutMs = 2000);
+    // A code card's code (the Cards tab's, the docs'): into the editor at the
+    // cursor, previewed there while its Add is hovered, onto the clipboard.
+    void insertCardCode(const QString& title, const QString& code);
+    void previewCardCode(const QString& title, const QString& code);
+    void cancelCardPreview();
+    void copyCardCode(const QString& title, const QString& code);
     void updateRecordingUI();
     void addMenuBarMnemonics();
     // Reveal the Help dock and bring its tab strip to the Docs tab.
@@ -602,6 +610,9 @@ private slots:
     void setMidiPortEnabled(QString direction, QString name, bool enabled);
     void setGamepadDeviceEnabled(QString name, bool enabled);
     void honourPrefs();
+    // An engine is ready: on first boot, and after every restart. The panels
+    // that talk to it catch up with it here.
+    void onEngineReady();
 
     // Toggle the bottom Help/Debug dock (double-clicking the divider bar).
 
@@ -667,8 +678,6 @@ private:
 #if defined(Q_OS_MAC) || defined(Q_OS_WIN)
     // A+V session-recorder branch of toggleRecording. Write to a temp
     // file; rename or delete it once the user picks a save location.
-    void onAudioStateChanged(const QString& state, const QString& reason);   // the engine's own fallback: say where the sound went
-    bool m_announceDeviceAfterRollback = false;
     void startSessionRecordingFlow();
     void stopSessionRecordingFlow();
     void recordingFailed(const QString& reason);   // the recorder could not start or died: Record goes back
@@ -758,6 +767,7 @@ private:
     QStringList tutorialJsonPaths; // sorted generated chapter JSON, row-aligned with the Tutorial help list
     QStringList examplePaths;      // qt-doc glob order, row-aligned with the Examples help list
     QStringList exampleTitles;
+    QStringList exampleBlurbs;     // each card's line, as the web's Examples page has it
     // Generated reference docs (loaded lazily from etc/doc/generated/native)
     QVector<SonicPi::InstrumentPage> synthDocPages;
     QVector<SonicPi::InstrumentPage> fxDocPages;

@@ -31,6 +31,8 @@
 #include <QLabel>
 #include <QKeyEvent>
 #include <QTimer>
+#include "utils/framepacer.h"
+#include "utils/opaque.h"
 #include <QElapsedTimer>
 #include <QFocusEvent>
 #include <QMouseEvent>
@@ -95,7 +97,7 @@ static const int kFlashHoldMs = SonicPi::kFlashHoldMs;
 // box colour follows signal level (grey when silent). Mouse-transparent,
 // no focus. SonicPiScintilla owns positioning and polling via its shared
 // timer.
-class LiveLoopScopeWidget : public QWidget
+class LiveLoopScopeWidget : public SonicPi::KeptOpaque<QWidget>
 {
 public:
     // Analysis sizes: last 512 samples of the tap, 20 log-spaced bars.
@@ -117,11 +119,25 @@ public:
         update();
     }
 
+    // Opaque (KeptOpaque): every pixel of the rectangle is painted here,
+    // over what the editor would have drawn (setBase), so Qt never repaints
+    // the editor beneath the scope — a repaint that walked the whole widget
+    // tree on every frame of every live loop.
     explicit LiveLoopScopeWidget(QWidget* parent)
-        : QWidget(parent)
+        : SonicPi::KeptOpaque<QWidget>(parent)
     {
         setAttribute(Qt::WA_TransparentForMouseEvents, true);
         setFocusPolicy(Qt::NoFocus);
+    }
+    // What the editor draws under this rectangle: its paper, or the caret
+    // line's colour while the header is the current line. The editor says,
+    // as it positions the scope.
+    void setBase(const QColor& base)
+    {
+        if (m_base == base)
+            return;
+        m_base = base;
+        update();
     }
 
     ~LiveLoopScopeWidget() override
@@ -130,11 +146,15 @@ public:
             kiss_fftr_free(m_fftCfg);
     }
 
-    void setReader(const shm_scope_stream_reader& r)
+    void setReader(const shm_tap_stream_reader& r)
     {
         m_reader = r;
         m_lastEnd = 0;
-        m_wasLive = false;
+        // A slot already live counts; and its count, noted now, says later
+        // whether it went live between two polls, or while this buffer was
+        // hidden and polling nothing.
+        m_wasLive = r.valid();
+        m_activations = r.activations();
         m_released.invalidate();
     }
 
@@ -159,8 +179,9 @@ public:
     {
         if (!m_reader.valid())
         {
-            if (m_wasLive)
+            if (m_wasLive || m_reader.activations() != m_activations)
             {
+                m_wasLive = true;
                 if (!m_released.isValid())
                     m_released.start();
                 else if (m_released.elapsed() >= kReleasedGraceMs)
@@ -191,7 +212,7 @@ public:
         // it used (sizing from a separate channels() read would race a slot
         // re-activation).
         const int window = m_scroll ? kScrollWindow : kSweepWindow;
-        m_scratch.resize((size_t)window * SHM_SCOPE_STREAM_CHANNELS);
+        m_scratch.resize((size_t)window * SHM_TAP_STREAM_CHANNELS);
         uint32_t ch = 1;
         if (m_scroll)
         {
@@ -236,6 +257,7 @@ protected:
     void paintEvent(QPaintEvent*) override
     {
         QPainter p(this);
+        p.fillRect(rect(), m_base.isValid() ? m_base : palette().base().color());
         p.setRenderHint(QPainter::Antialiasing, true);
         const qreal w = width();
         const qreal h = height();
@@ -320,6 +342,8 @@ protected:
                 p.fillPath(band, fill);
                 QPen edgePen(wave);
                 edgePen.setWidthF(1.0);
+                edgePen.setJoinStyle(Qt::BevelJoin);
+                edgePen.setCapStyle(Qt::FlatCap);
                 p.setPen(edgePen);
                 p.drawPath(band);
             }
@@ -345,10 +369,13 @@ protected:
                 fill.setAlpha(60);
                 p.fillPath(body, fill);
 
+                // Bevel joins and flat caps: on a 1.6px line a round join is
+                // invisible, and the stroker has no arc to build at each of
+                // the hundreds of points.
                 QPen wavePen(wave);
                 wavePen.setWidthF(1.6);
-                wavePen.setJoinStyle(Qt::RoundJoin);
-                wavePen.setCapStyle(Qt::RoundCap);
+                wavePen.setJoinStyle(Qt::BevelJoin);
+                wavePen.setCapStyle(Qt::FlatCap);
                 p.setPen(wavePen);
                 p.drawPath(line);
             }
@@ -438,6 +465,7 @@ private:
         }
     }
 
+    QColor m_base;   // the editor's colour beneath (setBase)
     QColor m_wave;
     QColor m_quiet;
     QColor m_panel;
@@ -452,11 +480,12 @@ private:
     static constexpr int kReleasedGraceMs = 2000;
     bool m_scroll = false;
     bool m_wasLive = false;          // the slot has been live since this reader was set
+    uint32_t m_activations = 0;      // the slot's count of live spells when it was set
     QElapsedTimer m_released;        // how long it has been released, once it was live
     SonicPi::SonicPiAPI* m_api = nullptr;
     uint64_t m_lastEnd = 0;
     std::vector<float> m_scratch;
-    shm_scope_stream_reader m_reader;
+    shm_tap_stream_reader m_reader;
     kiss_fftr_cfg m_fftCfg = nullptr;
     std::vector<kiss_fft_scalar> m_fftIn;
     std::vector<kiss_fft_cpx> m_fftOut;
@@ -700,7 +729,7 @@ SonicPiScintilla::SonicPiScintilla(SonicPiLexer* lexer, SonicPiTheme* theme, QSt
     // changed: SCN_UPDATEUI covers edits and both scroll axes in one hook, and
     // the pill reports its own moves/resizes (zoom, viewport reshapes).
     connect(this, &QsciScintillaBase::SCN_UPDATEUI, this,
-            [this](int) { updateEditorToolbarOcclusion(); });
+            [this](int) { updateEditorToolbarOcclusion(); placeLiveLoopScopesSoon(); });
     connect(m_editorToolbar, &EditorToolbar::geometryChanged, this,
             &SonicPiScintilla::updateEditorToolbarOcclusion);
     // Keep the highlights and counter live while the buffer is edited — but
@@ -1186,7 +1215,7 @@ void SonicPiScintilla::setLiveLoopScopeScroll(bool scroll)
 }
 
 void SonicPiScintilla::setLiveLoopScope(const QString& name, int runLine, int scopeNum,
-                                        const shm_scope_stream_reader& reader)
+                                        const shm_tap_stream_reader& reader)
 {
     // A slot belongs to one loop: a scope left on it by a loop that has gone
     // without saying so would otherwise draw this one's audio.
@@ -1203,6 +1232,7 @@ void SonicPiScintilla::setLiveLoopScope(const QString& name, int runLine, int sc
         w = new LiveLoopScopeWidget(viewport());
         w->setObjectName(QStringLiteral("liveLoopScope:") + name);
         w->setScroll(m_loopScopeScroll);
+        w->raise();   // above the editor's other children, once
         m_loopScopes[name] = w;
     }
     w->setReader(reader);
@@ -1211,16 +1241,20 @@ void SonicPiScintilla::setLiveLoopScope(const QString& name, int runLine, int sc
     m_loopScopeSlots[name] = scopeNum;
     applyLoopScopeColours();
 
-    if (!m_loopScopeTimer)
+    // The scopes tick off the one frame pacer every animated thing shares,
+    // held while any scope lives. The stream is lossless at any poll rate,
+    // so the rate is the display's; a tick reads the streams only, and the
+    // scopes are placed when something moves a line (SCN_UPDATEUI), not on
+    // every tick.
+    if (!m_loopScopesPaced)
     {
-        m_loopScopeTimer = new QTimer(this);
-        connect(m_loopScopeTimer, &QTimer::timeout, this, [this]() {
-            // Hidden tab / minimized window: skip the per-scope Scintilla
-            // position queries and stream reads. The ring overwrites itself,
-            // so nothing backs up while polling is skipped.
+        m_loopScopesPaced = true;
+        SonicPi::FramePacer::instance()->retain();
+        m_loopScopeTick = connect(SonicPi::FramePacer::instance(), &SonicPi::FramePacer::tick, this, [this]() {
+            // Hidden tab / minimized window: skip the stream reads. The ring
+            // overwrites itself, so nothing backs up while polling is skipped.
             if (!isVisible())
                 return;
-            positionLiveLoopScopes();
             QStringList gone;
             for (auto it = m_loopScopes.constBegin(); it != m_loopScopes.constEnd(); ++it)
                 if (it.value()->poll())
@@ -1229,10 +1263,6 @@ void SonicPiScintilla::setLiveLoopScope(const QString& name, int runLine, int sc
                 endLiveLoopScope(name);
         });
     }
-    // 16ms is purely the display frame rate: the stream is lossless at any
-    // poll rate, so this trades smoothness against repaint cost only.
-    if (!m_loopScopeTimer->isActive())
-        m_loopScopeTimer->start(16);
     positionLiveLoopScopes();
 }
 
@@ -1259,8 +1289,8 @@ void SonicPiScintilla::endLiveLoopScope(const QString& name)
         w->deleteLater();
     m_loopScopeLines.remove(name);
     m_loopScopeSlots.remove(name);
-    if (m_loopScopes.isEmpty() && m_loopScopeTimer)
-        m_loopScopeTimer->stop();
+    if (m_loopScopes.isEmpty())
+        unpaceLiveLoopScopes();
 }
 
 void SonicPiScintilla::clearLiveLoopScopes()
@@ -1270,8 +1300,23 @@ void SonicPiScintilla::clearLiveLoopScopes()
     m_loopScopes.clear();
     m_loopScopeLines.clear();
     m_loopScopeSlots.clear();
-    if (m_loopScopeTimer)
-        m_loopScopeTimer->stop();
+    unpaceLiveLoopScopes();
+}
+
+// The last scope gone: the pacer is let go, so it stops when nothing else is
+// animating.
+void SonicPiScintilla::unpaceLiveLoopScopes()
+{
+    if (!m_loopScopesPaced)
+        return;
+    m_loopScopesPaced = false;
+    disconnect(m_loopScopeTick);
+    SonicPi::FramePacer::instance()->release();
+}
+
+SonicPiScintilla::~SonicPiScintilla()
+{
+    unpaceLiveLoopScopes();
 }
 
 // Whether `line` is the header of the live_loop called `name`: live_loop, then
@@ -1298,6 +1343,21 @@ static bool isLiveLoopHeader(const QString& line, const QString& name)
     return !(next.isLetterOrNumber() || next == '_' || next == '?' || next == '!');
 }
 
+// Scintilla reports a moved line from inside its paint. A scope is opaque, and
+// moving one there asks Qt to blit its pixels through a backing store that is
+// mid-paint, with no device: a null dereference that took the GUI down. So the
+// placing waits for the paint to finish, and a burst of reports places once.
+void SonicPiScintilla::placeLiveLoopScopesSoon()
+{
+    if (m_loopScopes.isEmpty() || m_loopScopePlacePending)
+        return;
+    m_loopScopePlacePending = true;
+    QMetaObject::invokeMethod(this, [this] {
+        m_loopScopePlacePending = false;
+        positionLiveLoopScopes();
+    }, Qt::QueuedConnection);
+}
+
 void SonicPiScintilla::positionLiveLoopScopes()
 {
     if (m_loopScopes.isEmpty())
@@ -1308,6 +1368,30 @@ void SonicPiScintilla::positionLiveLoopScopes()
     int w = ScaleWidthForDPI(230);
     int viewW = viewport()->width();
     int viewH = viewport()->height();
+    // What the editor draws beneath a scope, for it to paint over (it is
+    // opaque): the paper, or on the current line the caret line's colour,
+    // blended over the paper as Scintilla blends it. The paper is the default
+    // style's background, which the lexer set from the theme; QsciScintilla's
+    // paper() is the no-lexer one, white in every theme.
+    const long paperBgr = SendScintilla(SCI_STYLEGETBACK, (unsigned long)STYLE_DEFAULT);
+    const QColor paperColour(paperBgr & 0xff, (paperBgr >> 8) & 0xff, (paperBgr >> 16) & 0xff);
+    const int caretLine = (int)SendScintilla(SCI_LINEFROMPOSITION, SendScintilla(SCI_GETCURRENTPOS));
+    QColor caretLineColour = paperColour;
+    if (SendScintilla(SCI_GETCARETLINEVISIBLE))
+    {
+        const long bgr = SendScintilla(SCI_GETCARETLINEBACK);
+        const QColor back(bgr & 0xff, (bgr >> 8) & 0xff, (bgr >> 16) & 0xff);
+        const long alpha = SendScintilla(SCI_GETCARETLINEBACKALPHA);   // SC_ALPHA_NOALPHA: opaque
+        if (alpha >= 256)
+            caretLineColour = back;
+        else
+        {
+            const qreal t = alpha / 255.0;
+            caretLineColour = QColor::fromRgbF(paperColour.redF() + (back.redF() - paperColour.redF()) * t,
+                                               paperColour.greenF() + (back.greenF() - paperColour.greenF()) * t,
+                                               paperColour.blueF() + (back.blueF() - paperColour.blueF()) * t);
+        }
+    }
     for (auto it = m_loopScopes.begin(); it != m_loopScopes.end(); ++it)
     {
         int cur = runLineToCurrent(m_loopScopeLines.value(it.key(), -1));
@@ -1338,9 +1422,9 @@ void SonicPiScintilla::positionLiveLoopScopes()
         int x = (int)SendScintilla(SCI_POINTXFROMPOSITION, (unsigned long)0, endPos)
               + ScaleWidthForDPI(12);
         x = qBound(0, x, qMax(0, viewW - w - ScaleWidthForDPI(6)));
+        it.value()->setBase(cur == caretLine ? caretLineColour : paperColour);
         it.value()->setGeometry(x, y, w, h);
         it.value()->show();
-        it.value()->raise();
     }
 }
 
@@ -1359,7 +1443,17 @@ void SonicPiScintilla::applyLoopScopeColours()
 
 void SonicPiScintilla::flashLine(int line, bool codeWash, bool gutterDot)
 {
-    if (line < 0 || line >= lines() || !(codeWash || gutterDot))
+    if (line < 0 || !(codeWash || gutterDot))
+        return;
+    // The pulse is drawn on the frame pacer's tick, and cleared on one, so a
+    // run that flashes many lines costs one repaint per tick, shared with the
+    // scopes', not one per line.
+    SonicPi::FramePacer::instance()->defer(this, [this, line, codeWash, gutterDot] { flashLineNow(line, codeWash, gutterDot); });
+}
+
+void SonicPiScintilla::flashLineNow(int line, bool codeWash, bool gutterDot)
+{
+    if (line >= lines())
         return;
     // Re-flashing within the hold window extends the pulse: bump this line's
     // generation and only clear when the matching timer is still the latest.
@@ -1381,12 +1475,14 @@ void SonicPiScintilla::flashLine(int line, bool codeWash, bool gutterDot)
         }
     }
     QTimer::singleShot(kFlashHoldMs, this, [this, line, gen]() {
-        if (m_flashGen.value(line) == gen)
-        {
-            m_flashGen.remove(line);
-            markerDelete(line, kFlashGutterMarker);
-            clearFlashWash(line);
-        }
+        SonicPi::FramePacer::instance()->defer(this, [this, line, gen] {
+            if (m_flashGen.value(line) == gen)
+            {
+                m_flashGen.remove(line);
+                markerDelete(line, kFlashGutterMarker);
+                clearFlashWash(line);
+            }
+        });
     });
 }
 

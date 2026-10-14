@@ -19,6 +19,7 @@
 #include <QColor>
 #include <QMainWindow>
 #include <QRect>
+#include <QSize>
 #include <QString>
 #include <QWidget>
 
@@ -45,15 +46,23 @@ public:
     }
 };
 
+// No title row: a row of no height. The dock adds its title's size hint to
+// its own minimum, and a widget without a layout hints -1, which made the
+// minimum (1, -1). Qt 6.4 sets that as it is, and warns.
+class AwayDockTitle : public QWidget
+{
+public:
+    explicit AwayDockTitle(QWidget* parent = nullptr) : QWidget(parent) { setFixedHeight(0); }
+    QSize sizeHint() const override { return QSize(0, 0); }
+};
+
 inline QDockWidget* makeAwayDock(QMainWindow* window, const QString& name, Qt::DockWidgetArea area)
 {
     auto* dock = new QDockWidget(window);
     dock->setObjectName(name);
     dock->setFeatures(QDockWidget::NoDockWidgetFeatures);
     dock->setAllowedAreas(area);
-    auto* title = new QWidget(dock);   // no title row: a row of no height
-    title->setFixedHeight(0);
-    dock->setTitleBarWidget(title);
+    dock->setTitleBarWidget(new AwayDockTitle(dock));
     const bool vertical = (area == Qt::LeftDockWidgetArea || area == Qt::RightDockWidgetArea);
     dock->setWidget(new AwayDockBody(vertical ? Qt::Vertical : Qt::Horizontal, dock));
     if (vertical) dock->setFixedWidth(1);

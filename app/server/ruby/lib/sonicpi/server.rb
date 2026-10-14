@@ -103,6 +103,11 @@ module SonicPi
       # Push all incoming OSC messages to the event system
 
 
+      # Node IDs only ever count up, through every reset. /synced says the
+      # commands before it are done, not that the notifications they caused
+      # have arrived, so an old node's /n_end can come late: a new node with
+      # its number would take that end as its own. (1 is the server-info
+      # probe's; the counter starts past it.)
       @CURRENT_NODE_ID = Counter.new(1)
       @CURRENT_SYNC_ID = Counter.new(0)
       @BUFFER_ALLOCATOR = Allocator.new(num_buffers_for_current_os)
@@ -133,7 +138,14 @@ module SonicPi
         info_prom.deliver! payload
       end
       osc @osc_path_s_new, "sonic-pi-server-info", 1, 0, 0
-      server_info = info_prom.get(timeout)
+      begin
+        server_info = info_prom.get(timeout)
+      ensure
+        # The probe answers twice a second until it is freed, and only from
+        # a running graph. Free it whether it answered or not: one left
+        # behind takes node 1, and every probe after it collides.
+        osc @osc_path_n_free, 1
+      end
       raise "Timed out waiting for server info" unless server_info
       @scsynth_info = SonicPi::Core::SPMap.new({
         :sample_rate => server_info[2],
@@ -243,7 +255,6 @@ module SonicPi
       STDOUT.puts "scsynth - clear!"
       STDOUT.flush
       info "Clearing scsynth" if @debug_mode
-      @CURRENT_NODE_ID.reset!
       @osc_events.reset!
             STDOUT.puts "scsynth - clear schedule "
       STDOUT.flush
@@ -284,7 +295,6 @@ module SonicPi
       STDOUT.puts "scsynth - nuking scsynth state"
       STDOUT.flush
       @osc_events.reset!
-      @CURRENT_NODE_ID.reset!
       @CURRENT_SYNC_ID.reset!
       @AUDIO_BUS_ALLOCATOR.reset!
       @CONTROL_BUS_ALLOCATOR.reset!

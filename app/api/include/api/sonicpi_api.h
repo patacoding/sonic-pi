@@ -238,6 +238,13 @@ struct LinkAudioInputInfo
     float bufferedMs = 0.0f;
     int state = 0;
     float latencySeconds = 0.0f;
+    // What reached the engine's audio thread: frames it found missing since
+    // the audio began, times the stream was lost and found again, renders
+    // that left it a source frame or more off where it belonged, and drift.
+    int underruns = 0;
+    int resyncs = 0;
+    int warps = 0;
+    int driftPpm = 0;
 };
 
 // One plugin installed on this machine, from /clockwork/track/plugins: what
@@ -684,7 +691,7 @@ public:
     // live-loop scopes, cards, the Examples jukebox). Invalid reader if the
     // audio processor hasn't connected. Combine with AudioProcessor_GetSampleClock
     // to window the stream on what the listener is currently hearing.
-    virtual shm_scope_stream_reader AudioProcessor_GetScopeReader(unsigned int scope_num);
+    virtual shm_tap_stream_reader AudioProcessor_GetScopeReader(unsigned int scope_num);
 
     // Seqlock-consistent snapshot of the engine's sample clock (sample
     // position ↔ wall-clock DAC time). `valid` is false until the engine has

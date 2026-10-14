@@ -113,18 +113,29 @@ include(${CMAKE_CURRENT_LIST_DIR}/../cmake/supersonic.cmake)
 # never built the engine still builds it here, because the stamps are missing -
 # so this cannot produce a half-built tree, only a stale engine, and only after
 # an engine edit that a GUI-only build is explicitly not promising to see.
+#
+# OURS, and upstream has nothing equivalent: it is what makes win-build-gui-only.bat
+# a GUI-only build in the first place rather than a full engine rebuild. See
+# docs/dev-discipline.md 4.2.
 if(SONIC_PI_GUI_ONLY)
     set(SUPERSONIC_BUILD_ALWAYS OFF)
 else()
     set(SUPERSONIC_BUILD_ALWAYS ON)
 endif()
 
-# VST3 + CLAP hosting: the whole reason for the engine swap, so ON here and
-# named rather than inherited. It is an option, not a constant, because the
-# SDKs are fetched at configure time and Debian ships neither: the package
-# build (packaging/debian/rules) turns it off, and with it goes the plugin
-# bridge — the copy step below knows.
-option(CLOCKWORK_PLUGINS "Host VST3 and CLAP plugins in the engine (fetches the SDKs at configure time)" ON)
+# VST3 + CLAP hosting, on plugin tracks: off until Sonic Pi ships it, so a
+# build hosts plugins only when asked (-DCLOCKWORK_PLUGINS=ON). With it go the
+# plugin bridge (the copy step below), the GUI's Tracks tab and Spider's track
+# functions (gui/CMakeLists.txt, gui/utils/plugins.h); the release staging
+# reads it from this build's cache to know whether the bridge must ship. The
+# SDKs are fetched at configure time, and Debian ships neither: the package
+# build (packaging/debian/rules) says off too.
+#
+# NOTE FOR THIS FORK: our Windows tree asks for it explicitly - build-dev.cmd
+# passes -DCLOCKWORK_PLUGINS=ON - because plugins on plugin tracks are a feature
+# we use. Relying on this default would silently drop the plugin bridge, the
+# Tracks tab and the track functions from the next clean build.
+option(CLOCKWORK_PLUGINS "Host VST3 and CLAP plugins in the engine (fetches the SDKs at configure time)" OFF)
 #
 # PREFIX and BINARY_DIR are deliberately SHORT, and on Windows that is not
 # cosmetic. Left to itself ExternalProject builds under
@@ -248,7 +259,8 @@ endif()
 # removed so the engine cannot pick the stale one.
 #
 # No plugins, no bridge: clockwork only builds it under CLOCKWORK_PLUGINS, so a
-# build with hosting off (the Debian package) has nothing to copy.
+# build with hosting off has nothing to copy, and one an earlier build left in
+# server/native is removed, so it cannot ship with this one.
 if(WIN32)
     set(SUPERSONIC_BRIDGE_FILE "${SUPERSONIC_BRIDGE_NAME}.exe")
 elseif(APPLE)
@@ -257,7 +269,10 @@ else()
     set(SUPERSONIC_BRIDGE_FILE "${SUPERSONIC_BRIDGE_NAME}")
 endif()
 if(NOT CLOCKWORK_PLUGINS)
-    set(_ss_bridge_cmd "")
+    set(_ss_bridge_cmd
+        COMMAND ${CMAKE_COMMAND} -E rm -rf
+            "${CMAKE_CURRENT_SOURCE_DIR}/../server/native/${SUPERSONIC_BRIDGE_FILE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/../server/native/${SUPERSONIC_BRIDGE_NAME}")
 elseif(APPLE)
     set(_ss_bridge_cmd
         COMMAND ${CMAKE_COMMAND} -E rm -f
