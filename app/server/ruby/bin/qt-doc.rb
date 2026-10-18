@@ -28,6 +28,28 @@ require_relative "../lib/sonicpi/note"
 require_relative "../lib/sonicpi/chord"
 require_relative "../lib/sonicpi/scale"
 
+# ---------------------------------------------------------------------------
+# The timing extension registers its verbs into Sonic Pi's shared docs registry
+# (the @@docs class variable in DocSystem, shared by every includer), and this
+# file reads that same registry to build the help pages and the editor's
+# autocompletion list. Loading it here is what makes those verbs appear in both.
+#
+# Additive only: nothing else depends on this, and a missing extension is not an
+# error - the build simply proceeds with upstream's verbs alone.
+#
+# The app tree is checked first (installed / portable layout), then one level
+# above sonic-pi/ (a dev checkout, where the extension lives beside the checkout).
+# ---------------------------------------------------------------------------
+begin
+  _pampa_ext = [
+    File.join(SonicPi::Paths.app_path, 'server', 'ruby', 'lib', 'sonicpi', 'extensions', 'pattern', 'async.rb'),
+    File.expand_path('../../../../../extensions/pattern/async.rb', __dir__)
+  ].find { |p| File.exist?(p) }
+  require _pampa_ext if _pampa_ext
+rescue StandardError, ScriptError => e
+  STDERR.puts "[qt-doc] timing extension not loaded: #{e.class}: #{e.message}"
+end
+
 
 include SonicPi::Util
 
