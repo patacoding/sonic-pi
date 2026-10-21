@@ -679,6 +679,8 @@ export class WorkerSession {
   failures = 0;
   bridge;
   running = false;
+  /** SP-EXT(pattern): the last few hundred records, for a separate view of this session. Read by nothing here. */
+  recent = [];
   /** Link's tempo (the strip's, tap tempo's, or a program's set_link_bpm!). */
   linkBpm = 60;
 
@@ -696,6 +698,17 @@ export class WorkerSession {
     this.#call("live", { channel: channel.transferable, clock: this.#anchor() }, channel.transferList)
       .catch((e) => console.error(`the runtime's worker did not take the engine: ${e.message}`));
     engine.on?.("in", (msg) => { if (msg?.[0] === "/fail") { this.failures++; on.fail?.(msg); } });
+
+        // SP-EXT(pattern): one handle on this live session, so a separate editor (web/pattern/lab.html) can run code in THIS
+        // session and read what it emitted. It exposes methods that already exist and changes no behaviour; without it a second
+        // editor would be a second Sonic Pi rather than another view of this one.
+        globalThis.sonicPiSession = {
+          run: (code, group = 0) => this.run(code, { group }),
+          stop: () => this.stop(),
+          stopJob: (job) => this.stopJob(job),
+          status: () => this.status(),
+          recent: (n = 20) => this.recent.slice(-n),
+        };
   }
 
   #anchor() { return { ntp: this.#engine.clock.now(), wall: performance.timeOrigin + performance.now() }; }
@@ -762,7 +775,10 @@ export class WorkerSession {
       const view = new DataView(records.buffer, records.byteOffset, records.byteLength);
       for (let p = 0; p + 4 <= records.length;) {
         const n = view.getUint32(p);
-        deliver(this.#records.read(decode(records.subarray(p + 4, p + 4 + n))), this.perf, this.#on, () => this.clockNow(), (r) => this.at(r));
+        const record = this.#records.read(decode(records.subarray(p + 4, p + 4 + n)));
+        this.recent.push(record);
+        if (this.recent.length > 300) this.recent.splice(0, this.recent.length - 300);
+        deliver(record, this.perf, this.#on, () => this.clockNow(), (r) => this.at(r));
         p += 4 + n;
       }
     }
