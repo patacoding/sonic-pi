@@ -38,7 +38,9 @@ pp_cls.class_eval do
 
     pp_tracks = ($pampa_pattern_tracks ||= {})
     pp_old = pp_tracks[name]
-    pp_old[:superseded] = true if pp_old
+    # Superseding is deferred to the old track's own cycle line, and the new version starts there: the old one plays until
+    # the point the new one begins. Measured before this rule: beats 8,9,10,11 then 13 -- beat 12 missing, a one-beat hole
+    # between a track finishing and its replacement starting.
     pp_gen = ($pampa_pattern_generation = ($pampa_pattern_generation || 0) + 1)
     pp_tid = { name: name, generation: pp_gen, superseded: false, started_beat: nil, stopped: false }
     pp_tracks[name] = pp_tid
@@ -46,38 +48,51 @@ pp_cls.class_eval do
     pp_events = pat.query_arc(0r, 1r).select { |e| e.whole }
     pp_now_beat = __p.link_beat_at_time(__p.time)
     pp_start = (pp_now_beat / bar).ceil * bar          # the next bar line on the session's grid
+    # A bar already under way cannot be claimed: an event scheduled at a beat the session has passed is dropped, which is
+    # exactly the one-beat hole measured at 12.0 (the old track stopped there, the new one's first event never landed).
+    pp_start += bar if pp_start <= pp_now_beat + 0.05
+    if pp_old && pp_old[:stop_at]
+      pp_start = [pp_start, pp_old[:stop_at]].max       # never before the old version leaves
+    end
+    (pp_old[:stop_at] = pp_start) if pp_old             # it leaves exactly where this one begins
     pp_tid[:started_beat] = pp_start
 
     in_thread(name: "pampa_#{name}_#{pp_gen}") do
       pp_base = pp_start
       loop do
-        break if pp_tid[:superseded]
+        break if pp_tid[:stop_now] || (pp_tid[:stop_at] && pp_base >= pp_tid[:stop_at]) || pp_tid[:superseded]
         pp_events.each do |e|
-          break if pp_tid[:superseded]
+          break if pp_tid[:stop_now] || (pp_tid[:stop_at] && pp_base >= pp_tid[:stop_at])
           pp_at_beat = pp_base + e.whole.begin.to_f * beats
-          pp_wait = pp_at_beat - __p.beat              # pp_wait for the event's beat; never rewind the thread's time
+          # ONE coordinate system, as the desktop does with a single __change_spider_time_and_beat!(wall, beat).
+          # __p.beat is this thread's own beat; link_beat_at_time is the session's. Differencing the two mixed them and
+          # put the first event one beat late whenever a child inherited a beat from its parent (a second track, a second
+          # Run) -- which is why a single track looked exact.
+          pp_now_beat = __p.link_beat_at_time(__p.time)
+          pp_wait = pp_at_beat - pp_now_beat
           sleep pp_wait if pp_wait > 0
           __p.time = __p.link_time_at_beat(pp_at_beat)
           __p.beat = pp_at_beat
           send(use, e.value)
         end
         pp_base += beats
-        pp_wait = pp_base - __p.beat
+        pp_wait = pp_base - __p.link_beat_at_time(__p.time)
         sleep pp_wait if pp_wait > 0
       end
       pp_tid[:stopped] = true
     end
 
-    { track: name, generation: pp_gen, start_beat: pp_start.to_f, pp_events: pp_events.length }
+    { track: name, generation: pp_gen, start_beat: pp_start.to_f, pp_events: pp_events.length,
+      superseded_before: !pp_old.nil? }
   end
 
   define_method(:pstop) do |name = nil|
     pp_tracks = ($pampa_pattern_tracks ||= {})
     if name
       t = pp_tracks[name]
-      t[:superseded] = true if t
+      t[:stop_at] = 0 if t          # 0: leave at its next cycle line
     else
-      pp_tracks.each_value { |t| t[:superseded] = true }
+      pp_tracks.each_value { |t| t[:stop_at] = 0 }
     end
     nil
   end
