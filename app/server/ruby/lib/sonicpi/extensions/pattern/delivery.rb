@@ -43,7 +43,10 @@ module PampaPattern
   # ⚠️ **必须是正数** ✗ —— 0 会让 `total_beats` 算成 0 ✓（静默什么都不播 ✗）、
   # 负数会算出过去的时间 ✓。**报错而不静默** ✓。
   DEFAULT_CYCLE_BEATS = 4.0
-  CYCLE_BEATS_KEY = :pampa_cycle_beats
+  # ⚠️ **全局圈长键已删除** ✗（2026-10-21 ✓）—— 它与 loop 长度冗余 ✓，
+  #   而且是"第三层"指定同一个东西 ✗。这里只留一个**已废弃的名字** ✓，
+  #   好让文档审计/读者知道它曾经存在 ✓（代码里**不再读它** ✓）。
+  CYCLE_BEATS_KEY = :pampa_cycle_beats # 已废弃 ✗ 不再读取
 
   # ⚠️ **全局 loop 的两半** ✓（2026-10-16 用户要求 ✓：*"4/4，3/4 不同的节拍要都能支持"* ✓）：
   #
@@ -85,7 +88,8 @@ module PampaPattern
   # 优先级 ✓（**甲方案** ✓，2026-10-16 用户定 ✓）：
   #   ① `pplay(..., cycle_beats:)` ✓ —— **消费处说了算** ✓（最硬 ✓）
   #   ② **模式自带** `ppattern(..., cycle_beats:)` ✓ —— **定义处** ✓
-  #   ③ `set :pampa_cycle_beats, n` ✓ —— **全局默认** ✓
+  #   ③ **已删除** ✗：`set :pampa_cycle_beats` 不再存在（2026-10-21 ✓）——
+  #      它与 **loop 长度** 冗余 ✓，而且是**第三层**指定同一个东西 ✗（歧义 ✗）。
   #   ④ `DEFAULT_CYCLE_BEATS` = 4.0 ✓ —— 不变 ✓
   #
   # ⚠️ **为什么"定义处"比"全局"硬** ✗：用户原话是
@@ -96,13 +100,11 @@ module PampaPattern
   #
   # ⚠️ **"没指定"与"指定了 nil"要一样对待** ✓ —— `ppattern(..., cycle_beats: nil)` ✓
   # 不能把默认值锁成 nil ✓（那会让全局设置失效 ✗）。
-  def self.cycle_beats_for(opts, global = nil, declared = nil, loop_beats: nil)
+  def self.cycle_beats_for(opts, _global = nil, declared = nil, loop_beats: nil)
     if opts.key?(:cycle_beats) && !opts[:cycle_beats].nil?
       normalize_cycle_beats(opts[:cycle_beats], 'cycle_beats:')
     elsif !declared.nil?
       normalize_cycle_beats(declared, '定义处的 cycle_beats:')
-    elsif !global.nil?
-      normalize_cycle_beats(global, 'set :pampa_cycle_beats')
     elsif !loop_beats.nil?
       # ⚠️ **默认 = 全局 loop 长度** ✓（用户模型 ✓：*"先写死这个 pattern 的 cycle 长度
       # 等于全局设定的 loop 小节数"* ✓）。4/4 与 3/4 都从这里来 ✓。
@@ -242,6 +244,10 @@ end
         #   pplay ppattern("0.1 0.4 0.7").map_values { |v| ["127.0.0.1", 4561, "/graphics/uniform", "uGain", v] },
         #         use: :osc_send
         # vec3 也照写：表里多放两个数。
+        # 值就是整张参数表（与 osc_send(host, port, path, ...) 同形）。
+        # 每格都要重复 host/port/path 时不加新选项 —— 用 map_values 把前缀写一次：
+        #   ppattern([0.2, 0.4]).map_values { |v| ["127.0.0.1", 4561, "/graphics/uniform", "uGain", v] }
+        # （曾试过 prefix:/args: 前缀选项，撤掉了：只有 osc_send 用得上，却把动词专属知识塞进轨选项。）
         v = forwarded.delete(:args)
         positional = Array(v) unless v.nil?
       else

@@ -83,12 +83,34 @@ module PampaPattern
       opts[:beats_per_bar] = (beats_per_bar || PampaPattern::DEFAULT_BEATS_PER_BAR).to_f
 
       PampaPattern.normalize_cycle_beats(opts[:cycle_beats], 'cycle_beats:') if opts[:cycle_beats]
+      # ⚠️ **全局 `set :pampa_cycle_beats` 已删除** ✗（2026-10-21 ✓）
+      #   它与 loop 长度冗余 ✓，并且是"第三层"指定同一个东西 ✗（歧义 ✗）。
+      #   ⚠️ **告警而不是报错** ✓（实测教训 ✗）：时间状态**跨 run 保留** ✗ →
+      #   一次 `set` 之后**每次** `pplay` 都会撞上 ✓；若 raise ✓ 整个扩展被锁死 ✗
+      #   （用户只能 `set :pampa_cycle_beats, nil` 才恢复 ✗）→ 每次会话**响亮地说一句** ✓，仍然工作 ✓。
+      _legacy_global = (get(:pampa_cycle_beats) rescue nil)
+      unless _legacy_global.nil? || $pampa_cycle_beats_warned
+        $pampa_cycle_beats_warned = true
+        warn '⚠️ `set :pampa_cycle_beats` 已删除 ✗（与 loop 长度冗余 ✅）—— 这句被**忽略** ✅。' \
+             '要全局变长改 `set :pampa_loop_bars, n` ✅；单轨用 `pplay …, cycle_beats: n` ✅；' \
+             '单模式用 `ppattern(arr, cycle_beats: n)` ✅'
+      end
+
       opts[:cycle_beats] = PampaPattern.cycle_beats_for(
         opts,
-        (get(PampaPattern::CYCLE_BEATS_KEY) rescue nil),
+        nil,
         PampaPattern.cycle_beats_of(pattern),
         loop_beats: loop_beats
       )
+      # ⚠️ **圈长 > loop → 报错** ✓（2026-10-21 ✓）
+      #   数组是相对时间 ✓ → "一圈"就是这一圈的**总长** ✓，比 loop 长**没有意义** ✗：
+      #   以前的做法是"多出来的截断" ✗ —— 那是把**参数错误**伪装成**静音** ✗。
+      if opts[:cycle_beats] && loop_beats && opts[:cycle_beats].to_f > loop_beats.to_f + 1e-9
+        raise ArgumentError,
+              "cycle_beats（#{opts[:cycle_beats]}）不能超过 loop 长度（#{loop_beats} 拍）✗ —— " \
+              '数组是**相对时间** ✓：元素只在这**一圈**里等分 ✓，比 loop 长没有意义 ✗。' \
+              '要让整体变长请改 `set :pampa_loop_bars, n` ✅'
+      end
 
       __psrc = __pcaller_site
       spec = {
@@ -169,7 +191,7 @@ module PampaPattern
       loop_bars     = ((get(PampaPattern::LOOP_BARS_KEY) rescue nil) || PampaPattern::DEFAULT_LOOP_BARS)
       beats_per_bar = ((get(PampaPattern::BEATS_PER_BAR_KEY) rescue nil) || PampaPattern::DEFAULT_BEATS_PER_BAR)
       lb = PampaPattern.loop_beats_for(loop_bars, beats_per_bar)
-      cb = cycle_beats || (get(PampaPattern::CYCLE_BEATS_KEY) rescue nil) || lb
+      cb = cycle_beats || lb
       {
         beat: beat,
         bar: PampaPattern::Position.bar_index(beat, beats_per_bar),
@@ -474,7 +496,10 @@ end
           _evs.each_with_index do |h, i|
             break if spec[:stop]
             _pos = h.whole.begin.to_f * cb             # 圈内位置（拍）✓
-            next if _pos >= _content - 1e-9            # 内容之外：静音 ✓ / 截断 ✓
+            # ⚠️ **不再截断** ✗（2026-10-21 ✓）：数组是**相对时间** ✓ —— N 个元素把这一圈等分 ✓
+            #   → 最大位置 `(N-1)/N × 圈长` ✓ **永远 < 圈长** ✓ → "装不下"这件事**不存在** ✗。
+            #   圈长 > loop 已由 `pplay` **直接报错** ✅（相对时间下它没有意义 ✗）→ 这里不需要守卫 ✓。
+
             t = _base + _pos                           # **绝对拍** ✓（唯一的换算 ✓）
             next if t > gb + _lookahead_beats          # 超出提前量 ✓
             next if t < gb - _backstop_beats           # 太旧 ✓（不补发历史 ✓）
