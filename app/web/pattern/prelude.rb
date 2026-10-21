@@ -50,7 +50,10 @@ pp_cls.class_eval do
     pp_start = (pp_now_beat / bar).ceil * bar          # the next bar line on the session's grid
     # A bar already under way cannot be claimed: an event scheduled at a beat the session has passed is dropped, which is
     # exactly the one-beat hole measured at 12.0 (the old track stopped there, the new one's first event never landed).
-    pp_start += bar if pp_start <= pp_now_beat + 0.05
+    # A new version needs at least one beat of lead: with a hair of lead it could claim the very beat the old version was
+    # about to emit, and the engine drops one of the two -- measured as a one-beat hole. With a bar of lead instead, the
+    # old one leaves exactly where the new one begins (probed: gen1 plays 8..15, leaves at 16; gen2 starts at 16).
+    pp_start += bar if (pp_start - pp_now_beat) < 1.0
     if pp_old && pp_old[:stop_at]
       pp_start = [pp_start, pp_old[:stop_at]].max       # never before the old version leaves
     end
@@ -59,6 +62,7 @@ pp_cls.class_eval do
 
     in_thread(name: "pampa_#{name}_#{pp_gen}") do
       pp_base = pp_start
+      puts "[ptrack] #{name} gen=#{pp_gen} start=#{pp_start} inherited_beat=#{__p.link_beat_at_time(__p.time).round(3)}" if $pampa_pattern_debug
       loop do
         break if pp_tid[:stop_now] || (pp_tid[:stop_at] && pp_base >= pp_tid[:stop_at]) || pp_tid[:superseded]
         pp_events.each do |e|
@@ -71,6 +75,10 @@ pp_cls.class_eval do
           pp_now_beat = __p.link_beat_at_time(__p.time)
           pp_wait = pp_at_beat - pp_now_beat
           sleep pp_wait if pp_wait > 0
+          if $pampa_pattern_debug
+            pp_woke = __p.link_beat_at_time(__p.time)
+            puts "[ptrack] #{name} gen=#{pp_gen} target=#{pp_at_beat.round(3)} woke_at=#{pp_woke.round(3)} wait=#{pp_wait.round(3)}"
+          end
           __p.time = __p.link_time_at_beat(pp_at_beat)
           __p.beat = pp_at_beat
           send(use, e.value)
@@ -79,6 +87,7 @@ pp_cls.class_eval do
         pp_wait = pp_base - __p.link_beat_at_time(__p.time)
         sleep pp_wait if pp_wait > 0
       end
+      puts "[ptrack] #{name} gen=#{pp_gen} left at beat=#{__p.link_beat_at_time(__p.time).round(3)}" if $pampa_pattern_debug
       pp_tid[:stopped] = true
     end
 
