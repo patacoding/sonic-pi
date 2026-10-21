@@ -50,10 +50,11 @@ pp_cls.class_eval do
     pp_start = (pp_now_beat / bar).ceil * bar          # the next bar line on the session's grid
     # A bar already under way cannot be claimed: an event scheduled at a beat the session has passed is dropped, which is
     # exactly the one-beat hole measured at 12.0 (the old track stopped there, the new one's first event never landed).
-    # A new version needs at least one beat of lead: with a hair of lead it could claim the very beat the old version was
-    # about to emit, and the engine drops one of the two -- measured as a one-beat hole. With a bar of lead instead, the
-    # old one leaves exactly where the new one begins (probed: gen1 plays 8..15, leaves at 16; gen2 starts at 16).
-    pp_start += bar if (pp_start - pp_now_beat) < 1.0
+    # The lead is the RUNTIME's, not a number of mine: dev-discipline (desktop) says a delivery must never be reached by
+    # sleeping, the ahead time comes from sched_ahead, and "is there enough lead" is judged by the engine's lates, not by a
+    # comfortable-looking epsilon. So a bar is only claimable if its handover window is still open.
+    pp_lead_beats = __p.sched_ahead.to_f * SonicPi.link_bpm / 60.0
+    pp_start += bar if (pp_start - pp_now_beat) < pp_lead_beats
     if pp_old && pp_old[:stop_at]
       pp_start = [pp_start, pp_old[:stop_at]].max       # never before the old version leaves
     end
@@ -68,12 +69,12 @@ pp_cls.class_eval do
         pp_events.each do |e|
           break if pp_tid[:stop_now] || (pp_tid[:stop_at] && pp_base >= pp_tid[:stop_at])
           pp_at_beat = pp_base + e.whole.begin.to_f * beats
-          # ONE coordinate system, as the desktop does with a single __change_spider_time_and_beat!(wall, beat).
-          # __p.beat is this thread's own beat; link_beat_at_time is the session's. Differencing the two mixed them and
-          # put the first event one beat late whenever a child inherited a beat from its parent (a second track, a second
-          # Run) -- which is why a single track looked exact.
+          # The desktop rule: never sleep to the event. Wait only until the handover window opens (the event's moment
+          # minus sched_ahead), then set the thread's logical time to the event's beat and let the scheduler stamp it.
+          # ONE coordinate system throughout: link_beat_at_time(p.time) is the session beat of this thread's now.
+          pp_hold_beat = __p.link_beat_at_time(__p.link_time_at_beat(pp_at_beat) - __p.sched_ahead)
           pp_now_beat = __p.link_beat_at_time(__p.time)
-          pp_wait = pp_at_beat - pp_now_beat
+          pp_wait = pp_hold_beat - pp_now_beat
           sleep pp_wait if pp_wait > 0
           if $pampa_pattern_debug
             pp_woke = __p.link_beat_at_time(__p.time)
@@ -84,7 +85,8 @@ pp_cls.class_eval do
           send(use, e.value)
         end
         pp_base += beats
-        pp_wait = pp_base - __p.link_beat_at_time(__p.time)
+        pp_hold_beat = __p.link_beat_at_time(__p.link_time_at_beat(pp_base) - __p.sched_ahead)
+        pp_wait = pp_hold_beat - __p.link_beat_at_time(__p.time)
         sleep pp_wait if pp_wait > 0
       end
       puts "[ptrack] #{name} gen=#{pp_gen} left at beat=#{__p.link_beat_at_time(__p.time).round(3)}" if $pampa_pattern_debug
