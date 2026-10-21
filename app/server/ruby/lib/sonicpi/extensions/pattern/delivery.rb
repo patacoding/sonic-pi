@@ -177,12 +177,43 @@ forwarded = opts.reject { |k, _| CONTROL_KEYS.include?(k) }
 #   模式和用户都想管 `note` ✓ → merge 之后**用户的信号消失** ✓，**不报错** ✗。
 #   那正是本项目一路在打的那种错 ✓（**静默失效** ✗）。
 #   **要么用户不写 ✓，要么换个键** ✓（比如音高用模式、音量用 `amp:` ✓）。
-if forwarded.key?(map_to) && forwarded[map_to] != value
+if map_to != :args && forwarded.key?(map_to) && forwarded[map_to] != value
   raise ArgumentError,
         "参数 #{map_to.inspect} 同时来自**模式的值**和**你手写的键**（#{forwarded[map_to].inspect}）。" \
         "要么去掉手写的 #{map_to}:，要么用 `map:` 指定别的键"
 end
-forwarded = forwarded.merge(map_to => value)
+
+# ⚠️⚠️ **值是"参数字典"时，键直接并入参数** ✓
+#   （规格 docs/plan/pattern-combine-spec.md §4 ✓，2026-10-21 实现 ✓）
+#
+#   * 键 = 参数名 ✓，**不设白名单** ✓（插件参数也走这里 ✓）
+#   * **与手写键冲突 → 报错** ✓（决定 5 ✓，不静默覆盖 ✗）
+#   * **配合 `map:` → 报错** ✓（字典自己带着键 ✓，`map:` 无意义 ✓）
+if value.is_a?(Hash)
+  # ⚠️ **只拒绝"用户显式给"的 `map:`** ✗ —— `pplay` 会**预填默认值** ✓
+  #   （`opts[:map] = default_map_for(...)` ✓）→ 直接判 `opts.key?(:map)` 会把默认值当显式 ✗
+  #   （2026-10-21 第一次真机跑就被判据抓到 ✓：`map:` 误报 ✓）。
+  if opts[:map] && opts[:map] != default_map_for(opts[:use])
+    raise ArgumentError,
+          '值是逐事件参数（Hash）时不能再用 `map:` —— 字典的键就是参数名。去掉 `map:` 即可'
+  end
+  dict = {}
+  value.each do |k, v|
+    sym = k.is_a?(Symbol) ? k : (k.respond_to?(:to_sym) ? k.to_sym : nil)
+    raise ArgumentError, "逐事件参数的键要是符号或字符串（收到 #{k.inspect}）" if sym.nil?
+    dict[sym] = v
+  end
+  dup = dict.keys.select { |k| forwarded.key?(k) }
+  unless dup.empty?
+    raise ArgumentError,
+          "参数 #{dup.map(&:inspect).join(' ')} 同时来自**逐事件参数**和**你手写的键**" \
+          "（手写的：#{dup.map { |k| "#{k}=#{forwarded[k].inspect}" }.join(' ')}）。" \
+          '要么去掉手写的那个键，要么去掉字典里的同名键'
+  end
+  forwarded = forwarded.merge(dict)
+else
+  forwarded = forwarded.merge(map_to => value)
+end
 
 
     # ⚠️⚠️ **位置参数由引擎的签名决定** ✓ —— **不再按动词写分支** ✗。
@@ -198,9 +229,19 @@ forwarded = forwarded.merge(map_to => value)
     sig = PampaPattern::VERB_SIGNATURES[verb]
     if sig && sig[:pos]
       if sig[:pos].include?(:args)
-        # ⚠️ **`args` 是那个"整个位置参数表"的口** ✓ —— 上游把它声明成 `[:args, :list]` ✓
-        # （`osc_send(hostname, port, path, args)` ✓）。我们的值就是**一张表** ✓
-        # （`["127.0.0.1", 4560, "/x", 7]` ✓）→ **整张表当位置参数** ✓。
+        # args 是"变长参数口"（上游声明成 [:args, :list]）。
+        #
+        # 2026-10-21 修的真缺口：原来 positional = Array(值)，hostname/port/path 留在关键字里，
+        # 实际调用变成 osc_send(["uGain", 0.5], hostname: …)，图形那条 OSC 发不出去。
+        #
+        # 最终定案：值就是整张参数表，与 osc_send("127.0.0.1", 4590, "/x", v) 完全同形。
+        # 我中途试过"hostname/port/path 写选项 + args: 当前缀 + 值追加"，然后撤掉了，理由：
+        #   args: 是 osc_send 自己的参数名，借它表示"前缀"就是同一符号两种意思，
+        #   与"方括号三种意思"是同一个病。
+        # 写法：
+        #   pplay ppattern("0.1 0.4 0.7").map_values { |v| ["127.0.0.1", 4561, "/graphics/uniform", "uGain", v] },
+        #         use: :osc_send
+        # vec3 也照写：表里多放两个数。
         v = forwarded.delete(:args)
         positional = Array(v) unless v.nil?
       else
@@ -265,12 +306,65 @@ forwarded = forwarded.merge(map_to => value)
   # `at` 是**这条事件的中点**（第三阶段之后才有 ✓，可为 nil ✓）——
   # 参数里的**连续信号**要用它求值 ✓（第四阶段 ✓，见下 `resolve_signals` ✓）。
   def self.deliver(receiver, value, opts, at = nil)
+    # PVal = 一个值、里面一组数 -> 先拆开
+    #   拆开之后：play 走"逐音发"、osc_send 走"整表" —— 都用已有分支，不新增语义。
+    value = value.list if value.is_a?(PVal)
+
+    # ⚠️⚠️ **休止 = 位置在、声音没有** ✓（2026-10-21 用户纠正 ✗）
+    #
+    #   combine 的层里，`"57 ~ 60"` 的中间是 `Mini::REST` ✓ ——
+    #   它是**一个事件位置** ✓（对齐要用 ✓），但**不该发声** ✓。
+    #   * 整组都是休止 → **什么都不发** ✓；
+    #   * 映射到**位置参数**的那个键是休止 → **跳过这条** ✓（否则 `play(amp: …)` 缺音高 ✗）。
+    if value.is_a?(Hash)
+      rest = Mini::REST
+      live = value.reject { |_, v| v.equal?(rest) }
+      return nil if live.empty?
+      sig0 = PampaPattern::VERB_SIGNATURES[opts[:use].to_sym]
+      pos0 = (sig0 && sig0[:pos]) || []
+      first_key = pos0.find { |k| value.key?(k) }
+      return nil if first_key && value[first_key].equal?(rest)
+      value = live
+    elsif value.equal?(Mini::REST)
+      return nil
+    end
+
     verb, args, positional = call_for(value, opts)
     args = resolve_signals(args, at) if at
     unless receiver.respond_to?(verb)
       raise ArgumentError, "动词不存在：#{verb.inspect}（use: #{opts[:use].inspect}）"
     end
-  result = receiver.public_send(verb, *positional, **args)
+    # ⚠️⚠️ **"一组音" → 逐个发** —— 插件轨的和弦靠这个。
+    #
+    #   为什么需要：插件轨的动词是 `track_midi(note, …)`，**一次一个音**；
+    #   而 `pchord` 给的值是**一组音**（`[57, 60, 64]`）。
+    #   mini 里也**没有**"一小节内同时 N 个值"的写法
+    #   （实测：`[57 60 64]` 是**琶音**，1.33 拍一个；`[57,60,64]` 变成**一个字符串**）。
+    #   所以在投递层展开：**动词的第一个位置参数是 `:note` 且值是数组** → 每个音各发一次
+    #   （同一时刻 → 就是和弦）。
+    #
+    #   ⚠️ 只对"音符位"生效 —— 别的动词要数组当数组用
+    #   （`osc_send` 的参数就是一串，不能被拆）。
+    _sig = PampaPattern::VERB_SIGNATURES[verb.to_sym]
+    _first = _sig && _sig[:pos] ? _sig[:pos].first : nil
+    if _first == :note && positional.first.is_a?(Array)
+      _rest = positional[1..] || []
+      _results = positional.first.map do |_n|
+        _r = receiver.public_send(verb, _n, *_rest, **args)
+        if _r.class.name.to_s.end_with?('BlankNode')
+          warn "[pplay] 没响：use=#{opts[:use].inspect} 值=#{_n.inspect} 被 Sonic Pi 跳过（名字不存在？）"
+        end
+        _r
+      end
+      return _results.last
+    end
+    # ⚠️ **把"这次到底发了什么参数"写进 log** ✓（2026-10-21 ✓）
+    #   用户的原则 ✓："log 输出才是安全的锚点" ✓ —— 逐事件多参数必须能从 log 核对 ✓，
+    #   否则"每个事件参数不同"就只能靠猜 ✗。
+    if $pampa_pattern_debug
+      warn format('[pdeliver] %s pos=%s args=%s', verb, positional.inspect, args.inspect)
+    end
+    result = receiver.public_send(verb, *positional, **args)
   # ⚠️⚠️ **`BlankNode` = Sonic Pi 把这一下跳过了** ✗（2026-10-16 实测）：
   #   `sample :bd`（不存在的名字）→ `resolve_sample_path` 为 nil → 返回 `BlankNode` → **完全没声音**；
   #   `sample :bd_haus`（真名字）→ 返回 `LazyNode` → 真发声。

@@ -70,29 +70,133 @@ module PampaPattern
     # ⚠️ 这个函数**是必须的** ✓ —— 第一版漏了它 ✗，注入的代码一跑就报
     # `Sonic Pi doesn't know a function called 'ppattern'` ✓（引擎的报错很帮忙，直接点名 ✓）。
     # 教训：**规格里列出的动词一个都不能少** ✗ —— 否则用户写的第一个字就用不了 ✗。
-    def ppattern(spec, cycle_beats: nil)
-      # ⚠️ **`cycle_beats:` 是"定义处指定圈长"** ✓（2026-10-16 用户要的"更好"那一层 ✓）。
-      # 它**只挂一个标记** ✓ —— 事件与查询**一点不变** ✓（见 `Pattern#pampa_cycle_beats` ✓）。
-      # 优先级：`pplay(cycle_beats:)` > **这里** > `set :pampa_cycle_beats` > 4.0 ✓。
+    # 一组字面值当**一个**值（和弦 / vec3 那种）
+    #
+    #   `ppattern([pval(57, 60, 64)])`                # → 1 个事件、值是 [57,60,64]
+    #   `ppattern([pval(57,60,64), pval(60,64,72)])`  # → 2 个事件（和弦演进）
+    def pval(*vals)
+      raise ArgumentError, 'pval 至少要一个值' if vals.empty?
+      PVal.new(vals)
+    end
+
+    # 造一条轨：**数组 = 节奏树**（嵌套 = 细分；nil / "~" 休止；pval 多值；字符串 = 一个事件的值）
+    #
+    #   ppattern(["c2", "e2", "g2"])            # 3 个事件（均分一圈）
+    #   ppattern([["bd","sd"], "hh"])           # 前半圈两个、后半圈一个（嵌套 = 细分）
+    #   ppattern(["bd", "~", "sd", nil])        # 4 个位置，2 个休止
+    #   ppattern([pval(57, 60, 64)])            # 1 个事件，值是一组数
+    #   ppattern("c2")                          # 1 个事件（字符串里有空白/记号会报错）
+    def ppattern(spec, cycle_beats: nil, __keep_rests: false)
+      # ⚠️ **`cycle_beats:` 只挂一个标记** ✓（不改事件 ✗）
+      # 优先级：`pplay(cycle_beats:)` > 这里 > `set :pampa_cycle_beats` > 4.0 ✓
       if cycle_beats && !cycle_beats.is_a?(Numeric)
         raise ArgumentError, "`cycle_beats:` 要数字（收到 #{cycle_beats.inspect}）"
       end
       PampaPattern.normalize_cycle_beats(cycle_beats, 'ppattern 的 cycle_beats:') if cycle_beats
 
-      pat = if spec.is_a?(Pattern)
-              spec
-            else
-              case spec
-              when String then Mini.pattern(spec)
-              when Array  then Mini.pattern(spec.map(&:to_s).join(" "))
-              else raise ArgumentError, "ppattern 需要字符串、数组或 Pattern，收到 #{spec.class}"
+      pat = case spec
+            when Pattern then spec
+            when Array   then __ptree(spec)
+            when PVal
+              _pv = spec
+              Pattern.new { |b, e| [Hap.new(0r..1r, b..e, _pv)] }
+            when String
+              # ⚠️⚠️ **字符串 = 一个事件的值** ✓（2026-10-21 API 切换 ✓）
+              #
+              #   以前字符串是**整条轨**（mini 语法 ✓：`"c2 e2 g2"` = 3 个事件 ✗）。
+              #   现在 ✗：字符串就是**一个值** ✓ → 要整条轨请写**数组** ✓。
+              #
+              #   ⚠️ **安全检查** ✓：字符串里出现空白 / mini 记号时**报错** ✓
+              #     （否则旧代码会**静默变成 1 个事件** ✗ —— 那种错最难查 ✗）。
+              if spec =~ /\s/ || spec =~ /[~*<>\[\],]/
+                raise ArgumentError,
+                      "字符串只表示**一个事件的值** ✗（收到 #{spec.inspect}）。" \
+                      '整条轨请写**数组**：`ppattern(["c2", "e2", "g2"])` ✓；' \
+                      '休止用 `"~"` 或 `nil` ✓；细分用**嵌套**：`ppattern([["c2","e2"], "g2"])` ✓'
               end
+              _s = spec
+              Pattern.new { |b, e| [Hap.new(0r..1r, b..e, _s)] }
+            when Hash
+              # 每事件多参数 ✓：键 = 参数名 ✓、值 = 一层 ✓
+              layers = {}
+              spec.each do |k, v|
+                key = k.is_a?(Symbol) ? k : (k.respond_to?(:to_sym) ? k.to_sym : nil)
+                raise ArgumentError, "ppattern({…}) 的键要是符号或字符串（收到 #{k.inspect}）" if key.nil?
+                if v.is_a?(Hash)
+                  raise ArgumentError,
+                        "ppattern({…}) 不允许嵌套：层 #{key.inspect} 里又放了 Hash。请把键摊平"
+                end
+                layers[key] = ppattern(v, __keep_rests: true)
+              end
+              Combine.build(layers, outer_cycle_beats: cycle_beats)
+            else
+              raise ArgumentError, "ppattern 需要数组、字符串、Hash、PVal 或 Pattern，收到 #{spec.class}"
             end
 
-      # ⚠️ **已在别处带了标记的模式，不要被"nil"覆盖掉** ✗ —— 否则
-      # `ppattern(ppattern("x", cycle_beats: 8))` 会把 8 清掉 ✓（**静默** ✗）。
-      pat.pampa_cycle_beats = cycle_beats.to_f if cycle_beats
+      pat.pampa_cycle_beats = cycle_beats if cycle_beats
       pat
+    end
+
+    # ⚠️⚠️ **数组 = 节奏树** ✓（2026-10-21 ✓）
+    #
+    #   * N 个元素 → 这一段**等分**成 N 份 ✓
+    #   * **嵌套 = 细分** ✓：`[["bd","sd"], "hh"]` → 前半拍两个 ✓、后半拍一个 ✓
+    #     （与旧 mini 的 `"[bd sd] hh"` **逐拍相同** ✓，实测过 ✓）
+    #   * `nil` / `"~"` → 休止 ✓（**占位置** ✓、不发声 ✓）
+    #   * `pval(...)` → **一个**事件，值是一组数 ✓（和弦 / vec3 ✓）
+    #   * 其余元素 → 原样当值 ✓（**不解析** mini ✗ —— 写了 `*2` / `< >` / `[ ]` 就报错 ✓）
+    def __ptree(spec, lo = 0r, hi = 1r, out = [])
+      raise ArgumentError, 'ppattern 的数组不能为空' if spec.empty?
+      w = (hi - lo) / spec.size
+      spec.each_with_index do |el, i|
+        a = lo + w * i
+        b = a + w
+        case el
+        when Array
+          __ptree(el, a, b, out)
+        when Hash
+          raise ArgumentError,
+                'ppattern 的数组元素不能是 Hash ✗ —— Ruby 里 `{57, 60, 64}` 是 `{57=>nil, 60=>nil, 64=>nil}` ✅，' \
+                '而 `{ }` 在本 API 里表示**每事件多参数** ✅。和弦请用 `pchord(ppattern(["45:minor", "41:major"]))` ✓；' \
+                '一组字面值当**一个**值用 `pval(57, 60, 64)` ✓'
+        when PVal
+          out << [a...b, el]
+        when String
+          if el.strip == '~'               # 休止 —— 占位置、不发声
+            out << [a...b, Mini::REST]
+            next
+          end
+          if el =~ /\*\s*\d+\z/ || el =~ /[<>\[\]]/
+            raise ArgumentError,
+                  "ppattern 的数组元素是**字面值** ✗ —— #{el.inspect} 看起来是 mini 写法 ✅。" \
+                  '数组元素不解析 mini ✗：要重复写 `["hh"] * 8` ✓（乘法作用在**数组**上 ✓，不是 `["hh" * 8]` ✗）；' \
+                  '要细分用**嵌套**：`[["a","b"], "c"]` ✓'
+          end
+          out << [a...b, el]
+        when nil
+          out << [a...b, Mini::REST]       # 休止 —— 占位置、不发声
+        else
+          out << [a...b, el]
+        end
+      end
+      return out unless lo.zero? && hi == 1r   # 递归中 ✓
+      # 顶层：包成 Pattern ✓（每圈重复 ✓）
+      frags = out
+      Pattern.new do |b, e|
+        res = []
+        last = e.ceil - 1
+        (b.floor..last).each do |c|
+          frags.each do |span, val|
+            ws = c + span.begin
+            we = c + span.end
+            pb = [ws, b].max
+            pe = [we, e].min
+            next unless pb < pe
+            res << Hap.new(ws..we, pb..pe, val)
+          end
+        end
+        res.sort_by { |h| [h.part.begin, h.whole.begin] }
+      end
     end
 
     # ── 连续信号（第三阶段 ✓）──────────────────────────────────────────────────────────────
@@ -390,8 +494,24 @@ module PampaPattern
     # **不 require 上游任何文件** ✓。名字是**通用乐理记号** ✓（`major` / `minor7` / `dom7` ✓）。
     #
     # 名字写错**报错** ✓，不会静默没声音 ✗。
-    def pchord(pattern, root)
-      ppattern(pattern).chord_pitches_of(root)
+    # ⚠️⚠️ **`pchord` 只做一件事：把值翻译成音高** ✓
+    #
+    #   它是**翻译器** ✓，不是"播放器" ✗、也不是"时序" ✗：
+    #     * 时序由 `ppattern` / `parrange` 决定 ✓（§4 ✓）
+    #     * **值**由这里翻译 ✓：`"57:minor"` → `[57, 60, 64]` ✓（用 23 个和弦的音程表 ✓）
+    #
+    #   ⚠️ **根音必须写进值里** ✓（`"57:minor"` ✓ / `"e3:minor7"` ✓）——
+    #   曾经有第二个参数 `root` ✗，它在"根音会动"的进行里是**噪声** ✓（还是得每段写一次 ✗），
+    #   2026-10-19 按用户的意思**去掉了** ✗。**一个概念一条路** ✓。
+    #
+    #   ⚠️ 旧写法 `pchord(pat, 57)` 会**明确报错并给出新写法** ✓（不静默忽略 ✗）。
+    def pchord(pattern, *extra)
+      unless extra.empty?
+        raise ArgumentError,
+              "`pchord` 现在只收一个参数（模式）✓ —— 根音请写进值里：`pchord(ppattern(\"57:minor\"))` ✓" \
+              "（收到多余的 #{extra.inspect} ✓）"
+      end
+      ppattern(pattern).chord_pitches_of
     end
 
     # `pchord_names` ✓ —— **我们支持哪些和弦名** ✓

@@ -625,7 +625,13 @@ class Pattern
   # `transpose(n)`：**按半音移调** ✓
   def transpose(n)
     raise ArgumentError, "transpose 需要数字（给了 #{n.class}）" unless n.is_a?(Numeric)
-    map_values { |v| v.is_a?(Numeric) ? v + n : v }
+    map_values do |v|
+      # ⚠️ 合成后的字典值不能做数值变换 ✓（用户决定 6 ✓，规格 §11.2 ✓）
+      if v.is_a?(Hash)
+        raise ArgumentError, 'ptranspose 不能作用在逐事件参数（Hash）上；请对**各层**分别做移调'
+      end
+      v.is_a?(Numeric) ? v + n : v
+    end
   end
 
   # ⚠️ **`step` 我去掉了** ✗（原计划里有一个 ✓）—— 理由如下 ✓：
@@ -724,11 +730,52 @@ class Pattern
   # → 超过 1 的部分**没有内容** ✓ → **只有前 `1/k` 份有内容** ✓、**不重复** ✗。
   # **这正是它与 `fast` 的区别** ✓（上游文档：*"leave a gap in the remaining space of the cycle"* ✓）。
   #
-  # **公式** ✓：`fast_gap(k) = compress(0, 1/k)` ✓。
+  # **实现** ✓：**查询级**变换 ✓（照上游 `pattern.mjs:2283` 的 `qf`/`ef` 两个映射 ✓）：
+  #   * 查询窗口：`[b, e)` 先乘 `k` ✓，**再截到 1** ✓（`min(1)` ✓）；起点已经 ≥1 → **没有内容** ✓
+  #   * 事件时间：除以 `k` ✓，同样**截到 1** ✓
+  #
+  # ⚠️⚠️ 两个错都踩过 ✗（2026-10-19 ✓）：
+  #   ① 只写 `compress(0, 1/k)` ✗ —— 那是**拉伸** ✗（实测：`a b` 只出 **1** 个事件、`a` 占满一圈 ✗）
+  #   ② 写 `fast(k).compress(0, 1/k)` ✗ —— 压回去又拉长 ✗（实测：`a@0–0.5, b@0.5–1` ✗）
+  #   **都不能用"组合"表达** ✗ —— 必须像上游那样做**两个映射** ✓。
+  #   判据抓不到的原因 ✗：`test-verb-coverage` 只比"动词 ≡ 方法" ✓ → **两边一起错**就看不出来 ✗。
+  class FastGap < Pattern
+    def initialize(pat, factor)
+      @pat = pat
+      @k = factor.to_r
+      @query = lambda do |b, e|
+        out = []
+        c0 = b.floor
+        c1 = (e - Rational(1, 1_000_000)).floor
+        (c0..c1).each do |c|
+          sb = [b, c.to_r].max
+          se = [e, c + 1r].min
+          ib = (sb - c) * @k
+          ie = (se - c) * @k
+          ib = 1r if ib > 1
+          ie = 1r if ie > 1
+          next if ib >= 1 || ie <= ib
+
+          @pat.query_arc(c + ib, c + ie).each do |h|
+            nb = ((h.part.begin - c) / @k) + c
+            ne = ((h.part.end - c) / @k) + c
+            nw = h.whole && (((h.whole.begin - c) / @k) + c)..(((h.whole.end - c) / @k) + c)
+            nb = c + 1r if nb > c + 1
+            ne = c + 1r if ne > c + 1
+            next if nb >= ne
+
+            out << Hap.new(nw, nb..ne, h.value)
+          end
+        end
+        out.sort_by { |h| [h.part.begin, h.whole ? h.whole.begin : 0r] }
+      end
+    end
+  end
+
   def fast_gap(k)
     k = k.to_r
     raise ArgumentError, "fast_gap 的倍数必须 > 0（给了 #{k}）" unless k.positive?
-    compress(0r, 1r / k)
+    FastGap.new(self, k)
   end
 
   # `linger(t)` ✓：**只播一圈的前 `t` 份，并拉伸到整圈** ✓（其余静音 ✓）
@@ -771,30 +818,48 @@ class Pattern
     # 先验一次音阶名 ✓ —— 名字写错要**立刻报** ✓，而不是等到查询时才炸 ✓
     PScale.degrees_of(name)
     map_values do |v|
+      # ⚠️ 合成后的字典值不能做数值变换 ✓（用户决定 6 ✓）
+      if v.is_a?(Hash)
+        raise ArgumentError, 'pscale_to 不能作用在逐事件参数（Hash）上；请对**各层**分别做音阶映射'
+      end
       v.is_a?(Numeric) ? PScale.pitch_of(v, root, name) : v
     end
   end
 
-# `chord_pitches_of(root)` ✓：把**值当和弦名**映射成音高数组 ✓（第六阶段 ⑩ ✓）
+# `chord_pitches_of(root = nil)` ✓：把**值当和弦名**映射成音高数组 ✓（第六阶段 ⑩ ✓）
 #
 # ⚠️ **一个事件的值会是"多个音"** ✓（数组 ✓）—— 那是**和弦** ✓。
 # 非名字的值**原样通过** ✓（不崩 ✓）；名字写错**报错** ✓（不静默 ✗）。
 #
 # ⚠️ **一律从根音往上堆** ✓ —— **不做任何"聪明"的事** ✗（转位 / 就近走是 `pvoicing` ✓，
 # 它**还没实现** ✗，设计见 `docs/plan/pattern-chord-spec.md` ✓）。
-def chord_pitches_of(root)
-  root = root.to_i
-  # 先验一遍名字形态 ✓ —— 但**只在查询时才逐个报** ✓（模式里的名字可能很多 ✓）
+#
+# ## `root` 可以给 `nil` ✓ —— 那就**从每个值里自带根音** ✓
+#
+# 写法 ✓：`"57:minor"` / `"e3:minor7"` ✓（和 Strudel 的 `Am` 一个意思 ✓：根音 + 性质在一个 token 里 ✓）。
+# 于是和弦演进可以写成 ✓：
+#   `pplay parrange([4, "57:minor"], [4, "53:major"]), use: :play_chord` ✓
+# 不用为每段单独写一次 `pchord(...)` ✓。
+def chord_pitches_of
   map_values do |v|
-    next v unless v.is_a?(Symbol) || v.is_a?(String)
-    begin
-      PChord.pitches_of(root, v)
-    rescue ArgumentError
-      # ⚠️ 名字不对就**报错** ✓ —— 不静默留个字符串 ✗（那会变成"没声音也不报错" ✗）
-      raise
+    # ⚠️ 合成后的字典值不能做数值/名字变换 ✓（用户决定 6 ✓）
+    if v.is_a?(Hash)
+      raise ArgumentError, 'pchord 不能作用在逐事件参数（Hash）上；请对**各层**分别做'
     end
+    next v unless v.is_a?(Symbol) || v.is_a?(String)
+    name = v.to_s
+    # `根音:性质` —— 冒号右侧是性质，左侧是根音（MIDI 数字或音名）
+    left, sep, right = name.rpartition(':')
+    this_root = (sep.empty? || left.empty? || right.empty?) ? nil : PChord.root_to_midi(left)
+    if this_root.nil?
+      raise ArgumentError,
+            "`pchord` 的值要写成 `根音:性质`（例 `\"57:minor\"` 或 `\"e3:minor7\"`）；" \
+            "收到 #{v.inspect}"
+    end
+    PChord.pitches_of(this_root, right)
   end
 end
+
 
   # `run(n)`：**一圈里离散地走 `0..n-1`** ✓（第六阶段 ⑥ ✓）
   #
@@ -1061,6 +1126,25 @@ module PChord
     intervals_of(name).map { |i| r + i }
   end
 
+  # `根音` → MIDI 数字 ✓（`"57"` ✓ / `"e3"` ✓ / `"eb3"` ✓ / `"c#4"` ✓）
+  #
+  # ⚠️ **自己解析，不依赖上游** ✓ —— 与 `PScale` / `PChord` 的数据同一个理由 ✓：
+  #   上游的 `note` 只在 Sonic Pi 会话里存在 ✓，离线就是 `NoMethodError` ✗。
+  # ⚠️ 解析不了就**报错** ✓（不猜 ✗、不静默给 0 ✗）。
+  NOTE_BASE = { 'c' => 0, 'd' => 2, 'e' => 4, 'f' => 5, 'g' => 7, 'a' => 9, 'b' => 11 }.freeze
+  def root_to_midi(str)
+    return nil if str.nil?
+    s = str.to_s.strip.downcase
+    return s.to_i if s.match?(/\A-?\d+\z/)
+    m = s.match(/\A([a-g])([#b]?)(-?\d+)\z/)
+    return nil if m.nil?
+    semi = NOTE_BASE[m[1]]
+    semi += 1 if m[2] == '#'
+    semi -= 1 if m[2] == 'b'
+    # MIDI：C4 = 60 ✓（八度 -1 起算 ✓）→ c3 = 48 ✓，e3 = 52 ✓
+    12 * (m[3].to_i + 1) + semi
+  end
+
   # 支持哪些名字 ✓（自省用 ✓）
   def names
     INTERVALS.keys
@@ -1111,6 +1195,106 @@ module Arrange
     # ⚠️ **把编排长度记上去** ✓ —— 心跳靠它取模循环 ✓（见 `pampa_loop_cycles` 的说明 ✓）。
     __arr.pampa_loop_cycles = total
     __arr
+  end
+end
+
+# ---------------------------------------------------------------------------------------------
+# PVal：**一个值，里面是一组数**（和弦 / vec3 那种）
+#
+# 为什么要一个**标记对象**：
+#   裸数组 `[57, 60, 64]` 在 `ppattern` 里已经是"三个事件"（每个元素一个事件）。
+#   要说"一个事件、值是三个数"，就得用标记包一下。
+#   这样将来把"嵌套 = 细分"开放也不会冲突（嵌套管节奏，PVal 管值）。
+class PVal
+  attr_reader :list
+  def initialize(list)
+    @list = list.freeze
+    freeze
+  end
+  def inspect = "pval(#{@list.inspect})"
+  alias to_s inspect
+  def ==(other) = other.is_a?(PVal) && other.list == @list
+end
+
+# ---------------------------------------------------------------------------------------------
+# Combine：**每个事件多个参数** ✓（规格：docs/plan/pattern-combine-spec.md ✓）
+#
+# 一层 = 一个**单值** pattern ✓。请求某窗口时，各层分别查询 ✓，**起点集合必须完全相同** ✓
+# —— 这既是"对齐"的定义 ✓，也是用户定的**硬失败**规则 ✓（不允许不同密度 ✗）。
+#
+# ⚠️ 为什么比的是 `whole.begin` ✓（而不是 `part` / `whole.end`）✗：
+#   * `part` 会随**查询窗**被裁 ✓ —— 同一事件被不同窗裁出不同部分 ✓（这是对的 ✓），
+#     拿它比会把"窗口边界"误当成"结构不同" ✗；
+#   * `whole.end` 允许不同 ✓ —— `plinger` 之类会改长度 ✓（用户也可能对各层做了不同处理 ✓）；
+#   * **起点是"这一拍有几个事件"的唯一稳定表达** ✓。
+#
+# ⚠️ 值 = `{层名 => 值}` ✓（`Hap#value` 是任意对象 ✓ —— 这一步没有新机制 ✓）。
+module Combine
+  module_function
+
+  # `layers` = `{ Symbol => Pattern }` ✓（已在 `ppattern` 里把 String/Array/Pattern 归一 ✓）
+  # `outer_cycle_beats` = 外层显式给的圈长 ✓（nil = 没给 ✓）
+  def build(layers, outer_cycle_beats: nil)
+    raise ArgumentError, 'ppattern({…}) 至少要有 2 个键（1 个键请用普通写法）' if layers.size < 2
+    layers.each do |k, p|
+      unless p.respond_to?(:query_arc)
+        raise ArgumentError, "层 #{k.inspect} 不是 Pattern（收到 #{p.class}）"
+      end
+    end
+
+    # ── 元数据：各层不一致就报错 ✓（用户决定 7 ✓）────────────────────────────
+    marks = layers.values.map(&:pampa_cycle_beats).compact.uniq
+    if marks.size > 1 && outer_cycle_beats.nil?
+      raise ArgumentError,
+            "各层的 cycle_beats 不一致：#{layers.map { |k, p| "#{k}=#{p.pampa_cycle_beats.inspect}" }.join(' ')}。" \
+            '要么统一，要么在外层显式给 ppattern({…}, cycle_beats: N)'
+    end
+    cycles = layers.values.map(&:pampa_loop_cycles).compact.uniq
+    if cycles.size > 1
+      raise ArgumentError,
+            "各层的编排总圈数不一致：#{layers.map { |k, p| "#{k}=#{p.pampa_loop_cycles.inspect}" }.join(' ')}"
+    end
+
+    names = layers.keys
+    pats  = layers.values
+
+    # ── 查询时：逐层查、比起点、不合就报错 ✓ ────────────────────────────────
+    q = lambda do |b, e|
+      per = pats.map { |p| p.query_arc(b, e).select(&:whole).sort_by { |h| [h.whole.begin, h.whole.end] } }
+      starts = per.map { |list| list.map { |h| h.whole.begin } }
+      unless starts.uniq.size == 1
+        # 诊断必须能定位 ✓（规格 §6 ✓）
+        counts = names.zip(starts.map(&:size)).map { |k, n| "#{k}=#{n}" }.join(' ')
+        diff_at = nil
+        base = starts[0]
+        starts.each_with_index do |s, i|
+          next if i.zero?
+          diff_at = (base - s).first || (s - base).first
+          break if diff_at
+          # 数量相同但顺序不同 ✓
+          if s != base
+            s.each_index { |j| (diff_at = base[j]; break) if s[j] != base[j] }
+            break if diff_at
+          end
+        end
+        where = diff_at ? " 第一处不同在 #{diff_at}（第 #{b.floor} 圈 ✓）" : ''
+        raise ArgumentError,
+              "逐事件参数对齐失败：每层的事件数 #{counts}（查询窗 #{b}..#{e}）。#{where}\n" \
+              '如何修：让各层的事件起点完全相同；密度不同时用 psegment(信号, n) 生成等密度层'
+      end
+
+      base_list = per.first
+      base_list.each_with_index.map do |h, i|
+        val = {}
+        names.each_with_index { |k, li| val[k] = per[li][i].value }
+        Hap.new(h.whole, h.part, val)
+      end
+    end
+
+    pat = Pattern.new(&q)
+    pat.pampa_cycle_beats = outer_cycle_beats.nil? ? marks.first : outer_cycle_beats.to_f
+    pat.pampa_loop_cycles = cycles.first
+    pat
   end
 end
 
@@ -1511,8 +1695,11 @@ module Mini
       return seq(tokenize(tok[1..-2]), lo, hi)
     end
 
-    # `~` 休止：占位但不出事件 ✓
-    return [] if tok == "~"
+    # `~` 休止：**位置在** ✓（combine 里要用来对齐 ✓）；单用时不出事件 ✓
+    if tok == "~"
+      return [] unless keep_rests?
+      return [[lo...hi, REST]]
+    end
 
     # `<...>` 交替 ✓ —— **值依赖圈号** ✓（规格 §3.1 ✓）。
     #
@@ -1546,6 +1733,22 @@ module Mini
     tok.to_sym
   end
 
+  # ⚠️⚠️ **休止是一个位置** ✓（2026-10-21 用户纠正 ✗）——
+  #
+  #   我原来的处理是 `return [] if tok == "~"` ✗：休止**被丢掉** ✗ →
+  #   `{ note: "57 ~ 60", amp: "0.5 0.8 0.3" }` 变成 **2 vs 3** ✗ → 报"密度不同" ✗
+  #   → **休止符根本写不进 combine** ✗（用户："休止符怎么能不算事件" ✓）。
+  #
+  #   现在 ✓：**只在 combine 的层里**保留休止 ✓（值 = `REST` ✓）——
+  #   位置在 ✓（对齐要用 ✓）、声音没有 ✓（投递时跳过 ✓）。
+  #   `ppattern("57 ~ 60")` **单独用时**照旧 ✗ 不出休止事件 ✓（不然计数全变 ✗）。
+  REST = Object.new
+  def REST.inspect = '~'
+  def REST.to_s = '~'
+  REST.freeze
+
+  def keep_rests? = Thread.current[:pampa_mini_keep_rests] ? true : false
+
   # 把解析结果包成 Pattern：片段在**每一圈**里重复
   #
   # ⚠️ 产物形状有两种 ✓：
@@ -1553,8 +1756,15 @@ module Mini
   #   * **`Proc`** → 它吃**圈号**、吐"那一圈的片段列表" ✓ —— 交替算子用它 ✓。
   # 两者都**不引入状态** ✓：圈号来自时间本身 ✓（规格 §2.2 ✓），
   # 所以"重放同一区间得到同样结果"仍然成立 ✓（有判据 ✓）。
-  def pattern(str)
-    frags = spans(str)
+  def pattern(str, keep_rests: false)
+    # ⚠️ 开关只在**解析期**需要 ✓（`spans` 是急切求值的 ✓）
+    prev = Thread.current[:pampa_mini_keep_rests]
+    Thread.current[:pampa_mini_keep_rests] = keep_rests ? true : nil
+    frags = begin
+      spans(str)
+    ensure
+      Thread.current[:pampa_mini_keep_rests] = prev
+    end
     Pattern.new do |b, e|
       out = []
       last = e.ceil - 1

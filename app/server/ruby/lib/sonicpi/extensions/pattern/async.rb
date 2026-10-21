@@ -37,6 +37,18 @@ require_relative 'verbs-doc'
 #   Position is read from the global beat, never accumulated, so a reload at bar 7 continues
 #   at bar 7. Edits are applied lazily: `pplay` and `pstop` only mark the registry dirty, and
 #   the ticker swaps in a fresh snapshot at the start of a tick, i.e. on a grid line.
+# ⚠️⚠️ **构建戳** ✓（2026-10-21 ✓）—— 为了治"测不准"的一条根因 ✗：
+#   改了扩展代码 ✓ 但应用还开着 ✓ → 探针测的是**旧代码** ✗ ✓
+#   （我在"埋 bug 证明能红"时当场撞到 ✓：埋了 bug 判据照样绿 ✗）。
+#   把本文件的 mtime 写进 log ✓ → 探针比对 ✓ → 不一致就**重启应用** ✓。
+# ⚠️ 戳必须盖**整个扩展目录** ✓ —— 只盖本文件的话 ✓，改了 `delivery.rb` 就发现不了 ✗
+#   （2026-10-21 实测撞到 ✓：改 delivery 埋 bug，判据照样绿 ✗）。
+PAMPA_PATTERN_BUILD = (begin
+  Dir[File.join(__dir__, '*.rb')].map { |f| File.mtime(f).to_i }.max || 0
+rescue StandardError
+  0
+end) unless defined?(PAMPA_PATTERN_BUILD)
+
 module PampaPattern
   module Runtime
     # How far ahead of the global beat each tick schedules, in beats. Must stay within
@@ -51,6 +63,11 @@ module PampaPattern
     # Start (or replace) a named player. Returns `{ name: name }` immediately; the player
     # joins on the next grid line, which is the point of live coding.
     def pplay(pattern, **opts)
+      # ⚠️ **`pplay({…})` 是 `ppattern({…})` 的简写** ✓（规格 §5.2 ✓）
+      #   实测 ✓：只有花括号可用 ✓（`pplay (…)` 与 `pplay((…))` 都是 **SyntaxError** ✗；
+      #   `pplay(note: …)` 会变成**关键字参数** ✗ → 模式缺失 ✓）。
+      pattern = ppattern(pattern) if pattern.is_a?(Hash)
+
       # ⚠️ **`cycles:` 已删除** ✗（2026-10-16 ✓）—— 它从来只是**占位** ✓：
       #   心跳**从没读过它** ✗ → 写了也不会停 ✓。**假选项比没有更糟** ✗
       #   （用户以为"播 8 圈就停" ✓，实际一直响 ✓）。要停用 `pstop` ✓。
@@ -254,6 +271,7 @@ def __preconcile_at_bar
       next if s[:stop]
       next if s[:job_id].nil?
       latest = by_path[s[:src_path]]
+
       next if latest.nil?            # 这个文件还没记录过 → 不乱动
       next if s[:job_id] == latest   # 这一版还声明着 → 留着
       # ⚠️ **不在这里杀线程** ✗ —— 它杀的是"注册表里那个" ✓，而同名 `pplay` 早已把注册表
@@ -365,6 +383,20 @@ end
       #   ⚠️ **绝不写死 60** ✗（那只是默认值 ✓，用户会在 UI 上改 ✓）；
       #   ⚠️ **也不用 `use_bpm`** ✗（它只改本 buffer 的线程 ✓，与 Link 无关 ✗）。
 
+      # ⚠️⚠️ **`synth:` 要用 `use_synth` 实现** ✗（2026-10-20 用户 log 证明的 ✓）：
+      #   把 `synth: :hollow` 当**选项**传给 `play_chord` ✗ → Sonic Pi 只认
+      #   线程里的 `use_synth` ✓ → 它照样用 `:beep` ✗，而 `synth:` 被当成未知参数
+      #   强转成 `0.0` ✗（log 里就是 `synth :beep, {… synth: 0.0 …}` ✓）。
+      #   `use_synth` 是**线程本地**的 ✓ → 在 track 线程里设一次 ✓ 正好 ✓（实测见下 ✓）。
+      if opts[:synth]
+        use_synth opts[:synth]
+        # ⚠️ **往 log 里留证据** ✓ —— 用户的原则："log 输出才是安全的锚点" ✓。
+        #   这里读**线程真实的**音色 ✓（`current_synth_name` ✓），不是我们以为的那个 ✗。
+        warn "[ptrack] #{spec[:name]} synth=#{current_synth_name}"
+      end
+      # 传下去的选项里**不再带** `synth:` ✗（它不是动词的参数 ✓）
+      play_opts = opts.reject { |k, _| k == :synth }
+
       while true
         break if spec[:stop]
         # ⭐ **自己判断该不该活**（不靠外部杀 ✗）—— 任一成立就退休 ✓：
@@ -375,6 +407,11 @@ end
         _jid = spec[:job_id]
         break if _jid && (($pampa_pattern_job_by_path || {})[spec[:src_path]] || _jid) != _jid
         gb = __pglobal_beat.to_f                       # Link 的拍（现读 ✓）
+        # ⚠️ **每次 pass 取一次墙钟，和 gb 配对** ✗（2026-10-21 实测 ✓）：
+        #   `at` 原来用**每事件**的 `Time.now` ✓ → 与 pass 开头读的 `gb` 差一个 pass 的时长 ✗
+        #   → 实测相邻 `at` 与拍网格最大误差 **160 ms** ✗（debug 日志刷屏时更明显 ✓）。
+        #   现在 ✓：一次 pass 用**同一个** (gb, pass_now) 锚 ✓ → `at` 只由 `t` 决定 ✓。
+        pass_now = Time.now.to_f
         _tempo = __plink_tempo.to_f
         _beat_secs = 60.0 / _tempo                     # tempo 变了这里跟着变 ✓
         loop_idx = (gb / lb).floor
@@ -384,54 +421,100 @@ end
           warn format('[pass] loop=%d phase=%.2f t=%.3f sent=%d', loop_idx, phase, Time.now.to_f % 100, spec[:sent].to_i)
         end
 
-        # ⚠️ **一轮只排一次** —— 之前每个 pass 都重排同一轮 ✗ →
-        #   实测拍号里出现 `15.5 15.5` 与间隔 0 ✗（判据抓到的正是这个 ✓）。
-        if phase < cb
-          # ⚠️ **不能**用"一轮只排一次"做去重 ✗ —— 如果这一轮的 pass 来晚了（phase 已经 1.5 拍 ✓），
-          #   那一整轮的前半圈就**永远不再排** ✗（实测：每轮只发 4 条而非 8 条 ✗）。
-          #   去重交给**拍号集合** ✓（见下），pass 频率保持在几十毫秒 ✓。
-          # 本轨在这一轮里"该响的区间"是 [cycle_start, cycle_start + min(cb, lb)) ✓
-          hi = [cb, lb].min
-          events = PampaPattern.query_with_seed(
-            spec[:pattern], phase / cb, (hi - cycle_start + cycle_start) / cb + 1,
-            (opts[:seed] || Thread.current[:pampa_seed])   # `seed:` 真的生效了 ✓
-          ).select(&:whole)
+        # ══════════════════════════════════════════════════════════════════════
+        # **离散调度** ✓ —— 2026-10-20 重写 ✗（用户："在边界处你已经出现了多次的错误了，
+        # 底层机制难道不存在设计缺陷吗？" ✓ 说得对 ✓）
+        #
+        # 旧机制的**根本缺陷** ✗（不是运气问题 ✓）：
+        #   ① 每 50ms 用**浮点取模**重算锚点 ✓ → "边界"是模糊量 ✗ → 只能靠 epsilon 判断 ✗
+        #   ② 事件**没有离散身份** ✗ → 只能拿 `(abs*8).round` 当键 ✗ → 边界处错认 / 漏发 ✗
+        #   ③ 一条 `abs` 同时可能是"本轮内容边界" ✓、"下一轮起点" ✓ → 语义过载 ✗
+        #      → 必须写分支 ✗ → 而每一次边界 bug 都出在这分支里 ✗（已 4 次 ✓）。
+        #
+        # 新机制 ✓ —— **只有两个离散量**：
+        #   * `u`   = **轮号**（整数 ✓；普通 track 的"一轮" = 一个 loop ✓，编排 = 整段 ✓）
+        #   * `i`   = **这一轮内第几个事件**（整数 ✓，来自一圈的查询结果 ✓）
+        #   身份 = `[u, i]` ✓ → 去重**精确** ✓，不靠四舍五入 ✓、不靠 epsilon ✓。
+        #
+        # 时间 ✓：`t = u * period + pos` ✓（`pos` = 圈内位置，单位**拍** ✓）——
+        #   **没有取模** ✓、没有"当前相位" ✗ → 边界不再是特例 ✓ ✓。
+        #
+        # 排程窗口 ✓：同时看**这一轮**和**下一轮** ✓ → 下一轮的第一个事件在**本轮内**就排好 ✓
+        #   （这正是旧机制丢"每轮第一条"的根因 ✗ —— 现在结构上不可能丢 ✓）。
+        _total = (spec[:pattern].respond_to?(:pampa_loop_cycles) ? spec[:pattern].pampa_loop_cycles : nil).to_f
+        _total = 0.0 unless _total.positive?
+        _cyclic = _total.positive?
+        _period = _cyclic ? cb * _total : lb          # 一轮多少拍 ✓（普通 = loop ✓；编排 = 整段 ✓）
+        # 这一轮**内容**多长 ✓：普通 = min(圈长, loop) ✓
+        #   * 圈短 → 后面**静音** ✓（不重复 ✗）
+        #   * 圈长 → 溢出**截断** ✓
+        _content = _cyclic ? _period : [cb, lb].min
+        _lookahead_beats = 1.5 / _beat_secs           # 只排未来 1.5 秒 ✓（pstop 才取消得掉 ✓）
+        _backstop_beats = 0.015 / _beat_secs          # 太旧的（线程被饿过 ✓）不补发 ✓
+        #  ⚠️ **15 ms 而不是 100 ms** ✗（2026-10-21 实测 ✓）：100 ms 会让"已经过去 50 ms 的音"
+        #  仍然被排进去 ✓ → 实测 `ahead = −0.050` ✗（迟到 50 ms ✓，判据当场抓到 ✓）。
+        #  现在最多晚 15 ms ✓ —— 仍在音频块（~10–20 ms）量级内 ✓。
 
-          keys = (spec[:keys] ||= {})
-          if spec[:keys_loop] != loop_idx
-            spec[:keys_loop] = loop_idx
-            keys.clear
-          end
+        # 一圈的事件表**只查一次** ✓（pattern 在这个 spec 里是固定的 ✓）
+        # ⚠️ **编排要查整个周期** ✗（`[0, total)` ✓）—— 只查 `[0,1)` 会把第 2 段以后全丢掉 ✗
+        #   （2026-10-20 重写时漏了 ✓，`probe-arrangement` 当场抓到"鼓"没发 ✓）。
+        _span = _total.positive? ? _total : 1r
+        _evs = (spec[:event_table] ||= PampaPattern.query_with_seed(
+          spec[:pattern], 0r, _span,
+          (opts[:seed] || Thread.current[:pampa_seed])
+        ).select(&:whole).sort_by { |h| h.whole.begin.to_f })
 
-          events.sort_by { |h| h.whole.begin.to_f }.each do |h|
+        keys = (spec[:keys] ||= {})                   # 身份 `[u, i]` → `u`（整数 ✓ 清理时比整数 ✓）
+        _u_now = (gb / _period).floor                 # 这一轮的**整数**轮号 ✓
+
+        ((_u_now)..(_u_now + 1)).each do |u|
+          _base = u * _period                          # 这一轮的起点（拍）✓
+          next if _base > gb + _lookahead_beats        # 太远 ✓ 下次再排 ✓
+
+          _evs.each_with_index do |h, i|
             break if spec[:stop]
-            onset = h.whole.begin.to_f
-            abs = cycle_start + onset * cb
-            next if abs < cycle_start + phase - 0.001   # 已经过去了（不补发）
-            next if abs >= cycle_start + hi             # 截断 ✓
-            next if keys[(abs * 8).round]                # 这一轮已排过这一下 ✓
-            keys[(abs * 8).round] = true
-            warn "[ptrack]   发 onset=#{onset.round(3)} abs=#{abs.round(2)}" if $pampa_pattern_debug
+            _pos = h.whole.begin.to_f * cb             # 圈内位置（拍）✓
+            next if _pos >= _content - 1e-9            # 内容之外：静音 ✓ / 截断 ✓
+            t = _base + _pos                           # **绝对拍** ✓（唯一的换算 ✓）
+            next if t > gb + _lookahead_beats          # 超出提前量 ✓
+            next if t < gb - _backstop_beats           # 太旧 ✓（不补发历史 ✓）
 
-            # ⚠️⚠️ **不用 `sleep` 等待** ✗（2026-10-16 实测：睡 0.05 秒实际 1.008 秒 ✗，
-            #   且它追不上就缩短 ✗）→ **把逻辑拍设到 abs** ✓，交给 Sonic Pi 排程 ✓。
-            _now_beat = (__pglobal_beat || 0.0).to_f
+            _key = [u, i]
+            next if keys[_key]                         # 这一轮的这一个事件已排过 ✓（精确 ✓）
+            # 休止：**位置在、但不属于调度** ✓（2026-10-21 v2）
+            #   数组节奏树里 `nil` / `"~"` 是为了**对齐**占位 ✓，调度器不该为它写 log ✓、
+            #   不该计入 `sent` ✓、更不该发声 ✓ —— 这样 `[ptrack]` 的行数就是"真的发了多少" ✓。
+            next if h.value.equal?(PampaPattern::Mini::REST)
+            keys[_key] = u
+
             _ahead_s = ((__current_sched_ahead_time rescue nil) || 0.5).to_f
-            _lt = Time.now.to_f + (abs - _now_beat) * _beat_secs - _ahead_s
-            __change_spider_time_and_beat!(_lt, abs)
+            _now_s = Time.now.to_f                       # 投递瞬间（只用于 log ✓）
+            # ⚠️ **用 pass 锚算"该响的时刻"** ✗（2026-10-21 ✓）：原来用每事件的 `_now_s` ✓ →
+            #   它与 pass 开头读的 `gb` 差一个 pass 时长 ✗ → 实测相邻 `at` 抖动 **160 ms** ✗。
+            _sched_s = pass_now + (t - gb) * _beat_secs  # 这一拍**应该响**的墙钟 ✓（pass 锚 ✓）
+            _lt = _sched_s - _ahead_s
+
+            if $pampa_pattern_debug
+              warn format('[ptrack] %s 发 onset=%.3f abs=%.2f loop=%d at=%.3f now=%.3f ahead=%.3f',
+                          spec[:name], _pos / cb, t, u, _sched_s, _now_s, _sched_s - _now_s)
+            end
+
+            __change_spider_time_and_beat!(_lt, t)
             break if spec[:stop]
 
             mid = h.whole.begin.floor + 1r / 2
-            PampaPattern.deliver(spec[:receiver], h.value, opts, mid)
+            PampaPattern.deliver(spec[:receiver], h.value, play_opts, mid)
             spec[:sent] = spec[:sent].to_i + 1
             spec[:first_sent_at] ||= Time.now.to_f
-            # ⭐ 排出去的**拍号**（判据用它 ✓ —— 墙钟间隔测不出排程对不对 ✗）
-            (spec[:beats] ||= []) << abs
+            (spec[:beats] ||= []) << t
             (spec[:beats].shift; spec[:beats].shift) while spec[:beats].size > 256
             (spec[:times] ||= []) << Time.now.to_f
             spec[:times].shift while spec[:times].size > 64
           end
         end
+
+        # 只保留最近 2 轮的键 ✓（整数比较 ✓ —— 旧版拿字符串键和 Float 比 → ArgumentError → 线程死 ✗）
+        keys.delete_if { |_, u| u < _u_now - 2 }
 
         break if spec[:stop]
         # 静音段 / 本轮剩余：等到**下一条 loop 线**（重新锚 ✓）
@@ -506,4 +589,19 @@ $pampa_pattern_stop_before = 0.0
   $pampa_pattern_job_by_path = {}
 
 # 装载即注册动词文档 ✓（@@docs 共享 ✓ → qt-doc.rb 自动收 ✓；离线时静默跳过 ✓）
+# ⚠️ **把构建戳写进 log** ✓ —— 探针靠它判断"跑的是不是当前代码" ✓（2026-10-21 ✓）
+# ⚠️ **这段必须缩进** ✗（2026-10-21 ✓）：判据 `check-app-code-shape ⑩` 取
+  #   "**最后一个顶格 `end` 之后**" 当作全局初始化区 ✓ ——
+  #   我把这个 `begin/rescue/end` 写成顶格 ✓ → 它的 `end` 成了"最后一个" ✓
+  #   → 全局初始化区被算成"空" ✓ → 判据红 ✗（这条判据抓到的是**布局**问题 ✓）。
+  begin
+    warn "[ppattern] build=#{PAMPA_PATTERN_BUILD}"
+  rescue StandardError
+    nil
+  end
+# 把解析器挂到 PampaPattern 下（2026-10-21）
+# Mini 是顶层模块，用户缓冲区里看不到；而工具/判据（跑在应用里）需要旧解析器来测时序
+# —— 它们测的东西与"怎么写模式"无关。挂个别名，用户 API 不变。
+PampaPattern.const_set(:Mini, ::Mini) unless PampaPattern.const_defined?(:Mini, false)
+
 PampaPattern.register_verb_docs! if PampaPattern.respond_to?(:register_verb_docs!)
