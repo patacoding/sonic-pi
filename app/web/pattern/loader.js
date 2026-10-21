@@ -1,4 +1,4 @@
-// The loader, as a body: built into web/synth/pattern-prelude.js, where CHUNKS and META are in scope. It is not a module on
+// The loader, as a body: built into web/pattern/pattern-prelude.js, where CHUNKS and META are in scope. It is not a module on
 // its own, so it has no imports and assumes nothing but the two bindings the build puts above it.
 //
 // Contract: run(code) runs one program in the session and answers { output: [String], errors: [String] }. The runtime's own

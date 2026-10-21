@@ -10,17 +10,18 @@ untouched: every patch below is applied **inside the session**, as ordinary prog
 | `shim.rb` | The four things this runtime lacks and the library needs: `Thread.current`, `Rational#ceil/#floor/#%`, and `String#strip`. Ends with a capability check that raises once, naming what did not take, rather than letting the library fail later with a `NoMethodError` that explains nothing. |
 | `library.rb` | The desktop `pattern-lib.rb`, byte-identical (`cmp` against `extensions/pattern/pattern-lib.rb`). Kept unmodified so it can be diffed against the desktop version. |
 | `prelude.rb` | The web scheduler: `ppattern`, `pplay`, `pstop` on the language class, with state in `$pampa_pattern_*`. Two timing rules in it were measured, not guessed — see its header. |
+| `pattern-boot.js` | The visible state and the Run gate: loading n/total, ready, failed with the chunk, and `runWhenReady` which queues, runs or refuses. Built into the served root too. |
 | `loader.js` | The only loader: sends the chunks in order, reports `n/total`, probes for readiness, and can disable itself. Built into the served artifact. |
 | `README.md` | This file. |
 
 ## Where it ends up
 
 ```
-node scripts/build-pattern.mjs           # writes web/synth/pattern-prelude.js
+node scripts/build-pattern.mjs           # writes web/pattern/pattern-prelude.js
 node scripts/build-pattern.mjs --check   # fails if that file is stale
 ```
 
-`web/synth/pattern-prelude.js` is the only new file in the served root. It exists because the browser can only fetch what is
+`web/pattern/pattern-prelude.js` is the only new file in the served root. It exists because the browser can only fetch what is
 under `app/web/web/`; it contains the chunks as strings and the loader. The build also splits `library.rb` into top-level
 units, because the runtime's mruby compiler traps inside prism at roughly forty kilobytes of program and the library is
 ninety-three.
