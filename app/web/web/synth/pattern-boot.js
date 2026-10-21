@@ -1,0 +1,61 @@
+// The layer's visible state and its gate. Our file, in the served root next to the artifact; it imports only the artifact.
+//
+// What it is for: a Run that uses pattern verbs must not reach the runtime until the layer is ready, and the waiting must be
+// visible rather than a silent `undefined method 'pplay'`. Three outcomes, all observable:
+//
+//   boot()            send the chunks; each step reports loading n/total, then ready, or failed with the chunk and file
+//   runWhenReady(fn)  a Run that needs the layer: runs now if ready, waits (once) if loading, refuses with a reason if
+//                     failed or disabled -- it never runs the program into a missing language
+//   onChange(s)       one object per state change, carrying the text a status line shows
+//
+// There is no DOM here on purpose: the pipeline exercises this in Node with a fake runtime, so the gate is tested by the same
+// suite as the timing. The editor's status line and its Run button are two calls into this module.
+import { createPatternLayer, PatternStatus } from "./pattern-prelude.js";
+
+const text = (s) => {
+  switch (s.status) {
+    case PatternStatus.IDLE: return "Pattern layer: not started";
+    case PatternStatus.LOADING: return `Pattern layer: loading ${s.done}/${s.total}`;
+    case PatternStatus.READY: return "Pattern layer: ready";
+    case PatternStatus.FAILED: return `Pattern layer: failed — ${s.error}`;
+    case PatternStatus.DISABLED: return "Pattern layer: disabled";
+    default: return `Pattern layer: ${s.status}`;
+  }
+};
+
+export function createPatternUi({ run, onChange } = {}) {
+  let waiting = null;
+  const state = () => layer.state;
+  const layer = createPatternLayer({
+    run,
+    onState: (s) => {
+      onChange?.({ ...s, text: text(s) });
+      if (s.status === PatternStatus.READY && waiting) {
+        const fn = waiting;
+        waiting = null;
+        fn();
+      }
+      if ((s.status === PatternStatus.FAILED || s.status === PatternStatus.DISABLED) && waiting) waiting = null;
+    },
+  });
+
+  return {
+    state,
+    ready: () => layer.ready(),
+    boot: () => layer.load(),
+    disable: () => layer.disable(),
+    /**
+     * A Run that needs the pattern verbs. Returns one of "ran", "queued", "refused" so the caller can say which happened.
+     * Only one Run is remembered: a second Run while loading replaces the first, which is what "press Run again" means.
+     */
+    runWhenReady(fn) {
+      const s = layer.state;
+      if (s.status === PatternStatus.READY) { fn(); return "ran"; }
+      if (s.status === PatternStatus.FAILED || s.status === PatternStatus.DISABLED) return "refused";
+      waiting = fn;
+      return "queued";
+    },
+    /** for tests and for a status line that wants the raw state */
+    pending: () => !!waiting,
+  };
+}
