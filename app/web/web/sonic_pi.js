@@ -809,7 +809,8 @@ export class WorkerSession {
     if (this.pattern && !this.pattern.ready() && /(?<![A-Za-z0-9_])p(?:play|pattern|stop)\b/.test(String(code))) {
       await this.pattern.whenReady();          // rejects with the layer's reason, which the editor shows
     }
-    return this.#runNow(code, opts);
+      await this.#runNow("prun :begin");
+      try { return await this.#runNow(code, opts); } finally { this.#runNow("prun :end"); }
   }
 
   async #runNow(code, { group = 0 } = {}) {

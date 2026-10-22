@@ -35,7 +35,7 @@ pp_cls.class_eval do
   end
 
   define_method(:pplay) do |pat, use: :play, name: nil, cycle_beats: nil, align: true, cycles: nil,
-                             map: nil, sync: nil, max_pending: nil, **pp_opts|
+                             map: nil, sync: nil, max_pending: nil, synth: nil, **pp_opts|
     # The desktop API, not an invented one: the loop comes from set :pampa_loop_bars x set :pampa_beats_per_bar, a bar is
     # pampa_beats_per_bar, and a pattern's own length is cycle_beats (which may not exceed the loop). Options this build
     # does not implement are refused by name rather than ignored, because a silently ignored sync: would look like a bug
@@ -59,7 +59,8 @@ pp_cls.class_eval do
     # the point the new one begins. Measured before this rule: beats 8,9,10,11 then 13 -- beat 12 missing, a one-beat hole
     # between a track finishing and its replacement starting.
     pp_gen = ($pampa_pattern_generation = ($pampa_pattern_generation || 0) + 1)
-    pp_tid = { name: pp_track_name, generation: pp_gen, superseded: false, started_beat: nil, stopped: false }
+    pp_tid = { name: pp_track_name, generation: pp_gen, superseded: false, started_beat: nil, stopped: false,
+               token: $pampa_pattern_token }
     pp_tracks[pp_track_name] = pp_tid
 
     pp_events = pat.query_arc(0r, 1r).select { |e| e.whole }
@@ -93,6 +94,9 @@ pp_cls.class_eval do
     in_thread(name: "pampa_#{pp_track_name}_#{pp_gen}") do
       pp_base = pp_start
       puts "[ptrack] #{name} gen=#{pp_gen} start=#{pp_start} inherited_beat=#{__p.link_beat_at_time(__p.time).round(3)}" if $pampa_pattern_debug
+      # use_synth does not reach a child thread on the web (measured: a track kept playing sonic-pi-beep under
+      # use_synth :saw), so a track's synth is set where it is used.
+      use_synth synth if synth
       loop do
         break if pp_tid[:stop_now] || (pp_tid[:stop_at] && pp_base >= pp_tid[:stop_at]) || pp_tid[:superseded]
         pp_events.each do |e|
@@ -141,6 +145,19 @@ pp_cls.class_eval do
     { track: pp_track_name, generation: pp_gen, start_beat: pp_start.to_f, pp_events: pp_events.length,
       cycle_beats: pp_cycle, loop_beats: pp_loop,
       superseded_before: !pp_old.nil? }
+  end
+
+  # prun :begin / :end bracket a Run: a track a Run does not re-declare is one the buffer no longer asks for, so
+  # commenting a pplay out stops sounding instead of playing forever.
+  define_method(:prun) do |phase|
+    if phase == :begin
+      $pampa_pattern_token = ($pampa_pattern_token || 0) + 1
+    else
+      ($pampa_pattern_tracks || {}).each do |_pp_k, pp_t|
+        pp_t[:stop_at] = 0 if pp_t[:token] != $pampa_pattern_token && !pp_t[:stop_now]
+      end
+    end
+    { token: $pampa_pattern_token, tracks: ($pampa_pattern_tracks || {}).keys }
   end
 
   define_method(:pstop) do |name = nil|
