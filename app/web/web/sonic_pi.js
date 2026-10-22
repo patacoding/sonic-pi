@@ -809,16 +809,14 @@ export class WorkerSession {
     if (this.pattern && !this.pattern.ready() && /(?<![A-Za-z0-9_])p(?:play|pattern|stop)\b/.test(String(code))) {
       await this.pattern.whenReady();          // rejects with the layer's reason, which the editor shows
     }
-      // "A track the buffer no longer declares stops" the way the desktop does it: each track compares the run it was declared
-      // in with the run now current FOR ITS OWN BUFFER, and retires itself (extensions/pattern/async.rb, __ptrack_loop). The
-      // comparison needs two things the program can see, so one line goes in front of it -- no extra job, no suffix:
-      //   $pampa_group    which buffer this program belongs to (the group the app already gives it)
-      //   $pampa_run[g]   bumped once per Run of that buffer
+      // "A track the buffer no longer declares stops" without adding a job: the bookkeeping rides IN the program's own job.
+      //   prefix   pdeclared :begin;   on line 1, so a track can be stamped as it is declared
+      //   suffix   pdeclared :end      on a line of its own, so it runs after the program and prunes tracks this Run did not
+      //                                declare (they leave at their next cycle line)
+      // One job, no extra runs, nothing for Stop or the next Run to race with -- which is what the separate jobs did wrong.
       const program = String(code);
-      const group = Number(opts?.group ?? 0);
-      const usesPattern = /(?<![A-Za-z0-9_])p(?:play|pattern|stop)\b/.test(program);
-      const wrapped = usesPattern
-        ? `$pampa_group = ${group}; $pampa_run = ($pampa_run || {}); $pampa_run[${group}] = ($pampa_run[${group}] || 0) + 1; ${program}`
+      const wrapped = /(?<![A-Za-z0-9_])p(?:play|pattern|stop)\b/.test(program)
+        ? `pdeclared :begin; ${program}\npdeclared :end`
         : program;
       return this.#runNow(wrapped, opts);
   }

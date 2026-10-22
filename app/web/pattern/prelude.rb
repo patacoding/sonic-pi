@@ -62,7 +62,7 @@ pp_cls.class_eval do
     # between a track finishing and its replacement starting.
     pp_gen = ($pampa_pattern_generation = ($pampa_pattern_generation || 0) + 1)
     pp_tid = { name: pp_track_name, generation: pp_gen, superseded: false, started_beat: nil, stopped: false,
-               group: ($pampa_group || 0), run: ($pampa_run || {})[($pampa_group || 0)] }
+               token: $pampa_pattern_token }
     pp_tracks[pp_track_name] = pp_tid
 
     pp_events = pat.query_arc(0r, 1r).select { |e| e.whole }
@@ -95,9 +95,6 @@ pp_cls.class_eval do
       # use_synth :saw), so a track's synth is set where it is used.
       use_synth synth if synth
       loop do
-        # Self-retirement, as the desktop's __ptrack_loop: this track belongs to one Run of one buffer, and when that buffer has
-        # run again without declaring it, it leaves at its next cycle line. No extra jobs, no sweep: the track decides.
-        break if ($pampa_run || {})[pp_tid[:group]] != pp_tid[:run]
         break if pp_tid[:stop_now] || (pp_tid[:stop_at] && pp_base >= pp_tid[:stop_at]) || pp_tid[:superseded]
         pp_events.each do |e|
           break if pp_tid[:stop_now] || (pp_tid[:stop_at] && pp_base >= pp_tid[:stop_at])
