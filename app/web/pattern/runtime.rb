@@ -425,8 +425,17 @@ module PampaPattern
     # ⚠️ **它不做音阶映射** ✗ —— "把度数映射到音阶"是另一件事 ✓（见规格 §3 ✓）：
     # 那个要**复用 Sonic Pi 的 `scale`** ✓，而它**只能在 Sonic Pi 会话里验证** ✓，
     # 所以**单独一轮**做 ✓（不在这里悄悄塞一个没法离线验证的东西 ✗）。
+        # 数值算子（规格 §11.2 ✓）：合成（combine）后的值是参数字典 ✓ —— 对它做数值运算没有意义 ✗，
+        # 所以在任一事件的值是 Hash 时明确失败 ✗，而不是静默无效 ✓；只在某一层上用 ✓（那层的值是标量 ✓）照常可用 ✓。
+        def __pcomposite_guard!(pattern, op)
+          pat = pattern.respond_to?(:query_arc) ? pattern : ppattern(pattern)
+          return pat unless pat.query_arc(0r, 1r).any? { |h| h.whole && h.value.is_a?(Hash) }
+
+          raise ArgumentError, "#{op} 是数值算子：合成（combine）后的值是一个参数字典 —— 请在某一层上用它（规格 §11.2）"
+        end
+
     def ptranspose(pattern, n)
-      ppattern(pattern).transpose(n)
+      __pcomposite_guard!(pattern, 'ptranspose').transpose(n)
     end
 
     # `pzoom(模式, s, e)` / `pcompress(模式, b, e)` / `pfast_gap(模式, k)` / `plinger(模式, t)` ✓
@@ -477,7 +486,7 @@ module PampaPattern
     #
     # ⚠️ **支持的音阶见 `pscale_names`** ✓ —— 名字写错**立刻报错** ✓，不会静默 ✓。
     def pscale_to(pattern, root, name)
-      ppattern(pattern).scale_degrees_of(root, name)
+      __pcomposite_guard!(pattern, 'pscale_to').scale_degrees_of(root, name)
     end
 
 # `pchord(模式, 根音)` ✓ —— **把和弦名变成音高** ✓（第六阶段 ⑩ ✓）。
