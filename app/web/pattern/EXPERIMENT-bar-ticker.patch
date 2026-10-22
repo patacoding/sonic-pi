@@ -1,8 +1,8 @@
 diff --git a/app/web/pattern/prelude.rb b/app/web/pattern/prelude.rb
-index c9a1e2988..ca89c6847 100644
+index c9a1e2988..cbc2e26f2 100644
 --- a/app/web/pattern/prelude.rb
 +++ b/app/web/pattern/prelude.rb
-@@ -41,172 +41,130 @@ pp_cls.class_eval do
+@@ -41,172 +41,132 @@ pp_cls.class_eval do
  
  
    define_method(:pplay) do |pat, use: :play, name: nil, cycle_beats: nil, align: true, synth: nil, **pp_opts|
@@ -89,8 +89,10 @@ index c9a1e2988..ca89c6847 100644
 +      # The bar that is already running counts as this track's first: a track created just after a publication would otherwise
 +      # wait a whole bar, and a swap would leave a bar of silence. Before the first publication there is no beat, and the guard
 +      # below skips that pass.
-+      pp_first = true
-+      pp_seen = ($pampa_bar_seq || 0) - 1
++      # A new version waits for the NEXT bar line; the old one plays the bar it is in and leaves there, so the two abut and the
++      # loop phase is untouched (it comes from the global grid, never from the track's start -- reload must not reset the loop).
++      pp_first = false
++      pp_seen = ($pampa_bar_seq || 0)
        loop do
 -        break if pp_tid[:stop_now] || (pp_tid[:stop_at] && pp_base >= pp_tid[:stop_at]) || pp_tid[:superseded]
 -        pp_events.each do |e|
