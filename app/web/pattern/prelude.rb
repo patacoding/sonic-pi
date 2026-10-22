@@ -40,15 +40,9 @@ pp_cls.class_eval do
   # byte-for-byte with the library, so there is no second implementation to drift.
 
 
-  define_method(:pplay) do |pat, use: :play, name: nil, cycle_beats: nil, align: true, cycles: nil,
-                             map: nil, sync: nil, max_pending: nil, synth: nil, **pp_opts|
-    # The desktop API, not an invented one: the loop comes from set :pampa_loop_bars x set :pampa_beats_per_bar, a bar is
-    # pampa_beats_per_bar, and a pattern's own length is cycle_beats (which may not exceed the loop). Options this build
-    # does not implement are refused by name rather than ignored, because a silently ignored sync: would look like a bug
-    # in the music rather than a gap in the port.
-    raise NotImplementedError, "pplay's map: is not on the web yet" if map
-    raise NotImplementedError, "pplay's sync: is not on the web yet (the interface for live_loop interop)" if sync
-    raise NotImplementedError, "pplay's max_pending: is not on the web yet" if max_pending
+  define_method(:pplay) do |pat, use: :play, name: nil, cycle_beats: nil, align: true, synth: nil, **pp_opts|
+    # The desktop's own shape: pplay(pattern, **opts). It owns use:, name:, cycle_beats:, align: and synth:; every other key is
+    # passed to the verb unchanged, so Sonic Pi's own options (amp:, release:, pan:, ...) work without this layer knowing them.
     pp_bar = ((get(:pampa_beats_per_bar) || 4)).to_f
     pp_loop = ((get(:pampa_loop_bars) || 1)).to_f * pp_bar
     # The model, from the player's own two results: the cycle is cycle_beats if given, otherwise the loop; the elements divide
@@ -94,7 +88,6 @@ pp_cls.class_eval do
     (pp_old[:stop_at] = pp_start) if pp_old             # it leaves exactly where this one begins
     pp_tid[:started_beat] = pp_start
 
-    pp_cycles_seen = 0
     in_thread(name: "pampa_#{pp_track_name}_#{pp_gen}") do
       pp_base = pp_start
       puts "[ptrack] #{name} gen=#{pp_gen} start=#{pp_start} inherited_beat=#{__p.link_beat_at_time(__p.time).round(3)}" if $pampa_pattern_debug
@@ -129,8 +122,6 @@ pp_cls.class_eval do
             send(use, e.value, **pp_opts)
           end
         end
-        pp_cycles_seen += 1
-        break if cycles && pp_cycles_seen >= cycles.to_i
         # The track repeats once per loop; a cycle shorter than the loop simply fills less of it, so the rest of the loop is
         # silent (cycle_beats: 4 in an 8-beat loop: events in the first four beats, nothing in the last four). With no
         # cycle_beats the cycle is the loop and it is full.
