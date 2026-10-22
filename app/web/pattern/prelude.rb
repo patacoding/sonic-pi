@@ -45,10 +45,13 @@ pp_cls.class_eval do
     raise NotImplementedError, "pplay's max_pending: is not on the web yet" if max_pending
     pp_bar = ((get(:pampa_beats_per_bar) || 4)).to_f
     pp_loop = ((get(:pampa_loop_bars) || 1)).to_f * pp_bar
-    # The cycle is the loop unless cycle_beats: says otherwise, and the elements divide the cycle (pattern-tutorial.md lines
-    # 64 and 174). A cycle shorter than the loop sounds for its own length and then rests until the loop line: that is what
-    # cycle_beats: 2 does ["c2", "e2"] -- c2 on beat 0, e2 on beat 1, then two beats of silence.
-    pp_cycle = (cycle_beats || pp_loop).to_f
+    # Speed comes from the UI's bpm alone: one element is one beat, so raising pampa_loop_bars lengthens the loop without
+    # slowing anything down. The pattern's own length is its element count; cycle_beats: overrides that length, and because a
+    # track repeats at the loop line, a pattern shorter than the loop rests until then (["c2", "e2"] in a 4-beat loop: two
+    # notes on beats 0 and 1, then two beats of silence). A pattern longer than the loop is an error, not a truncation.
+    pp_events_peek = pat.query_arc(0r, 1r).select { |e| e.whole }
+    pp_own_beats = pp_events_peek.empty? ? pp_loop : pp_events_peek.length.to_f
+    pp_cycle = (cycle_beats || pp_own_beats).to_f
     raise ArgumentError, "cycle_beats (#{pp_cycle}) may not exceed the loop (#{pp_loop} beats)" if pp_cycle > pp_loop
     raise ArgumentError, "cycle_beats must be positive, got #{pp_cycle}" unless pp_cycle > 0
     pp_name = name || ("pattern_" + ($pampa_pattern_generation = ($pampa_pattern_generation || 0) + 1).to_s)
