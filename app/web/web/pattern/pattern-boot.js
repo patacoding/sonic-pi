@@ -26,17 +26,21 @@ const text = (s) => {
 
 export function createPatternUi({ run, onChange } = {}) {
   let waiting = null;
+  const settles = [];   // whenReady() waiters: settled by the same state changes that release a queued Run
   const state = () => layer.state;
   const layer = createPatternLayer({
     run,
     onState: (s) => {
       onChange?.({ ...s, text: text(s) });
-      if (s.status === PatternStatus.READY && waiting) {
-        const fn = waiting;
-        waiting = null;
-        fn();
+      if (s.status === PatternStatus.READY) {
+        if (waiting) { const fn = waiting; waiting = null; fn(); }
+        for (const settle of settles.splice(0)) settle.resolve();
       }
-      if ((s.status === PatternStatus.FAILED || s.status === PatternStatus.DISABLED) && waiting) waiting = null;
+      if (s.status === PatternStatus.FAILED || s.status === PatternStatus.DISABLED) {
+        if (waiting) waiting = null;
+        const why = new Error(s.error ?? `the pattern layer is ${s.status}`);
+        for (const settle of settles.splice(0)) settle.reject(why);
+      }
     },
   });
 
@@ -55,6 +59,19 @@ export function createPatternUi({ run, onChange } = {}) {
       if (s.status === PatternStatus.FAILED || s.status === PatternStatus.DISABLED) return "refused";
       waiting = fn;
       return "queued";
+    },
+    /**
+     * A promise that settles when the layer does: resolved when ready, rejected with the layer's own reason when it failed
+     * or was disabled. A Run that uses pattern verbs awaits this, so the Run is never sent into a language that is absent.
+     */
+    whenReady() {
+      if (layer.state.status === PatternStatus.READY) return Promise.resolve();
+      if (layer.state.status === PatternStatus.FAILED || layer.state.status === PatternStatus.DISABLED) {
+        return Promise.reject(new Error(layer.state.error ?? `the pattern layer is ${layer.state.status}`));
+      }
+      return new Promise((resolve, reject) => {
+        settles.push({ resolve, reject });
+      });
     },
     /** for tests and for a status line that wants the raw state */
     pending: () => !!waiting,

@@ -21,6 +21,8 @@ import { decode } from "./osc.js";
 import { createRecordReader } from "./gui-stream.js";
 import { SUPERSONIC_BASE, supersonicInfo, PROCESS_FIELDS, liveRuns, programNeeds, workerSettled, TABLES } from "./runtime.js";
 import { LiveCore, freshPerf, addPerf, countHeadroom } from "./live-core.js";
+import { createPatternUi } from "./pattern/pattern-boot.js";
+import { createSessionRun } from "./pattern/session-run.js";
 
 const STOP_FADE = 1;           // seconds a Stop fades over (Scheduler#silence)
 const TRACE_GROUP = 999;       // a trace's synths (Bridge#playTrace), by hand, clear of the runtime's own: the spec page's Stop frees them
@@ -709,6 +711,18 @@ export class WorkerSession {
           status: () => this.status(),
           recent: (n = 20) => this.recent.slice(-n),
         };
+
+        // SP-EXT(pattern): load the pattern layer into this session and let the editor's own Run use it. Its state is
+        // reported through on.pattern; a Run that uses pattern verbs waits for it (run, above). Wrapped, because a layer
+        // that fails to load must never take the editor down with it.
+        try {
+          const patternSession = { run: (code, group = 0) => this.#runNow(code, { group }), recent: (n = 50) => this.recent.slice(-n) };
+          this.pattern = createPatternUi({ run: createSessionRun(patternSession), onChange: (st) => this.#on.pattern?.(st) });
+          this.pattern.boot();
+        } catch (e) {
+          this.pattern = null;
+          console.error(`the pattern layer did not load: ${e?.message ?? e}`);
+        }
   }
 
   #anchor() { return { ntp: this.#engine.clock.now(), wall: performance.timeOrigin + performance.now() }; }
@@ -790,7 +804,15 @@ export class WorkerSession {
   }
 
   /** Runs a program as a new job in the worker; the job id. */
-  async run(code, { group = 0 } = {}) {
+  /** SP-EXT(pattern): a program that uses the pattern verbs waits for the layer; anything else runs at once. */
+  async run(code, opts = {}) {
+    if (this.pattern && !this.pattern.ready() && /(?<![A-Za-z0-9_])p(?:play|pattern|stop)\b/.test(String(code))) {
+      await this.pattern.whenReady();          // rejects with the layer's reason, which the editor shows
+    }
+    return this.#runNow(code, opts);
+  }
+
+  async #runNow(code, { group = 0 } = {}) {
     await this.#stopping;   // its sounds follow the Stop's; the fade plays on beside them, as native's does
     const { job, t0 } = await this.#call("run", { code, group });
     this.#t0 ??= t0;
