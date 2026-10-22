@@ -16,6 +16,7 @@
 //   node scripts/build-pattern.mjs           write web/synth/pattern-prelude.js
 //   node scripts/build-pattern.mjs --check   compare, exit 1 if it differs
 import fs from "node:fs";
+import { pathToFileURL } from "node:url";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -105,6 +106,24 @@ fs.writeFileSync(OUT_BOOT, bootFile);
 fs.writeFileSync(OUT_SESSION, sessionFile);
 // The dev server serves build/web, and the layer silently ran a stale copy of itself more than once because only web/ was
 // written: whichever of the two exists gets the artifacts, so "wrote" means "served".
+  // The editors's completion list is data (web/data/completion.json), so the pattern primitives join it there: no editor code
+  // needs to know the layer exists. Idempotent: entries are replaced by name, and the file is rewritten only when it differs.
+  for (const dir of [path.join(ROOT, "web/data"), path.join(ROOT, "build/web/data")]) {
+    const file = path.join(dir, "completion.json");
+    if (!fs.existsSync(file)) continue;
+    const { completion } = await import(pathToFileURL(path.join(ROOT, "pattern/completion.js")).href);
+    const data = JSON.parse(fs.readFileSync(file, "utf8"));
+    data.entries = data.entries || {};
+    let changed = 0;
+    for (const [name, entry] of Object.entries(completion)) {
+      if (JSON.stringify(data.entries[name]) !== JSON.stringify(entry)) { data.entries[name] = entry; changed++; }
+    }
+    if (changed) {
+      fs.writeFileSync(file, JSON.stringify(data));
+      console.log(`  completion: ${changed} pattern entries into ${path.relative(ROOT, file)}`);
+    }
+  }
+
 for (const extra of [path.join(ROOT, "build/web/pattern")]) {
   if (!fs.existsSync(path.dirname(extra))) continue;
   fs.mkdirSync(extra, { recursive: true });
