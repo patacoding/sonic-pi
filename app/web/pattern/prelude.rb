@@ -23,13 +23,15 @@ $pampa_pattern_tracks ||= {}
 $pampa_pattern_generation ||= 0
 
 pp_cls.class_eval do
-  define_method(:ppattern) do |spec, cycle: nil|
-    # Mini.pattern takes the pp_mini syntax as a string (its parser calls strip). Arrays are this wrapper's business: nesting
-    # becomes [...], elements are joined by a space. cycle: is accepted for signature compatibility and unused for now.
-    pp_to_mini = lambda do |x|
-      x.is_a?(Array) ? ("[" + x.map { |y| pp_to_mini.call(y) }.join(" ") + "]") : x.to_s
+  define_method(:ppattern) do |spec, cycle_beats: nil|
+    unless spec.is_a?(Array)
+      raise ArgumentError, "ppattern takes an array -- the only way to write a track; a string is one value, " \
+        "so [\"c2 e2\"] is one event, not two"
     end
-    pp_mini.pattern(spec.is_a?(Array) ? pp_to_mini.call(spec) : spec.to_s)
+    to_mini = lambda do |x|
+      x.is_a?(Array) ? ("[" + x.map { |y| to_mini.call(y) }.join(" ") + "]") : x.to_s
+    end
+    pp_mini.pattern(to_mini.call(spec))
   end
 
   define_method(:pplay) do |pat, use: :play, name: nil, cycle_beats: nil, align: true, cycles: nil,
