@@ -45,13 +45,10 @@ pp_cls.class_eval do
     raise NotImplementedError, "pplay's max_pending: is not on the web yet" if max_pending
     pp_bar = ((get(:pampa_beats_per_bar) || 4)).to_f
     pp_loop = ((get(:pampa_loop_bars) || 1)).to_f * pp_bar
-    # Speed comes from the UI's bpm alone: one element is one beat, so raising pampa_loop_bars lengthens the loop without
-    # slowing anything down. The pattern's own length is its element count; cycle_beats: overrides that length, and because a
-    # track repeats at the loop line, a pattern shorter than the loop rests until then (["c2", "e2"] in a 4-beat loop: two
-    # notes on beats 0 and 1, then two beats of silence). A pattern longer than the loop is an error, not a truncation.
-    pp_events_peek = pat.query_arc(0r, 1r).select { |e| e.whole }
-    pp_own_beats = pp_events_peek.empty? ? pp_loop : pp_events_peek.length.to_f
-    pp_cycle = (cycle_beats || pp_own_beats).to_f
+    # The model, from the player's own two results: the cycle is cycle_beats if given, otherwise the loop; the elements divide
+    # that cycle; and the track repeats every cycle. So with a 2-bar loop (8 beats), [60, 64] sounds on beats 1 and 5, and with
+    # cycle_beats: 4 it sounds on beats 1 and 3 and repeats every 4 beats.
+    pp_cycle = (cycle_beats || pp_loop).to_f
     raise ArgumentError, "cycle_beats (#{pp_cycle}) may not exceed the loop (#{pp_loop} beats)" if pp_cycle > pp_loop
     raise ArgumentError, "cycle_beats must be positive, got #{pp_cycle}" unless pp_cycle > 0
     pp_name = name || ("pattern_" + ($pampa_pattern_generation = ($pampa_pattern_generation || 0) + 1).to_s)
@@ -133,7 +130,7 @@ pp_cls.class_eval do
         end
         pp_cycles_seen += 1
         break if cycles && pp_cycles_seen >= cycles.to_i
-        pp_base += pp_loop           # the loop advances, not the cycle: a cycle shorter than the loop leaves silence
+        pp_base += pp_cycle          # the track repeats every cycle; a cycle shorter than the loop repeats inside it
         # __preconcile_at_bar, the desktop's reconciliation: when a replacement owns a boundary inside the next cycle, this
         # cycle is cut at that boundary rather than overrunning it -- which is what put one straggler beside the new
         # version's first event (measured: 16.73 against 16.00).
