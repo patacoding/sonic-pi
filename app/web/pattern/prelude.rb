@@ -113,10 +113,16 @@ pp_cls.class_eval do
           end
           __p.time = __p.link_time_at_beat(pp_at_beat)
           __p.beat = pp_at_beat
-          # Extra options go to the verb as they do on the desktop (delivery merges the event's value with the user's opts),
-          # which is how a synth track is written at all: synth's first positional is the NAME, so without note: the web
-          # treats it as a rest and nothing sounds.
-          if pp_opts.empty?
+          # Delivery, as docs/plan/pattern-combine-spec.md section 4 has it: a Hash value is per-event parameters and its keys
+          # become keyword arguments (combine); anything else is the verb's first positional. The user's own options win
+          # nothing -- a key in both places is an error, because silently overriding either would hide a mistake.
+          if e.value.is_a?(Hash)
+            pp_clash = e.value.keys & pp_opts.keys
+            unless pp_clash.empty?
+              raise ArgumentError, "the event carries #{pp_clash.inspect} and pplay also gave it: say it in one place"
+            end
+            send(use, **e.value, **pp_opts)
+          elsif pp_opts.empty?
             send(use, e.value)
           else
             send(use, e.value, **pp_opts)
