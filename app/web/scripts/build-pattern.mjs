@@ -147,6 +147,19 @@ fs.writeFileSync(OUT_SESSION, sessionFile);
     }
   }
 
+// The two app files this project patches (SP-EXT) must reach the served copy as well, or the browser runs the old code: that
+// happened with pdeclared, which the served sonic_pi.js still called prun, and the library's own prun(n) answered
+// "Run 的数量必须是正整数（给了 :end）". Only files that exist and differ are copied.
+for (const rel of ["sonic_pi.js"]) {
+  const from = path.join(ROOT, "web", rel);
+  const to = path.join(ROOT, "build/web", rel);
+  if (!fs.existsSync(from) || !fs.existsSync(path.dirname(to))) continue;
+  const want = fs.readFileSync(from, "utf8");
+  if (fs.existsSync(to) && fs.readFileSync(to, "utf8") === want) continue;
+  fs.writeFileSync(to, want);
+  console.log(`  synced web/${rel} -> build/web/${rel} (the served copy)`);
+}
+
 for (const extra of [path.join(ROOT, "build/web/pattern")]) {
   if (!fs.existsSync(path.dirname(extra))) continue;
   fs.mkdirSync(extra, { recursive: true });

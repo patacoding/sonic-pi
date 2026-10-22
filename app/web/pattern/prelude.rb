@@ -60,7 +60,6 @@ pp_cls.class_eval do
     pp_name = name || ("pattern_" + ($pampa_pattern_generation = ($pampa_pattern_generation || 0) + 1).to_s)
     pp_track_name = pp_name
     name = pp_track_name
-    raise ArgumentError, "cycle_beats must be positive, got #{pp_cycle.inspect}" unless pp_cycle.is_a?(Numeric) && pp_cycle > 0
 
     pp_tracks = ($pampa_pattern_tracks ||= {})
     pp_old = pp_tracks[pp_track_name]
@@ -86,10 +85,6 @@ pp_cls.class_eval do
                end
     # A bar already under way cannot be claimed: an event scheduled at a beat the session has passed is dropped, which is
     # exactly the one-beat hole measured at 12.0 (the old track stopped there, the new one's first event never landed).
-    # The lead is the RUNTIME's, not a number of mine: dev-discipline (desktop) says a delivery must never be reached by
-    # sleeping, the ahead time comes from sched_ahead, and "is there enough lead" is judged by the engine's lates, not by a
-    # comfortable-looking epsilon. So a bar is only claimable if its handover window is still open.
-    pp_lead_beats = __p.sched_ahead.to_f * SonicPi.link_bpm / 60.0
     pp_start += pp_bar if (pp_start - pp_now_beat) < pp_lead_beats && align == :bar
     if pp_old
       # A replaced track reconciles at a bar line (the desktop's bar-boundary rule), so the two versions abut there.
@@ -159,7 +154,7 @@ pp_cls.class_eval do
       superseded_before: !pp_old.nil? }
   end
 
-  # prun :begin / :end bracket a Run: a track a Run does not re-declare is one the buffer no longer asks for, so
+  # pdeclared :begin / :end bracket a Run: a track a Run does not re-declare is one the buffer no longer asks for, so
   # commenting a pplay out stops sounding instead of playing forever.
   define_method(:pdeclared) do |phase|
     if phase == :begin
