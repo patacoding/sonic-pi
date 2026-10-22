@@ -35,7 +35,7 @@ pp_cls.class_eval do
   end
 
   define_method(:pplay) do |pat, use: :play, name: nil, cycle_beats: nil, align: true, cycles: nil,
-                             map: nil, sync: nil, max_pending: nil|
+                             map: nil, sync: nil, max_pending: nil, **pp_opts|
     # The desktop API, not an invented one: the loop comes from set :pampa_loop_bars x set :pampa_beats_per_bar, a bar is
     # pampa_beats_per_bar, and a pattern's own length is cycle_beats (which may not exceed the loop). Options this build
     # does not implement are refused by name rather than ignored, because a silently ignored sync: would look like a bug
@@ -112,7 +112,14 @@ pp_cls.class_eval do
           end
           __p.time = __p.link_time_at_beat(pp_at_beat)
           __p.beat = pp_at_beat
-          send(use, e.value)
+          # Extra options go to the verb as they do on the desktop (delivery merges the event's value with the user's opts),
+          # which is how a synth track is written at all: synth's first positional is the NAME, so without note: the web
+          # treats it as a rest and nothing sounds.
+          if pp_opts.empty?
+            send(use, e.value)
+          else
+            send(use, e.value, **pp_opts)
+          end
         end
         pp_cycles_seen += 1
         break if cycles && pp_cycles_seen >= cycles.to_i
