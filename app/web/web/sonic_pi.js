@@ -809,8 +809,13 @@ export class WorkerSession {
     if (this.pattern && !this.pattern.ready() && /(?<![A-Za-z0-9_])p(?:play|pattern|stop)\b/.test(String(code))) {
       await this.pattern.whenReady();          // rejects with the layer's reason, which the editor shows
     }
+      // The bookkeeping runs OUTSIDE the program's own job. begin is still before it (a token must exist when pplay stamps a
+      // track), but :end is deferred: as a third job immediately after the program it interrupted the track's first event
+      // every Run -- the reported "first loop is skipped". 250 ms is several scheduler ticks and still one Run's blink.
       await this.#runNow("pdeclared :begin");
-      try { return await this.#runNow(code, opts); } finally { this.#runNow("pdeclared :end"); }
+      const job = await this.#runNow(code, opts);
+      setTimeout(() => { this.#runNow("pdeclared :end").catch(() => {}); }, 250);
+      return job;
   }
 
   async #runNow(code, { group = 0 } = {}) {
