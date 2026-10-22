@@ -70,19 +70,16 @@ pp_cls.class_eval do
     # The desktop's own rule (extensions/pattern/runtime.rb, __panchor_wall): align: true -- the default -- means now plus
     # a little lead (0.4 s), NOT the next bar line; only align: :bar anchors to the engine's bar. I had read the option
     # table's one-line summary instead of the code and made every first play wait up to a bar.
-    # ONE lead, used for both the start and the handover -- not a margin. The handover has to happen strictly inside the
-    # scheduler's window (so it is earlier than sched_ahead), and the start has to be at least that far ahead, or a track's first
-    # event is born already late. Two different numbers made that contradiction permanent: the handover led by a beat while the
-    # start led by 0.4, so the first event of every track was delivered at the edge.
-    pp_lead = [0.5, __p.sched_ahead.to_f * SonicPi.link_bpm / 60.0 * 1.5].max
+    pp_lead_beats = __p.sched_ahead.to_f * SonicPi.link_bpm / 60.0
+    pp_align_lead = 0.4 * SonicPi.link_bpm / 60.0
     pp_start = case align
                when :bar then ((pp_now_beat / pp_bar).ceil * pp_bar)
                when false then pp_now_beat
-               else pp_now_beat + pp_lead
+               else pp_now_beat + [pp_align_lead, pp_lead_beats].max
                end
     # A bar already under way cannot be claimed: an event scheduled at a beat the session has passed is dropped, which is
     # exactly the one-beat hole measured at 12.0 (the old track stopped there, the new one's first event never landed).
-    pp_start += pp_bar if (pp_start - pp_now_beat) < pp_lead && align == :bar
+    pp_start += pp_bar if (pp_start - pp_now_beat) < pp_lead_beats && align == :bar
     if pp_old
       # A replaced track reconciles at a bar line (the desktop's bar-boundary rule), so the two versions abut there.
       pp_start = [pp_start, ((pp_now_beat / pp_bar).ceil * pp_bar)].max
@@ -109,12 +106,7 @@ pp_cls.class_eval do
           # The desktop rule: never sleep to the event. Wait only until the handover window opens (the event's moment
           # minus sched_ahead), then set the thread's logical time to the event's beat and let the scheduler stamp it.
           # ONE coordinate system throughout: link_beat_at_time(p.time) is the session beat of this thread's now.
-          # Two things the first version conflated (measured: sched_ahead is 0.05 s here, and the emitted record sat exactly one
-          # sched_ahead after its target, which is why the first events fell outside the window):
-          #   * the HANDOVER happens a musical beat early, so the tick is never the thing that decides whether it arrives;
-          #   * the TIMETAG is the target, and since audio_time = start + p.time + sched_ahead, p.time must be the target
-          #     MINUS sched_ahead. Setting p.time = target stamped every event sched_ahead late.
-          pp_hold_beat = pp_at_beat - pp_lead
+          pp_hold_beat = __p.link_beat_at_time(__p.link_time_at_beat(pp_at_beat) - __p.sched_ahead)
           pp_now_beat = __p.link_beat_at_time(__p.time)
           pp_wait = pp_hold_beat - pp_now_beat
           sleep pp_wait if pp_wait > 0
@@ -122,7 +114,7 @@ pp_cls.class_eval do
             pp_woke = __p.link_beat_at_time(__p.time)
             puts "[ptrack] #{name} gen=#{pp_gen} target=#{pp_at_beat.round(3)} woke_at=#{pp_woke.round(3)} wait=#{pp_wait.round(3)}"
           end
-          __p.time = __p.link_time_at_beat(pp_at_beat) - __p.sched_ahead
+          __p.time = __p.link_time_at_beat(pp_at_beat)
           __p.beat = pp_at_beat
           # Delivery, as docs/plan/pattern-combine-spec.md section 4 has it: a Hash value is per-event parameters and its keys
           # become keyword arguments (combine); anything else is the verb's first positional. The user's own options win
@@ -149,7 +141,7 @@ pp_cls.class_eval do
         if pp_tid[:stop_at] && pp_base > pp_tid[:stop_at]
           pp_base = pp_tid[:stop_at]
         end
-        pp_hold_beat = pp_base - pp_lead
+        pp_hold_beat = __p.link_beat_at_time(__p.link_time_at_beat(pp_base) - __p.sched_ahead)
         pp_wait = pp_hold_beat - __p.link_beat_at_time(__p.time)
         sleep pp_wait if pp_wait > 0
       end
