@@ -62,16 +62,27 @@ pp_cls.class_eval do
 
     pp_events = pat.query_arc(0r, 1r).select { |e| e.whole }
     pp_now_beat = __p.link_beat_at_time(__p.time)
-    pp_start = align == false ? pp_now_beat : ((pp_now_beat / pp_bar).ceil * pp_bar)   # the next bar line
+    # The desktop's own rule (extensions/pattern/runtime.rb, __panchor_wall): align: true -- the default -- means now plus
+    # a little lead (0.4 s), NOT the next bar line; only align: :bar anchors to the engine's bar. I had read the option
+    # table's one-line summary instead of the code and made every first play wait up to a bar.
+    pp_lead_beats = __p.sched_ahead.to_f * SonicPi.link_bpm / 60.0
+    pp_align_lead = 0.4 * SonicPi.link_bpm / 60.0
+    pp_start = case align
+               when :bar then ((pp_now_beat / pp_bar).ceil * pp_bar)
+               when false then pp_now_beat
+               else pp_now_beat + [pp_align_lead, pp_lead_beats].max
+               end
     # A bar already under way cannot be claimed: an event scheduled at a beat the session has passed is dropped, which is
     # exactly the one-beat hole measured at 12.0 (the old track stopped there, the new one's first event never landed).
     # The lead is the RUNTIME's, not a number of mine: dev-discipline (desktop) says a delivery must never be reached by
     # sleeping, the ahead time comes from sched_ahead, and "is there enough lead" is judged by the engine's lates, not by a
     # comfortable-looking epsilon. So a bar is only claimable if its handover window is still open.
     pp_lead_beats = __p.sched_ahead.to_f * SonicPi.link_bpm / 60.0
-    pp_start += pp_bar if (pp_start - pp_now_beat) < pp_lead_beats
-    if pp_old && pp_old[:stop_at]
-      pp_start = [pp_start, pp_old[:stop_at]].max       # never before the old version leaves
+    pp_start += pp_bar if (pp_start - pp_now_beat) < pp_lead_beats && align == :bar
+    if pp_old
+      # A replaced track reconciles at a bar line (the desktop's bar-boundary rule), so the two versions abut there.
+      pp_start = [pp_start, ((pp_now_beat / pp_bar).ceil * pp_bar)].max
+      pp_start = [pp_start, pp_old[:stop_at]].max if pp_old[:stop_at]   # never before the old version leaves
     end
     (pp_old[:stop_at] = pp_start) if pp_old             # it leaves exactly where this one begins
     pp_tid[:started_beat] = pp_start
@@ -85,6 +96,7 @@ pp_cls.class_eval do
         pp_events.each do |e|
           break if pp_tid[:stop_now] || (pp_tid[:stop_at] && pp_base >= pp_tid[:stop_at])
           pp_at_beat = pp_base + e.whole.begin.to_f * pp_cycle
+          break if pp_tid[:stop_at] && pp_at_beat >= pp_tid[:stop_at]   # the boundary belongs to the new version
           # The desktop rule: never sleep to the event. Wait only until the handover window opens (the event's moment
           # minus sched_ahead), then set the thread's logical time to the event's beat and let the scheduler stamp it.
           # ONE coordinate system throughout: link_beat_at_time(p.time) is the session beat of this thread's now.
@@ -103,6 +115,12 @@ pp_cls.class_eval do
         pp_cycles_seen += 1
         break if cycles && pp_cycles_seen >= cycles.to_i
         pp_base += pp_loop           # the loop advances, not the cycle: a cycle shorter than the loop leaves silence
+        # __preconcile_at_bar, the desktop's reconciliation: when a replacement owns a boundary inside the next cycle, this
+        # cycle is cut at that boundary rather than overrunning it -- which is what put one straggler beside the new
+        # version's first event (measured: 16.73 against 16.00).
+        if pp_tid[:stop_at] && pp_base > pp_tid[:stop_at]
+          pp_base = pp_tid[:stop_at]
+        end
         pp_hold_beat = __p.link_beat_at_time(__p.link_time_at_beat(pp_base) - __p.sched_ahead)
         pp_wait = pp_hold_beat - __p.link_beat_at_time(__p.time)
         sleep pp_wait if pp_wait > 0
