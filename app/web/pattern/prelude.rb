@@ -23,20 +23,17 @@ $pampa_pattern_tracks ||= {}
 $pampa_pattern_generation ||= 0
 
 pp_cls.class_eval do
-  # PampaPattern::Runtime is not in this build yet: its module spans several top-level units, so the chunk splitter cut
-  # it and the include failed with 'uninitialized constant PampaPattern'. It is the source of the documented operators
-  # (pply, psine, psegment, pval, ...), so it is the next thing to port, with a splitter that keeps a module whole.
-
-  # Until the include reaches the programs (measured: it does not -- 'undefined method ppattern' inside a run), the product's
-  # own ppattern stays, with the same rules: arrays only, cycle_beats:, and nothing else.
-  define_method(:ppattern) do |spec, cycle_beats: nil|
-    unless spec.is_a?(Array)
-      raise ArgumentError, "ppattern takes an array -- the only way to write a track; a string is one value"
-    end
-    pp_to_mini = lambda do |x|
-      x.is_a?(Array) ? ("[" + x.map { |y| pp_to_mini.call(y) }.join(" ") + "]") : x.to_s
-    end
-    pp_mini.pattern(pp_to_mini.call(spec))
+  # The desktop does SonicPi::Lang::Core.include(PampaPattern::Runtime); on the web the programs run at the class
+  # class_eval reaches, so the include goes there. This is what makes pply, pzoom, psegment, pval, psine and the rest of the
+  # documented operators exist at all.
+  # Not class_eval("include ::PampaPattern::Runtime"): inside a class_eval string the constant lookup failed with
+  # "uninitialized constant PampaPattern" even though the module was defined by the chunk before this one. Including the module
+  # object directly, through a global so nothing depends on where this code is evaluated, works.
+  begin
+    $pampa_runtime = PampaPattern::Runtime
+    pp_cls.send(:include, $pampa_runtime)
+  rescue StandardError => pp_e
+    raise "the pattern runtime could not be included (#{pp_e.class}: #{pp_e.message})"
   end
 
   # ppattern itself comes from PampaPattern::Runtime (the desktop's own, with cycle_beats: and __keep_rests), copied in
