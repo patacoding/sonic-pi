@@ -55,3 +55,16 @@ arrangement and patching the runtime.
 - Only `play`-style verbs are exercised through the pipeline; `sample`, `midi_*` and OSC are untested here.
 - The layer is not wired into the synth window yet: no loading indicator, no queue for a Run that arrives early. Those are
   the next steps, and the pipeline must be green before they start.
+
+## Writing a pattern (the readable forms)
+
+`%w[...]` is a Ruby word-array literal -- `%w[c2 e2 g2 b2]` is `["c2", "e2", "g2", "b2"]` -- and it is no part of the pattern
+language; it appeared in examples only as shorthand. The forms worth using:
+
+```ruby
+pplay ppattern("c2 e2 g2 b2"),            use: :play, beats: 4.0, bar: 4.0   # a string spec, the syntax Strudel also uses
+pplay ppattern(["c2", "e2", "g2", "b2"]), use: :play, beats: 4.0, bar: 4.0   # explicit, and the only way to nest
+pplay ppattern([["a", "b", "c"], "d"]),   use: :play, beats: 4.0, bar: 4.0   # a triplet, then one
+```
+
+All of these were measured to produce four events for the first two and four (3+1) for the third.
