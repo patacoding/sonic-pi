@@ -130,9 +130,10 @@ pp_cls.class_eval do
         end
         pp_cycles_seen += 1
         break if cycles && pp_cycles_seen >= cycles.to_i
-        # The loop is the unit that repeats; a cycle shorter than the loop repeats inside it (loop / cycle times per loop, so
-        # cycle_beats: 4 in an 8-beat loop sounds the pattern twice per loop). With no cycle_beats the two coincide.
-        pp_base += pp_cycle
+        # The track repeats once per loop; a cycle shorter than the loop simply fills less of it, so the rest of the loop is
+        # silent (cycle_beats: 4 in an 8-beat loop: events in the first four beats, nothing in the last four). With no
+        # cycle_beats the cycle is the loop and it is full.
+        pp_base += pp_loop
         # __preconcile_at_bar, the desktop's reconciliation: when a replacement owns a boundary inside the next cycle, this
         # cycle is cut at that boundary rather than overrunning it -- which is what put one straggler beside the new
         # version's first event (measured: 16.73 against 16.00).
