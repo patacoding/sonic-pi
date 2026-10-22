@@ -106,6 +106,29 @@ fs.writeFileSync(OUT_BOOT, bootFile);
 fs.writeFileSync(OUT_SESSION, sessionFile);
 // The dev server serves build/web, and the layer silently ran a stale copy of itself more than once because only web/ was
 // written: whichever of the two exists gets the artifacts, so "wrote" means "served".
+  // Two data files decide what the editor offers: completion.json (docs, usage, opt ranges) and reference/lang.json, whose
+  // keys ARE the function suggestions -- api.js builds keywords.Func from ref.lang.map(p => p.key). A pattern primitive therefore
+  // needs a page in both, and the build puts it there so nothing in the editor knows the layer exists.
+  for (const dir of [path.join(ROOT, "web/data/reference"), path.join(ROOT, "build/web/data/reference")]) {
+    const file = path.join(dir, "lang.json");
+    if (!fs.existsSync(file)) continue;
+    const { completion: entries } = await import(pathToFileURL(path.join(ROOT, "pattern/completion.js")).href);
+    const doc = JSON.parse(fs.readFileSync(file, "utf8"));   // {pages:[{key, summary, usage, doc_html}]}, not an array
+    const pages = doc.pages;
+    let changed = 0;
+    for (const [name, e] of Object.entries(entries)) {
+      const page = { key: name, title: e.summary ?? name, doc_html: e.doc ?? "", usage: e.usage ?? "" };
+      const at = pages.findIndex((q) => q.key === name);
+      if (at >= 0) {
+        if (JSON.stringify(pages[at]) !== JSON.stringify({ ...pages[at], ...page })) { pages[at] = { ...pages[at], ...page }; changed++; }
+      } else { pages.push(page); changed++; }
+    }
+    if (changed) {
+      fs.writeFileSync(file, JSON.stringify(doc));
+      console.log(`  reference: ${changed} pattern pages into ${path.relative(ROOT, file)}`);
+    }
+  }
+
   // The editors's completion list is data (web/data/completion.json), so the pattern primitives join it there: no editor code
   // needs to know the layer exists. Idempotent: entries are replaced by name, and the file is rewritten only when it differs.
   for (const dir of [path.join(ROOT, "web/data"), path.join(ROOT, "build/web/data")]) {
