@@ -100,5 +100,16 @@ runtime removes the need for the shim:
 
     cd app/web && scripts/build-runtime.sh --wasm      # needs Emscripten (emcc on PATH)
 
-Two things this is NOT: it is not part of the pattern layer (the layer's own files are untouched by it), and it is not a fix —
-it is a crash guard on a mismatched pair that must be rebuilt before anything is deployed as a release.
+**Correction, the same day.** I first said this was unrelated to the pattern work. That was wrong, and the timeline says so:
+`dist/web` was the release tree, and `cp -a app/web/build/web/. dist/web/` replaced it with the dev tree, whose `live-core.js`
+(calls `_sp_silence`) is newer than the wasm beside it. That is when Stop started throwing. A release directory must never be
+overwritten by a dev build; a deployable tree is now written to `dist/web-pattern/` instead, and `dist/web/` is left alone.
+
+The shim now calls the export the old wasm does have, `sp_stop_all()`, so Stop stops the sound (abruptly -- there is no fade
+without `sp_silence`) instead of only not crashing. Verified in Node: `_sp_silence(1, 0, 0)` after `_sp_init()` returns without
+throwing and reaches `sp_stop_all`.
+
+None of this is a fix for the version skew: the wasm in this checkout is from 10-10 and predates both `sp_silence` and whatever
+else `live-core.js` expects, so a release must rebuild it:
+
+    cd app/web && scripts/build-runtime.sh --wasm      # needs Emscripten (emcc on PATH)
