@@ -45,7 +45,12 @@ pp_cls.class_eval do
     raise NotImplementedError, "pplay's max_pending: is not on the web yet" if max_pending
     pp_bar = ((get(:pampa_beats_per_bar) || 4)).to_f
     pp_loop = ((get(:pampa_loop_bars) || 1)).to_f * pp_bar
-    pp_cycle = (cycle_beats || pp_loop).to_f
+    # A pattern's own length is its number of events, one beat each -- NOT the loop. The tutorial's example 2 puts a 4-event
+    # pattern and an 8-event pattern on one 2-bar loop and expects them to run at their own rates; making the loop the
+    # default cycle stretched every pattern when pampa_loop_bars grew (1 -> 2 halved the speed, which is the fault reported).
+    pp_events_peek = pat.query_arc(0r, 1r).select { |e| e.whole }
+    pp_own_beats = pp_events_peek.empty? ? pp_loop : pp_events_peek.length.to_f
+    pp_cycle = (cycle_beats || pp_own_beats).to_f
     raise ArgumentError, "cycle_beats (#{pp_cycle}) may not exceed the loop (#{pp_loop} beats)" if pp_cycle > pp_loop
     raise ArgumentError, "cycle_beats must be positive, got #{pp_cycle}" unless pp_cycle > 0
     pp_name = name || ("pattern_" + ($pampa_pattern_generation = ($pampa_pattern_generation || 0) + 1).to_s)
