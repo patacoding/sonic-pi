@@ -75,8 +75,11 @@ pp_cls.class_eval do
     pp_start = case align
                when :bar then ((pp_now_beat / pp_bar).ceil * pp_bar)
                when false then pp_now_beat
-               else pp_now_beat + [pp_align_lead, pp_lead_beats].max
+               else pp_now_beat + [pp_align_lead, pp_lead_beats + 0.1].max
                end
+    # The 0.1-beat margin: measured once, the first event of a track landed 0.05 beats before its own delivery window (woke_at
+    # 5.62 for a target of 5.67), which is inside the scheduler's edge rather than behind it. A hair of lead costs nothing
+    # audible and keeps the first event away from that edge.
     # A bar already under way cannot be claimed: an event scheduled at a beat the session has passed is dropped, which is
     # exactly the one-beat hole measured at 12.0 (the old track stopped there, the new one's first event never landed).
     pp_start += pp_bar if (pp_start - pp_now_beat) < pp_lead_beats && align == :bar
