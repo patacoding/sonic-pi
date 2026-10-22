@@ -809,11 +809,16 @@ export class WorkerSession {
     if (this.pattern && !this.pattern.ready() && /(?<![A-Za-z0-9_])p(?:play|pattern|stop)\b/.test(String(code))) {
       await this.pattern.whenReady();          // rejects with the layer's reason, which the editor shows
     }
-      // No extra jobs around a program. Bracketing a Run with pdeclared :begin and :end was how "a track the buffer no longer
-      // declares stops" was built, but two extra runs per Run raced with Stop and with the next Run, and the scheduling became
-      // unstable under exactly the two buttons people press. Stability first: a program is one job again. pdeclared stays defined
-      // in the layer for the day this is rebuilt without touching the session's run queue (the ledger says so).
-      return this.#runNow(code, opts);
+      // "A track the buffer no longer declares stops" without adding a job: the bookkeeping rides IN the program's own job.
+      //   prefix   pdeclared :begin;   on line 1, so a track can be stamped as it is declared
+      //   suffix   pdeclared :end      on a line of its own, so it runs after the program and prunes tracks this Run did not
+      //                                declare (they leave at their next cycle line)
+      // One job, no extra runs, nothing for Stop or the next Run to race with -- which is what the separate jobs did wrong.
+      const program = String(code);
+      const wrapped = /(?<![A-Za-z0-9_])p(?:play|pattern|stop)\b/.test(program)
+        ? `pdeclared :begin; ${program}\npdeclared :end`
+        : program;
+      return this.#runNow(wrapped, opts);
   }
 
   async #runNow(code, { group = 0 } = {}) {
