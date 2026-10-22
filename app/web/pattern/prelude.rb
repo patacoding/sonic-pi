@@ -112,7 +112,7 @@ pp_cls.class_eval do
           sleep pp_wait if pp_wait > 0
           if $pampa_pattern_debug
             pp_woke = __p.link_beat_at_time(__p.time)
-            puts "[ptrack] #{name} gen=#{pp_gen} target=#{pp_at_beat.round(3)} woke_at=#{pp_woke.round(3)} wait=#{pp_wait.round(3)}"
+            puts "[ptrack] #{name} gen=#{pp_gen} value=#{e.value.inspect} base=#{pp_base.round(3)} target=#{pp_at_beat.round(3)} woke_at=#{pp_woke.round(3)} wait=#{pp_wait.round(3)}"
           end
           __p.time = __p.link_time_at_beat(pp_at_beat)
           __p.beat = pp_at_beat
