@@ -95,5 +95,15 @@ fs.mkdirSync(path.dirname(OUT), { recursive: true });
 fs.writeFileSync(OUT, artifact);
 fs.writeFileSync(OUT_BOOT, bootFile);
 fs.writeFileSync(OUT_SESSION, sessionFile);
+// The dev server serves build/web, and the layer silently ran a stale copy of itself more than once because only web/ was
+// written: whichever of the two exists gets the artifacts, so "wrote" means "served".
+for (const extra of [path.join(ROOT, "build/web/pattern")]) {
+  if (!fs.existsSync(path.dirname(extra))) continue;
+  fs.mkdirSync(extra, { recursive: true });
+  for (const [name, body] of [["pattern-prelude.js", artifact], ["pattern-boot.js", bootFile], ["session-run.js", sessionFile]]) {
+    fs.writeFileSync(path.join(extra, name), body);
+  }
+  console.log(`  also wrote ${path.relative(ROOT, extra)}/ (the served copy)`);
+}
 console.log(`  wrote ${path.relative(ROOT, OUT)}: ${chunks.length} chunks, ${libUnits.length} library units, ${artifact.length} bytes`);
 console.log(`  wrote ${path.relative(ROOT, OUT_BOOT)}: ${bootFile.length} bytes`);
