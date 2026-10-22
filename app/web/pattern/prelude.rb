@@ -51,7 +51,11 @@ pp_cls.class_eval do
     pp_cycle = (cycle_beats || pp_loop).to_f
     raise ArgumentError, "cycle_beats (#{pp_cycle}) may not exceed the loop (#{pp_loop} beats)" if pp_cycle > pp_loop
     raise ArgumentError, "cycle_beats must be positive, got #{pp_cycle}" unless pp_cycle > 0
-    pp_name = name || ("pattern_" + ($pampa_pattern_generation = ($pampa_pattern_generation || 0) + 1).to_s)
+    # An unnamed track is named by its position among THIS Run's declarations ("pattern_1", "pattern_2", ...), so the same line
+    # keeps its name from one Run to the next and supersedes instead of piling up. A global counter gave every Run a fresh name,
+    # which left the previous unnamed track playing -- the scheduling mess reported. $pampa_decl is reset by pdeclared :begin,
+    # which the app's wrapper calls at the start of every program.
+    pp_name = name || ("pattern_" + ($pampa_decl = ($pampa_decl || 0) + 1).to_s)
     pp_track_name = pp_name
     name = pp_track_name
 
@@ -184,6 +188,7 @@ pp_cls.class_eval do
   define_method(:pdeclared) do |phase|
     if phase == :begin
       $pampa_pattern_token = ($pampa_pattern_token || 0) + 1
+      $pampa_decl = 0            # unnamed tracks take pattern_1, pattern_2, ... in this Run's order
     else
       ($pampa_pattern_tracks || {}).each do |_pp_k, pp_t|
         pp_t[:stop_at] = 0 if pp_t[:token] != $pampa_pattern_token && !pp_t[:stop_now]
