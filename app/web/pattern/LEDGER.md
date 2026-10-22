@@ -86,3 +86,19 @@ Adding only `completion.json` changed nothing visible — measured, then fixed.
                                           # operators, one canonical call each
 
 Last run: **16/16** cases, **39/39** operators.
+
+## 9. A shim in a generated runtime file — temporary, and why
+
+`Stop` in a newer app bundle calls `module._sp_silence`, and the wasm in this checkout predates it: `sp_silence` is in the C
+(`app/web/runtime/host/sp_host.c:703`) but the linked `sp_runtime.wasm` does not export it, so the call threw
+`_sp_silence is not a function`.
+
+Neither the runtime nor the app was rebuilt here (this machine has no `emcc` and no host `ruby`), so the served module
+(`build/web/runtime/sp_runtime.js`, and the copy under `dist/web`) wraps its default export and supplies `_sp_silence` when the
+build lacks it. It is a **no-op that warns once**: `Stop` no longer crashes, but it does not silence either. Rebuilding the
+runtime removes the need for the shim:
+
+    cd app/web && scripts/build-runtime.sh --wasm      # needs Emscripten (emcc on PATH)
+
+Two things this is NOT: it is not part of the pattern layer (the layer's own files are untouched by it), and it is not a fix —
+it is a crash guard on a mismatched pair that must be rebuilt before anything is deployed as a release.
