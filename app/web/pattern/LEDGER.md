@@ -1,26 +1,88 @@
-# Upstream touches, and why
+# Intrusion ledger — every place the pattern layer touches something that is not its own
 
-The pattern layer is a bolt-on: its code lives in `app/web/pattern/` and in the session, never in the runtime's Ruby sources,
-and no wasm is rebuilt. Two lines of upstream are touched, both recorded here.
+Written to be checked against the code, not read as a promise. Measured on branch `web-pattern`, after the base commit
+`c9387392f`; the upstream side of the diff is exactly **one code file and two data files**:
 
-| File | What | Why it has to be upstream |
-|---|---|---|
-| `web/sonic_pi.js` (`WorkerSession`, a `recent` field) | Keeps the last 300 records the session emitted. | A separate view of the session needs to read what it emitted; the records were already delivered to the app's panes and then dropped. |
-| `web/sonic_pi.js` (`WorkerSession`, constructor) | Sets `globalThis.sonicPiSession = { run, stop, stopJob, status, recent }`. | A second editor page cannot reach a session it was not constructed with. It exposes methods that already exist and changes no behaviour. |
+    app/web/web/sonic_pi.js                | 41 +, 2 -
+    app/web/web/data/completion.json       |  1 line changed (it is one line of JSON)
+    app/web/web/data/reference/lang.json   |  1 line changed (likewise)
 
-Both are marked `SP-EXT(pattern)` in place.
+Everything else of ours lives in its own directories and goes away by deleting them.
 
-## What was deliberately NOT done
+---
 
-- Shadertoy/gfx needs no such handle: it is its own editor (`web/gfx-editor/`) and listens to the **engine**, which it does not
-  run code in.
-- Soundgineer needs none either: it is our own window on our own engine, and it does not execute Sonic Pi programs.
-- The pattern layer is the first feature that must **run code in the live session**, which is why it is the first to need a
-  handle at all.
+## 1. `app/web/web/sonic_pi.js` — five hunks, each marked `SP-EXT(pattern)`
 
-## Still to do
+| # | Where | What | Why it cannot be done from outside |
+|---|---|---|---|
+| 1 | imports, after `live-core.js` | `import { createPatternUi }`, `import { createSessionRun }` | The layer must be constructed by whoever constructs the session. |
+| 2 | `WorkerSession` fields, by `running = false` | `recent = []` | A second view needs the records the app already receives and then drops. |
+| 3 | `WorkerSession` constructor, after `engine.on?.("in", …)` | `globalThis.sonicPiSession = { run, stop, stopJob, status, recent }` | Only the class that made the session can expose it; it exposes methods that already exist and changes no behaviour. |
+| 3b | same place, inside a `try/catch` | `this.pattern = createPatternUi({ run: createSessionRun(…) }); this.pattern.boot();` | Loading starts with the session; the `try` means a layer that fails never takes the editor down. |
+| 4 | `#batch`, where records are decoded | Keeps the last 300 (`this.recent.push` + trim), then `deliver(record, …)` unchanged | The retention has to sit where the records pass. |
+| 5 | `run` (its body moved to `#runNow`) | `run(code, opts)` waits via `pattern.whenReady()` when the program mentions `pplay`/`ppattern`/`pstop`; `#runNow` is what the layer's own chunks call, so they never wait on themselves | A Run that uses the pattern verbs must not reach the runtime before the layer is there. |
 
-`pattern-boot.js`'s loader asks its `run(code)` adapter for `{ output, errors }`; the handle returns a **job id**. The lab page
-needs a small adapter that polls `sonicPiSession.recent()` for that job's records (with a timeout) and turns them into the
-`{ output, errors }` the loader expects. Until that exists the layer can be loaded by the harness but not driven from the lab
-page, and this file says so rather than implying otherwise.
+Behaviour change for a program that does not use the pattern verbs: **none** — the gate's regex does not match, the handle is
+inert, and `recent` is only a buffer.
+
+## 2. `app/web/web/data/completion.json` — data, not code
+
+One entry per primitive/operator (36), merged by the build into `entries` by name. This file is what the editor reads for a
+suggestion's summary, usage line and reference pane. Entries before: 831; after: 867.
+
+## 3. `app/web/web/data/reference/lang.json` — data, not code
+
+The **keys** of `pages` are the editor's function suggestions (`api.js`: `keywords.Func = ref.lang.map(p => p.key)`), so the
+same 36 are merged there as pages (`key`, `summary`, `usage`, `doc_html`). Pages before: 252; after: 288.
+Adding only `completion.json` changed nothing visible — measured, then fixed.
+
+## 4. Ours, inside our own directories
+
+    app/web/pattern/shim.rb            hand-written: the four things this runtime lacks (Thread, Rational#round/floor/ceil/%,
+                                       String#strip) plus a capability probe that refuses to continue if a patch did not take
+    app/web/pattern/library.rb         byte-identical copy of extensions/pattern/pattern-lib.rb    (cmp clean)
+    app/web/pattern/runtime.rb         byte-identical copy of extensions/pattern/runtime.rb       (cmp clean)
+    app/web/pattern/prelude.rb         hand-written: pplay, pstop, pdeclared, and the include of PampaPattern::Runtime
+    app/web/pattern/loader.js          hand-written: chunk loading, n-of-total, ready probe, disable()
+    app/web/pattern/pattern-boot.js    hand-written: visible state and the Run gate
+    app/web/pattern/session-run.js     hand-written: a job id -> { output, errors }
+    app/web/pattern/completion.js      hand-written: the 36 completion entries (data)
+    app/web/pattern/README.md          what it is, how to uninstall it, what it does not do
+    app/web/pattern/LEDGER.md          this file
+    app/web/scripts/build-pattern.mjs  builds the four served files; writes the source tree and the served copy; `--check` fails
+                                       when the served copy is stale; syncs sonic_pi.js when it differs; merges the two data files
+    app/web/web/pattern/*              generated by the above (pattern-prelude.js, pattern-boot.js, session-run.js)
+
+## 5. Deliberately **not** touched
+
+- the mruby sources and the wasm runtime (`app/web/runtime/**`) — no rebuild, no upstream Ruby change
+- `app/web/app/src/**` (the editor, its completion API, the highlighter)
+- `app/web/web/app.js` and the rest of the built app
+- `app/external/supersonic` (the engine submodule)
+- Shadertoy/gfx and Soundgineer (their own layers; neither runs Sonic Pi code)
+
+## 6. The one change on the desktop side
+
+    extensions/pattern/runtime.rb   ptranspose / pscale_to raise when an event's value is a Hash (a combined pattern), per
+                                    docs/plan/pattern-combine-spec.md §11.2, which recorded the behaviour as silently
+                                    ineffective. A layer's scalar values pass through as before. The web copy is
+                                    byte-identical, so both sides behave the same.
+
+## 7. How to uninstall
+
+1. delete `app/web/pattern/`, `app/web/web/pattern/` and `app/web/scripts/build-pattern.mjs`;
+2. revert the five hunks in `sonic_pi.js` — `grep -n 'SP-EXT(pattern)' app/web/web/sonic_pi.js` finds every one of them;
+3. regenerate `completion.json` and `reference/lang.json` (the merge is the only thing that wrote them);
+4. nothing else: no gem, no wasm, no runtime patch, no engine change. The session is a page load away from clean.
+
+## 8. Rebuild and re-check
+
+    cd app/web && node scripts/build-pattern.mjs           # both copies, sonic_pi.js sync, data merge
+    cd app/web && node scripts/build-pattern.mjs --check   # exit 1 when any served copy is stale
+
+    node tools/pattern-p0/harness.mjs     # 16 cases: ready, timing, multitrack, hotupdate, stop, tempo, mutation, soak,
+                                          # failedchunk, twosessions, ticktime, uigate, reload, looprule, loopover, combine
+    node tools/pattern-p0/operators.mjs   # the desktop's test-pattern-lib.rb on this runtime, then all 39 documented
+                                          # operators, one canonical call each
+
+Last run: **16/16** cases, **39/39** operators.
