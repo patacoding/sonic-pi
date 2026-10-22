@@ -117,7 +117,10 @@ pp_cls.class_eval do
           # The desktop rule: never sleep to the event. Wait only until the handover window opens (the event's moment
           # minus sched_ahead), then set the thread's logical time to the event's beat and let the scheduler stamp it.
           # ONE coordinate system throughout: link_beat_at_time(p.time) is the session beat of this thread's now.
-          pp_hold_beat = __p.link_beat_at_time(__p.link_time_at_beat(pp_at_beat) - __p.sched_ahead)
+          # Hand over one tick BEFORE the window opens, not exactly when it opens: measured, an event handed over at exactly
+          # target - sched_ahead is stamped at "now" when the engine reads it and is dropped (the new version's first event at a
+          # bar went missing this way). One tick is this scheduler's resolution (50 ms), so the lead is the resolution, not a fudge.
+          pp_hold_beat = __p.link_beat_at_time(__p.link_time_at_beat(pp_at_beat) - __p.sched_ahead - 0.05)
           pp_now_beat = __p.link_beat_at_time(__p.time)
           pp_wait = pp_hold_beat - pp_now_beat
           sleep pp_wait if pp_wait > 0
@@ -130,7 +133,12 @@ pp_cls.class_eval do
             puts "[ptrack] #{name} gen=#{pp_gen} value=#{e.value.inspect} base=#{pp_base.round(3)} target=#{pp_at_beat.round(3)} woke_at=#{pp_woke.round(3)} wait=#{pp_wait.round(3)}"
           end
           __p.time = __p.link_time_at_beat(pp_at_beat)
-          pp_tid[:last_at] = pp_at_beat          # the furthest beat this version has already handed to the scheduler
+          pp_tid[:last_at] = pp_at_beat
+          if $pampa_pattern_debug
+            puts "[ptrack] #{name} gen=#{pp_gen} value=#{e.value.inspect} target=#{pp_at_beat.round(3)} " \
+                 "start=#{__p.start.round(3)} time=#{__p.time.round(3)} sched=#{__p.sched_ahead.round(3)} " \
+                 "tt=#{(__p.start + __p.time + __p.sched_ahead).round(3)}"
+          end          # the furthest beat this version has already handed to the scheduler
           __p.beat = pp_at_beat
           # Delivery, as docs/plan/pattern-combine-spec.md section 4 has it: a Hash value is per-event parameters and its keys
           # become keyword arguments (combine); anything else is the verb's first positional. The user's own options win
