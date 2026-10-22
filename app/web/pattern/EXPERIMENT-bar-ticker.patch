@@ -1,8 +1,8 @@
 diff --git a/app/web/pattern/prelude.rb b/app/web/pattern/prelude.rb
-index c9a1e2988..d86299e6f 100644
+index c9a1e2988..ca89c6847 100644
 --- a/app/web/pattern/prelude.rb
 +++ b/app/web/pattern/prelude.rb
-@@ -41,172 +41,118 @@ pp_cls.class_eval do
+@@ -41,172 +41,130 @@ pp_cls.class_eval do
  
  
    define_method(:pplay) do |pat, use: :play, name: nil, cycle_beats: nil, align: true, synth: nil, **pp_opts|
@@ -89,6 +89,7 @@ index c9a1e2988..d86299e6f 100644
 +      # The bar that is already running counts as this track's first: a track created just after a publication would otherwise
 +      # wait a whole bar, and a swap would leave a bar of silence. Before the first publication there is no beat, and the guard
 +      # below skips that pass.
++      pp_first = true
 +      pp_seen = ($pampa_bar_seq || 0) - 1
        loop do
 -        break if pp_tid[:stop_now] || (pp_tid[:stop_at] && pp_base >= pp_tid[:stop_at]) || pp_tid[:superseded]
@@ -116,7 +117,13 @@ index c9a1e2988..d86299e6f 100644
 +        pp_cycle = pp_spec[:cycle] || pp_loop
 +        pp_loop_start = (pp_bar_start / pp_loop).floor * pp_loop
 +        pp_bar_end = pp_bar_start + pp_bar
++        # sent_keys (pattern-track-model.md §3.2): one bar line schedules its events once. Without it the same bar's events
++        # were emitted twice within a loop (measured: tail pitches 60,72,76,72,76,64).
++        pp_key = "#{pp_name}:#{pp_seen}"
++        pp_once = !($pampa_played ||= {})[pp_key]
++        $pampa_played[pp_key] = true
 +        pp_spec[:events].each do |e|
++          next unless pp_once
            next if e.value.equal?(pp_mini::REST)
 -          break if pp_tid[:stop_at] && pp_at_beat >= pp_tid[:stop_at]   # the boundary belongs to the new version
 -          # The desktop rule: never sleep to the event. Wait only until the handover window opens (the event's moment
@@ -149,7 +156,10 @@ index c9a1e2988..d86299e6f 100644
 -          # become keyword arguments (combine); anything else is the verb's first positional. The user's own options win
 -          # nothing -- a key in both places is an error, because silently overriding either would hide a mistake.
 +          at = pp_loop_start + e.whole.begin.to_f * pp_cycle
-+          next if at < pp_bar_start - 1e-9 || at >= pp_bar_end - 1e-9   # another bar's event, not this callback's
++          next if at < pp_bar_start - 1e-9 || at >= pp_bar_end - 1e-9   # another bar's event
++          # Taking over a bar that is ALREADY RUNNING must not replay it -- but only on this track's first pass: after that, the
++          # callback runs at the bar line with its events ahead of the clock.
++          next if pp_first && at < (__p.link_beat_at_time(__p.time) - 1e-9)   # another bar's event, not this callback's
 +          break unless ($pampa_pattern_pending || {})[pp_name].equal?(pp_spec)
 +          hold = __p.link_beat_at_time(__p.link_time_at_beat(at) - __p.sched_ahead - 0.05)
 +          wait = hold - __p.link_beat_at_time(__p.time)
@@ -188,6 +198,8 @@ index c9a1e2988..d86299e6f 100644
 -        sleep pp_wait if pp_wait > 0
 +        # Belt and braces: the runtime refuses a loop that neither sleeps nor syncs, and a body that skipped everything would
 +        # otherwise come straight back to the wait. One tick is the scheduler's resolution.
++        pp_first = false
++        $pampa_played.delete_if { |k, _| k.split(":").last.to_i < (pp_seen || 0) - 32 }
 +        sleep 0.05
        end
 -      puts "[ptrack] #{name} gen=#{pp_gen} left at beat=#{__p.link_beat_at_time(__p.time).round(3)}" if $pampa_pattern_debug
