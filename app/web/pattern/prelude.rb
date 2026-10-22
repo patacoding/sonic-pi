@@ -99,6 +99,9 @@ pp_cls.class_eval do
         pp_events.each do |e|
           break if pp_tid[:stop_now] || (pp_tid[:stop_at] && pp_base >= pp_tid[:stop_at])
           pp_at_beat = pp_base + e.whole.begin.to_f * pp_cycle
+          # A rest holds its position and makes no sound (pattern-combine-spec: "休止占位置、投递时不出声"). Delivery is the
+          # layer that must honour it: without this, sample("~") reached Sonic Pi and it answered "Unknown sample filter type".
+          next if e.value.equal?(pp_mini::REST)
           break if pp_tid[:stop_at] && pp_at_beat >= pp_tid[:stop_at]   # the boundary belongs to the new version
           # The desktop rule: never sleep to the event. Wait only until the handover window opens (the event's moment
           # minus sched_ahead), then set the thread's logical time to the event's beat and let the scheduler stamp it.
