@@ -84,6 +84,17 @@ pp_cls.class_eval do
       # A replaced track reconciles at a bar line (the desktop's bar-boundary rule), so the two versions abut there.
       pp_start = [pp_start, ((pp_now_beat / pp_bar).ceil * pp_bar)].max
       pp_start = [pp_start, pp_old[:stop_at]].max if pp_old[:stop_at]   # never before the old version leaves
+      # The old version hands events over ahead of time, so the swap bar has to be the first bar AFTER the last beat it already
+      # gave the scheduler: otherwise its event and the new version's first land on the same beat and the engine keeps one
+      # (measured: an old 64 beside the new 60 at 12.0, the 60 lost). This is the lazy update, at a bar line, computed globally.
+      pp_old_last = pp_old[:last_at]
+      if pp_old_last
+        pp_start = [pp_start, ((pp_old_last + 1e-6) / pp_bar).ceil * pp_bar].max
+      end
+      # ...and that bar must still be outside the scheduler's window. The old version hands its events over one sched_ahead
+      # early, so a bar line whose window is already open has an event of the old one on it; the new version's first event then
+      # lands on the same beat and the engine keeps only one -- measured: an old 64 beside the new 60 at 12.0, the 60 lost.
+      pp_start += pp_bar while pp_start <= pp_now_beat + pp_lead_beats
     end
     (pp_old[:stop_at] = pp_start) if pp_old             # it leaves exactly where this one begins
     pp_tid[:started_beat] = pp_start
@@ -110,11 +121,16 @@ pp_cls.class_eval do
           pp_now_beat = __p.link_beat_at_time(__p.time)
           pp_wait = pp_hold_beat - pp_now_beat
           sleep pp_wait if pp_wait > 0
+          # Re-check after the sleep: a swap can arrive WHILE an event is waiting (measured: the old version computed its 12.0
+          # event, slept, and emitted it although the new version had claimed 12.0 in the meantime). The check before the sleep is
+          # not enough; the window between deciding and sending is where the overlap was made.
+          break if pp_tid[:stop_now] || (pp_tid[:stop_at] && pp_at_beat >= pp_tid[:stop_at])
           if $pampa_pattern_debug
             pp_woke = __p.link_beat_at_time(__p.time)
             puts "[ptrack] #{name} gen=#{pp_gen} value=#{e.value.inspect} base=#{pp_base.round(3)} target=#{pp_at_beat.round(3)} woke_at=#{pp_woke.round(3)} wait=#{pp_wait.round(3)}"
           end
           __p.time = __p.link_time_at_beat(pp_at_beat)
+          pp_tid[:last_at] = pp_at_beat          # the furthest beat this version has already handed to the scheduler
           __p.beat = pp_at_beat
           # Delivery, as docs/plan/pattern-combine-spec.md section 4 has it: a Hash value is per-event parameters and its keys
           # become keyword arguments (combine); anything else is the verb's first positional. The user's own options win
@@ -150,6 +166,7 @@ pp_cls.class_eval do
     end
 
     { track: pp_track_name, generation: pp_gen, start_beat: pp_start.to_f, pp_events: pp_events.length,
+      superseded_before: !pp_old.nil?, old_last_at: (pp_old && pp_old[:last_at]),
       cycle_beats: pp_cycle, loop_beats: pp_loop,
       superseded_before: !pp_old.nil? }
   end
