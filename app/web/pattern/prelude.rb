@@ -45,14 +45,10 @@ pp_cls.class_eval do
     raise NotImplementedError, "pplay's max_pending: is not on the web yet" if max_pending
     pp_bar = ((get(:pampa_beats_per_bar) || 4)).to_f
     pp_loop = ((get(:pampa_loop_bars) || 1)).to_f * pp_bar
-    # The rule the tutorial's own examples force (pattern-tutorial.md line 80): ["c2", "e2"] in a 4-beat loop is 2 sounds and 2
-    # beats of SILENCE, not two half-notes. So an element is one beat and the pattern's own length is its element count; the
-    # loop is the period it repeats on, and a pattern shorter than the loop rests until the loop line. (Lines 64 and 174 say
-    # elements divide the cycle instead; they cannot both be true, and line 80 is the one with a worked example. Raising
-    # pampa_loop_bars therefore must not slow a pattern down, which is what the player reported.)
-    pp_events_peek = pat.query_arc(0r, 1r).select { |e| e.whole }
-    pp_own_beats = pp_events_peek.empty? ? pp_loop : pp_events_peek.length.to_f
-    pp_cycle = (cycle_beats || pp_own_beats).to_f
+    # The cycle is the loop unless cycle_beats: says otherwise, and the elements divide the cycle (pattern-tutorial.md lines
+    # 64 and 174). A cycle shorter than the loop sounds for its own length and then rests until the loop line: that is what
+    # cycle_beats: 2 does ["c2", "e2"] -- c2 on beat 0, e2 on beat 1, then two beats of silence.
+    pp_cycle = (cycle_beats || pp_loop).to_f
     raise ArgumentError, "cycle_beats (#{pp_cycle}) may not exceed the loop (#{pp_loop} beats)" if pp_cycle > pp_loop
     raise ArgumentError, "cycle_beats must be positive, got #{pp_cycle}" unless pp_cycle > 0
     pp_name = name || ("pattern_" + ($pampa_pattern_generation = ($pampa_pattern_generation || 0) + 1).to_s)
