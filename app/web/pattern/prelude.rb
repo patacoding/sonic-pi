@@ -23,16 +23,25 @@ $pampa_pattern_tracks ||= {}
 $pampa_pattern_generation ||= 0
 
 pp_cls.class_eval do
+  # PampaPattern::Runtime is not in this build yet: its module spans several top-level units, so the chunk splitter cut
+  # it and the include failed with 'uninitialized constant PampaPattern'. It is the source of the documented operators
+  # (pply, psine, psegment, pval, ...), so it is the next thing to port, with a splitter that keeps a module whole.
+
+  # Until the include reaches the programs (measured: it does not -- 'undefined method ppattern' inside a run), the product's
+  # own ppattern stays, with the same rules: arrays only, cycle_beats:, and nothing else.
   define_method(:ppattern) do |spec, cycle_beats: nil|
     unless spec.is_a?(Array)
-      raise ArgumentError, "ppattern takes an array -- the only way to write a track; a string is one value, " \
-        "so [\"c2 e2\"] is one event, not two"
+      raise ArgumentError, "ppattern takes an array -- the only way to write a track; a string is one value"
     end
-    to_mini = lambda do |x|
-      x.is_a?(Array) ? ("[" + x.map { |y| to_mini.call(y) }.join(" ") + "]") : x.to_s
+    pp_to_mini = lambda do |x|
+      x.is_a?(Array) ? ("[" + x.map { |y| pp_to_mini.call(y) }.join(" ") + "]") : x.to_s
     end
-    pp_mini.pattern(to_mini.call(spec))
+    pp_mini.pattern(pp_to_mini.call(spec))
   end
+
+  # ppattern itself comes from PampaPattern::Runtime (the desktop's own, with cycle_beats: and __keep_rests), copied in
+  # byte-for-byte with the library, so there is no second implementation to drift.
+
 
   define_method(:pplay) do |pat, use: :play, name: nil, cycle_beats: nil, align: true, cycles: nil,
                              map: nil, sync: nil, max_pending: nil, synth: nil, **pp_opts|
@@ -155,7 +164,7 @@ pp_cls.class_eval do
 
   # prun :begin / :end bracket a Run: a track a Run does not re-declare is one the buffer no longer asks for, so
   # commenting a pplay out stops sounding instead of playing forever.
-  define_method(:prun) do |phase|
+  define_method(:pdeclared) do |phase|
     if phase == :begin
       $pampa_pattern_token = ($pampa_pattern_token || 0) + 1
     else
