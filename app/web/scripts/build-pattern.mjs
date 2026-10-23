@@ -160,6 +160,10 @@ for (const rel of ["sonic_pi.js"]) {
   console.log(`  synced web/${rel} -> build/web/${rel} (the served copy)`);
 }
 
+// Both runtime modules get the Stop shim, every build: the source copy and the one the dev server serves.
+for (const dir of [ROOT, path.join(ROOT, "build/web")]) {
+  if (ensureRuntimeShim(dir)) console.log(`  runtime shim -> ${path.relative(ROOT, dir) || "."}/runtime/sp_runtime.js`);
+}
 for (const extra of [path.join(ROOT, "build/web/pattern")]) {
   if (!fs.existsSync(path.dirname(extra))) continue;
   fs.mkdirSync(extra, { recursive: true });
