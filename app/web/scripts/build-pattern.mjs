@@ -160,9 +160,23 @@ for (const rel of ["sonic_pi.js"]) {
   console.log(`  synced web/${rel} -> build/web/${rel} (the served copy)`);
 }
 
-// Both runtime modules get the Stop shim, every build: the source copy and the one the dev server serves.
+// Both runtime modules get the Stop shim, every build: the source copy and the one the dev server serves. Self-contained on purpose:
+// this checkout's wasm predates the sp_silence export (the C has it), and without it Stop cannot silence anything. A rebuild on a
+// machine with Emscripten makes this a no-op.
 for (const dir of [ROOT, path.join(ROOT, "build/web")]) {
-  if (ensureRuntimeShim(dir)) console.log(`  runtime shim -> ${path.relative(ROOT, dir) || "."}/runtime/sp_runtime.js`);
+  const runtimeFile = path.join(dir, "runtime", "sp_runtime.js");
+  if (!fs.existsSync(runtimeFile)) continue;
+  const text = fs.readFileSync(runtimeFile, "utf8");
+  if (text.includes("__spSilenceShim")) continue;
+  const shim = [
+    "const __spSilenceShim = (m) => {",
+    '  if (!m || typeof m._sp_silence === "function" || !m._sp_stop_all) return m;',
+    "  m._sp_silence = () => { m._sp_stop_all(); };",
+    "  return m;",
+    "};",
+  ].join("\n");
+  fs.writeFileSync(runtimeFile, shim + "\n" + text);
+  console.log(`  runtime shim -> ${path.relative(ROOT, dir) || "."}/runtime/sp_runtime.js`);
 }
 for (const extra of [path.join(ROOT, "build/web/pattern")]) {
   if (!fs.existsSync(path.dirname(extra))) continue;
