@@ -51,9 +51,10 @@
 4. **无名的轨以"本次 Run 里的声明序号"命名** ✓（`pattern_1`、`pattern_2` …；桌面用调用位置）。跨 Run 稳定 ⇒ 能正确
    取代 ✓（`anonname` 用例：两次 Run 后仍是 `pattern_1`/`pattern_2`，不会翻倍）。代价：**增删或调换 pplay 的顺序**会让名字
    跟着变（第一行换成 `pattern_2`）⇒ 那时旧的不再被同名取代，会多出一轨 ✗ —— 用显式 `name:` 可完全避免。
-5. **本 checkout 的 wasm 与 app 版本不匹配** ✗ —— `sp_silence` 在 C 里有（`sp_host.c:703`），这份 10-10 的 wasm 没导出；
-   我在 `build/web/runtime/sp_runtime.js`（以及 `dist` 副本）里加了兜底：缺 `sp_silence` 时改调 `sp_stop_all()` ⇒ Stop 会停
-   声但**没有淡出**。真修是 `scripts/build-runtime.sh --wasm`（需要 Emscripten）——**只有这台机器缺 emcc 时才需要**。
+5. **Stop：立刻停声 ✓ 已接受（不需要淡出）** ✓ —— 本 checkout 的 wasm 比 app 旧 ✗（`sp_silence` 在 C 里 ✓
+   `sp_host.c:703` ✓ 但这份 10-10 的 wasm 没有导出 ✗）。`sp_runtime.js` 的兜底在缺它时改调 `sp_stop_all()` ✓
+   ⇒ **Stop 立刻停声 ✓**，这正是要的行为 ✓（用户 2026-10-23 明确：不需要淡出 ✓）。
+   重建 wasm（`scripts/build-runtime.sh --wasm` ✓ 需 Emscripten）现在是**可选**✓，只为去掉一行兜底 ✓。
 6. **我覆盖过 `dist/web`（发布树）** ✗ —— 用 dev 构建覆盖了它，且它不在 git 里，原内容不可恢复。新的可部署目录是
    `dist/web-pattern/`，`dist/web/` 我不再碰。
 7. **CDN 响应头未成文** ✗ —— 需要 COOP/COEP（否则 SAB 引擎起不来），`data/` 与 `pattern/` 建议 no-store 或按构建指纹缓存。
