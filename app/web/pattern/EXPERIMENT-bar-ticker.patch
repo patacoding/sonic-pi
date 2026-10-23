@@ -1,8 +1,8 @@
 diff --git a/app/web/pattern/prelude.rb b/app/web/pattern/prelude.rb
-index c9a1e2988..5750ac2c3 100644
+index c9a1e2988..9735ba87d 100644
 --- a/app/web/pattern/prelude.rb
 +++ b/app/web/pattern/prelude.rb
-@@ -41,172 +41,139 @@ pp_cls.class_eval do
+@@ -41,172 +41,141 @@ pp_cls.class_eval do
  
  
    define_method(:pplay) do |pat, use: :play, name: nil, cycle_beats: nil, align: true, synth: nil, **pp_opts|
@@ -123,7 +123,9 @@ index c9a1e2988..5750ac2c3 100644
 +        pp_bar_end = pp_bar_start + pp_bar
 +        # sent_keys (pattern-track-model.md §3.2): one bar line schedules its events once. Without it the same bar's events
 +        # were emitted twice within a loop (measured: tail pitches 60,72,76,72,76,64).
-+        pp_key = "#{pp_name}:#{pp_seen}"
++        # The key carries the generation: a name reused by a new version must not inherit the old version's already-played bars, or
++        # the new track would skip its first bar (measured: holes and 0-length gaps once the same name was replayed).
++        pp_key = "#{pp_name}:#{pp_spec[:gen]}:#{pp_seen}"
 +        pp_once = !($pampa_played ||= {})[pp_key]
 +        $pampa_played[pp_key] = true
 +        pp_spec[:events].each do |e|
@@ -170,7 +172,7 @@ index c9a1e2988..5750ac2c3 100644
 +          sleep wait if wait > 0
 +          break if pp_spec[:stop] || !($pampa_pattern_pending || {})[pp_name].equal?(pp_spec)   # re-check after sleeping
 +          break if pp_spec[:stop]
-+          puts "[ptrack] #{pp_name} seq=#{pp_seen} at=#{at.round(3)} beat_now=#{__p.beat.round(3)}" if $pampa_pattern_debug
++          puts "[ptrack] #{pp_name} spec=#{pp_spec.object_id} stop=#{pp_spec[:stop].inspect} seq=#{pp_seen} at=#{at.round(3)} now=#{__p.beat.round(3)}" if $pampa_pattern_debug
 +          __p.time = __p.link_time_at_beat(at)
 +          __p.beat = at
            if e.value.is_a?(Hash)
