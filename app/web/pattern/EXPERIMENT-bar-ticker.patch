@@ -1,8 +1,8 @@
 diff --git a/app/web/pattern/prelude.rb b/app/web/pattern/prelude.rb
-index c9a1e2988..cbc2e26f2 100644
+index c9a1e2988..5750ac2c3 100644
 --- a/app/web/pattern/prelude.rb
 +++ b/app/web/pattern/prelude.rb
-@@ -41,172 +41,132 @@ pp_cls.class_eval do
+@@ -41,172 +41,139 @@ pp_cls.class_eval do
  
  
    define_method(:pplay) do |pat, use: :play, name: nil, cycle_beats: nil, align: true, synth: nil, **pp_opts|
@@ -78,6 +78,8 @@ index c9a1e2988..cbc2e26f2 100644
 +    pp_spec = { name: pp_name, gen: pp_gen, events: pat.query_arc(0r, 1r).select { |e| e.whole },
 +                use: use, opts: pp_opts, synth: synth, cycle: pp_cycle, loop: pp_loop, bar: pp_bar }
 +    # The registry is the ONLY thing a Run changes. Nothing starts here; the next bar line does that.
++    pp_old_spec = ($pampa_pattern_pending || {})[pp_name]
++    pp_old_spec[:stop] = true if pp_old_spec          # the version being replaced leaves at once, not one event later
 +    ($pampa_pattern_pending ||= {})[pp_name] = pp_spec
 +    ($pampa_pattern_run_declared ||= {})[pp_name] = true
 +    __pticker_start
@@ -110,7 +112,7 @@ index c9a1e2988..cbc2e26f2 100644
 +        pp_bar_start = $pampa_bar_beat || __p.link_beat_at_time(__p.time)
 +        break if pp_tid[:stop]
 +        # lifecycle, at the bar line: am I still the version this buffer declares?
-+        break unless ($pampa_pattern_pending || {})[pp_name].equal?(pp_spec)
++        break if pp_spec[:stop] || !($pampa_pattern_pending || {})[pp_name].equal?(pp_spec)
 +        # loop = get(:pampa_loop_bars) * get(:pampa_beats_per_bar); the cycle restarts at each LOOP line, and this callback only
 +        # schedules the events that fall inside THIS bar. A cycle shorter than the loop therefore leaves the later bars empty by
 +        # construction, and a track never waits for the next loop to sound its first bar.
@@ -162,11 +164,13 @@ index c9a1e2988..cbc2e26f2 100644
 +          # Taking over a bar that is ALREADY RUNNING must not replay it -- but only on this track's first pass: after that, the
 +          # callback runs at the bar line with its events ahead of the clock.
 +          next if pp_first && at < (__p.link_beat_at_time(__p.time) - 1e-9)   # another bar's event, not this callback's
-+          break unless ($pampa_pattern_pending || {})[pp_name].equal?(pp_spec)
++          break if pp_spec[:stop] || !($pampa_pattern_pending || {})[pp_name].equal?(pp_spec)
 +          hold = __p.link_beat_at_time(__p.link_time_at_beat(at) - __p.sched_ahead - 0.05)
 +          wait = hold - __p.link_beat_at_time(__p.time)
 +          sleep wait if wait > 0
-+          break unless ($pampa_pattern_pending || {})[pp_name].equal?(pp_spec)   # re-check after sleeping
++          break if pp_spec[:stop] || !($pampa_pattern_pending || {})[pp_name].equal?(pp_spec)   # re-check after sleeping
++          break if pp_spec[:stop]
++          puts "[ptrack] #{pp_name} seq=#{pp_seen} at=#{at.round(3)} beat_now=#{__p.beat.round(3)}" if $pampa_pattern_debug
 +          __p.time = __p.link_time_at_beat(at)
 +          __p.beat = at
            if e.value.is_a?(Hash)
@@ -248,11 +252,14 @@ index c9a1e2988..cbc2e26f2 100644
 -      $pampa_decl = 0            # unnamed tracks take pattern_1, pattern_2, ... in this Run's order
 +  define_method(:pstop) do |pp_which = nil|
 +    if pp_which
++      pp_s = ($pampa_pattern_pending || {})[pp_which]
++      pp_s[:stop] = true if pp_s
 +      ($pampa_pattern_pending || {}).delete(pp_which)
      else
 -      ($pampa_pattern_tracks || {}).each do |_pp_k, pp_t|
 -        pp_t[:stop_at] = 0 if pp_t[:token] != $pampa_pattern_token && !pp_t[:stop_now]
 -      end
++      ($pampa_pattern_pending || {}).each_value { |pp_s| pp_s[:stop] = true }
 +      ($pampa_pattern_pending || {}).clear
      end
 -    { token: $pampa_pattern_token, tracks: ($pampa_pattern_tracks || {}).keys }
