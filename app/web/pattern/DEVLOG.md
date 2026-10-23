@@ -145,6 +145,21 @@ loop_bars=2 + reload  60 在 loop 线 ✓ 65 在 +4 拍 ✓（相位保持 ✓�
 
 ---
 
+## 5.1 构建目录的真相（2026-10-23 补 ✓）
+
+```
+项目约定 ✓   npm run build:web  →  app/web/build/web        （scripts/build-web.mjs 第 27 行 OUT）
+             npm run serve      →  开发服务器直接服务 app/web ✓
+我干的 ✗     把 build/web 复制到【仓库根】dist/web ✓ 让你以为那是发布目录 ✗
+             ⇒ 发布请按项目约定用 app/web/build/web ✓（dist/web 只是它的逐字节副本 ✓）
+
+⛔ 不要在这个 checkout 里跑 npm run build:web ✗
+   它会先 rmSync(build/web) 再重建 ✗ 而这里还会顺带构建 site ✗
+   需要 sonic-pi/etc/examples/cards.json ✗ —— sparse checkout 里没有 ⇒ 清空后失败 ✗
+   （我撞了一次 ✓ 之后用 dist/web 逐字节恢复 ✓）
+   要跑它请先在完整 checkout 里 ✓ 或补齐 etc/examples ✓
+```
+
 ## 6. 这一轮我犯的错（写下来防止再犯 ✗）
 
 | 错误 | 后果 | 现在的规则 |
