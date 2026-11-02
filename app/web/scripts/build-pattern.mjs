@@ -164,8 +164,9 @@ for (const rel of ["sonic_pi.js"]) {
 // this checkout's wasm predates the sp_silence export (the C has it), and without it Stop cannot silence anything. A rebuild on a
 // machine with Emscripten makes this a no-op.
 for (const dir of [ROOT, path.join(ROOT, "build/web")]) {
-  const runtimeFile = path.join(dir, "runtime", "sp_runtime.js");
-  if (!fs.existsSync(runtimeFile)) continue;
+  // The runtime module is sp_runtime.js in older builds and sp_runtime.mjs in the newer one; shim whichever is there.
+  const runtimeFile = ["sp_runtime.js", "sp_runtime.mjs"].map((n) => path.join(dir, "runtime", n)).find((f) => fs.existsSync(f));
+  if (!runtimeFile) continue;
   const text = fs.readFileSync(runtimeFile, "utf8");
   if (text.includes("__spSilenceShim")) continue;
   const shim = [
