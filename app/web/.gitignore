@@ -17,3 +17,6 @@ web/site/
 web/info/
 web/tutorial.html
 web/tutorial-*.html
+web/pattern/pattern-prelude.js
+web/pattern/pattern-boot.js
+web/pattern/session-run.js
