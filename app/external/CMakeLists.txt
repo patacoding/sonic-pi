@@ -93,7 +93,8 @@ foreach(opt
 endforeach()
 
 # SuperSonic — BUILD_ALWAYS ensures source changes are picked up
-# without needing to manually delete stamp files.
+# without needing to manually delete stamp files. (SONIC_PI_GUI_ONLY clears
+# it; see the block above.)
 # SOURCE_DIR is the supersonic submodule (see cmake/supersonic.cmake, which
 # also names the engine and its bridge). It is scsynth hosted on clockwork
 # (AGPL-3.0-or-later, or a commercial licence — see clockwork/LICENSE), which
@@ -104,12 +105,37 @@ endforeach()
 # and plugin hosting is CLOCKWORK_PLUGINS.
 include(${CMAKE_CURRENT_LIST_DIR}/../cmake/supersonic.cmake)
 
-# VST3 + CLAP hosting: the whole reason for the engine swap, so ON here and
-# named rather than inherited. It is an option, not a constant, because the
-# SDKs are fetched at configure time and Debian ships neither: the package
-# build (packaging/debian/rules) turns it off, and with it goes the plugin
-# bridge — the copy step below knows.
-option(CLOCKWORK_PLUGINS "Host VST3 and CLAP plugins in the engine (fetches the SDKs at configure time)" ON)
+# BUILD_ALWAYS is what makes an edit under app/external/... visible without
+# deleting stamp files, and it is the reason a no-change build still re-enters
+# the nested CMake + cargo build. SONIC_PI_GUI_ONLY (see app/CMakeLists.txt)
+# turns it off for GUI-only iterations, where nothing the engine is built from
+# can have changed: the stamps then make this project a no-op. A tree that has
+# never built the engine still builds it here, because the stamps are missing -
+# so this cannot produce a half-built tree, only a stale engine, and only after
+# an engine edit that a GUI-only build is explicitly not promising to see.
+#
+# OURS, and upstream has nothing equivalent: it is what makes win-build-gui-only.bat
+# a GUI-only build in the first place rather than a full engine rebuild. See
+# docs/dev-discipline.md 4.2.
+if(SONIC_PI_GUI_ONLY)
+    set(SUPERSONIC_BUILD_ALWAYS OFF)
+else()
+    set(SUPERSONIC_BUILD_ALWAYS ON)
+endif()
+
+# VST3 + CLAP hosting, on plugin tracks: off until Sonic Pi ships it, so a
+# build hosts plugins only when asked (-DCLOCKWORK_PLUGINS=ON). With it go the
+# plugin bridge (the copy step below), the GUI's Tracks tab and Spider's track
+# functions (gui/CMakeLists.txt, gui/utils/plugins.h); the release staging
+# reads it from this build's cache to know whether the bridge must ship. The
+# SDKs are fetched at configure time, and Debian ships neither: the package
+# build (packaging/debian/rules) says off too.
+#
+# NOTE FOR THIS FORK: our Windows tree asks for it explicitly - build-dev.cmd
+# passes -DCLOCKWORK_PLUGINS=ON - because plugins on plugin tracks are a feature
+# we use. Relying on this default would silently drop the plugin bridge, the
+# Tracks tab and the track functions from the next clean build.
+option(CLOCKWORK_PLUGINS "Host VST3 and CLAP plugins in the engine (fetches the SDKs at configure time)" OFF)
 #
 # PREFIX and BINARY_DIR are deliberately SHORT, and on Windows that is not
 # cosmetic. Left to itself ExternalProject builds under
@@ -129,7 +155,7 @@ ExternalProject_Add(supersonic
     SOURCE_DIR ${SUPERSONIC_SOURCE_DIR}
     BINARY_DIR ${CMAKE_BINARY_DIR}/ss/b
     DOWNLOAD_COMMAND ""
-    BUILD_ALWAYS ON
+    BUILD_ALWAYS ${SUPERSONIC_BUILD_ALWAYS}
     CMAKE_ARGS
         -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
         -DBUILD_TESTS=OFF
@@ -233,7 +259,8 @@ endif()
 # removed so the engine cannot pick the stale one.
 #
 # No plugins, no bridge: clockwork only builds it under CLOCKWORK_PLUGINS, so a
-# build with hosting off (the Debian package) has nothing to copy.
+# build with hosting off has nothing to copy, and one an earlier build left in
+# server/native is removed, so it cannot ship with this one.
 if(WIN32)
     set(SUPERSONIC_BRIDGE_FILE "${SUPERSONIC_BRIDGE_NAME}.exe")
 elseif(APPLE)
@@ -242,7 +269,10 @@ else()
     set(SUPERSONIC_BRIDGE_FILE "${SUPERSONIC_BRIDGE_NAME}")
 endif()
 if(NOT CLOCKWORK_PLUGINS)
-    set(_ss_bridge_cmd "")
+    set(_ss_bridge_cmd
+        COMMAND ${CMAKE_COMMAND} -E rm -rf
+            "${CMAKE_CURRENT_SOURCE_DIR}/../server/native/${SUPERSONIC_BRIDGE_FILE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/../server/native/${SUPERSONIC_BRIDGE_NAME}")
 elseif(APPLE)
     set(_ss_bridge_cmd
         COMMAND ${CMAKE_COMMAND} -E rm -f

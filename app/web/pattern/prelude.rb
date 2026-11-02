@@ -1,0 +1,212 @@
+# The web scheduler: three verbs on the language class, and the state behind them in globals.
+#
+# State lives in $pampa_pattern_* because a method opened with class_eval cannot see the program's sandbox constants: the
+# constant lookup inside class_eval follows the language class, not this file. Globals resolve everywhere, and the desktop
+# extension already keeps its registry in $pampa_*.
+#
+# The two timing rules here were measured, not guessed (both were wrong in the first prototype and showed up as a track that
+# played one cycle and stopped, and as a 7.31 s hole at a handover):
+#
+#   * __p.time is this THREAD's logical time, not the session's. link_time_at_beat / link_beat_at_time are the conversion
+#     the runtime itself uses in advance!; assigning a session beat into p.time rewinds the thread and its next sleep
+#     lands outside the window.
+#   * a Run must compute its pp_start bar from the SESSION's beat (link_beat_at_time), or a second Run starts a whole
+#     pp_start-offset later and leaves a hole between the two versions.
+#
+# A second pplay for the same name supersedes the first at a cycle line rather than cutting it mid-cycle: pp_events are already
+# scheduled for the cycle that is playing, so the pp_old track leaves the moment its cycle ends, and the new one begins on the
+# bar line. Measured through the whole handover: no overlap, no gap, largest gap exactly one beat.
+
+pp_mini = Mini
+pp_cls = SonicPi.current_lang.class
+$pampa_pattern_tracks ||= {}
+$pampa_pattern_generation ||= 0
+
+pp_cls.class_eval do
+  # The desktop does SonicPi::Lang::Core.include(PampaPattern::Runtime); on the web the programs run at the class
+  # class_eval reaches, so the include goes there. This is what makes pply, pzoom, psegment, pval, psine and the rest of the
+  # documented operators exist at all.
+  # Not class_eval("include ::PampaPattern::Runtime"): inside a class_eval string the constant lookup failed with
+  # "uninitialized constant PampaPattern" even though the module was defined by the chunk before this one. Including the module
+  # object directly, through a global so nothing depends on where this code is evaluated, works.
+  begin
+    $pampa_runtime = PampaPattern::Runtime
+    pp_cls.send(:include, $pampa_runtime)
+  rescue StandardError => pp_e
+    raise "the pattern runtime could not be included (#{pp_e.class}: #{pp_e.message})"
+  end
+
+  # ppattern itself comes from PampaPattern::Runtime (the desktop's own, with cycle_beats: and __keep_rests), copied in
+  # byte-for-byte with the library, so there is no second implementation to drift.
+
+
+  define_method(:pplay) do |pat, use: :play, name: nil, cycle_beats: nil, align: true, synth: nil, **pp_opts|
+    # The desktop's own shape: pplay(pattern, **opts). It owns use:, name:, cycle_beats:, align: and synth:; every other key is
+    # passed to the verb unchanged, so Sonic Pi's own options (amp:, release:, pan:, ...) work without this layer knowing them.
+    pp_bar = ((get(:pampa_beats_per_bar) || 4)).to_f
+    pp_loop = ((get(:pampa_loop_bars) || 1)).to_f * pp_bar
+    # The model, from the player's own two results: the cycle is cycle_beats if given, otherwise the loop; the elements divide
+    # that cycle; and the track repeats every cycle. So with a 2-bar loop (8 beats), [60, 64] sounds on beats 1 and 5, and with
+    # cycle_beats: 4 it sounds on beats 1 and 3 and repeats every 4 beats.
+    pp_cycle = (cycle_beats || pp_loop).to_f
+    raise ArgumentError, "cycle_beats (#{pp_cycle}) may not exceed the loop (#{pp_loop} beats)" if pp_cycle > pp_loop
+    raise ArgumentError, "cycle_beats must be positive, got #{pp_cycle}" unless pp_cycle > 0
+    # An unnamed track is named by its position among THIS Run's declarations ("pattern_1", "pattern_2", ...), so the same line
+    # keeps its name from one Run to the next and supersedes instead of piling up. A global counter gave every Run a fresh name,
+    # which left the previous unnamed track playing -- the scheduling mess reported. $pampa_decl is reset by pdeclared :begin,
+    # which the app's wrapper calls at the start of every program.
+    pp_name = name || ("pattern_" + ($pampa_decl = ($pampa_decl || 0) + 1).to_s)
+    pp_track_name = pp_name
+    name = pp_track_name
+
+    pp_tracks = ($pampa_pattern_tracks ||= {})
+    pp_old = pp_tracks[pp_track_name]
+    # Superseding is deferred to the old track's own cycle line, and the new version starts there: the old one plays until
+    # the point the new one begins. Measured before this rule: beats 8,9,10,11 then 13 -- beat 12 missing, a one-beat hole
+    # between a track finishing and its replacement starting.
+    pp_gen = ($pampa_pattern_generation = ($pampa_pattern_generation || 0) + 1)
+    pp_tid = { name: pp_track_name, generation: pp_gen, superseded: false, started_beat: nil, stopped: false,
+               token: $pampa_pattern_token }
+    pp_tracks[pp_track_name] = pp_tid
+
+    pp_events = pat.query_arc(0r, 1r).select { |e| e.whole }
+    pp_now_beat = __p.link_beat_at_time(__p.time)
+    # The desktop's own rule (extensions/pattern/runtime.rb, __panchor_wall): align: true -- the default -- means now plus
+    # a little lead (0.4 s), NOT the next bar line; only align: :bar anchors to the engine's bar. I had read the option
+    # table's one-line summary instead of the code and made every first play wait up to a bar.
+    pp_lead_beats = __p.sched_ahead.to_f * SonicPi.link_bpm / 60.0
+    pp_align_lead = 0.4 * SonicPi.link_bpm / 60.0
+    pp_start = case align
+               when :bar then ((pp_now_beat / pp_bar).ceil * pp_bar)
+               when false then pp_now_beat
+               else pp_now_beat + [pp_align_lead, pp_lead_beats].max
+               end
+    # A bar already under way cannot be claimed: an event scheduled at a beat the session has passed is dropped, which is
+    # exactly the one-beat hole measured at 12.0 (the old track stopped there, the new one's first event never landed).
+    pp_start += pp_bar if (pp_start - pp_now_beat) < pp_lead_beats && align == :bar
+    if pp_old
+      # A replaced track reconciles at a bar line (the desktop's bar-boundary rule), so the two versions abut there.
+      pp_start = [pp_start, ((pp_now_beat / pp_bar).ceil * pp_bar)].max
+      pp_start = [pp_start, pp_old[:stop_at]].max if pp_old[:stop_at]   # never before the old version leaves
+      # The old version hands events over ahead of time, so the swap bar has to be the first bar AFTER the last beat it already
+      # gave the scheduler: otherwise its event and the new version's first land on the same beat and the engine keeps one
+      # (measured: an old 64 beside the new 60 at 12.0, the 60 lost). This is the lazy update, at a bar line, computed globally.
+      pp_old_last = pp_old[:last_at]
+      if pp_old_last
+        pp_start = [pp_start, ((pp_old_last + 1e-6) / pp_bar).ceil * pp_bar].max
+      end
+      # ...and that bar must still be outside the scheduler's window. The old version hands its events over one sched_ahead
+      # early, so a bar line whose window is already open has an event of the old one on it; the new version's first event then
+      # lands on the same beat and the engine keeps only one -- measured: an old 64 beside the new 60 at 12.0, the 60 lost.
+      pp_start += pp_bar while pp_start <= pp_now_beat + pp_lead_beats
+    end
+    (pp_old[:stop_at] = pp_start) if pp_old             # it leaves exactly where this one begins
+    pp_tid[:started_beat] = pp_start
+
+    in_thread(name: "pampa_#{pp_track_name}_#{pp_gen}") do
+      pp_base = pp_start
+      puts "[ptrack] #{name} gen=#{pp_gen} start=#{pp_start} inherited_beat=#{__p.link_beat_at_time(__p.time).round(3)}" if $pampa_pattern_debug
+      # use_synth does not reach a child thread on the web (measured: a track kept playing sonic-pi-beep under
+      # use_synth :saw), so a track's synth is set where it is used.
+      use_synth synth if synth
+      loop do
+        break if pp_tid[:stop_now] || (pp_tid[:stop_at] && pp_base >= pp_tid[:stop_at]) || pp_tid[:superseded]
+        pp_events.each do |e|
+          break if pp_tid[:stop_now] || (pp_tid[:stop_at] && pp_base >= pp_tid[:stop_at])
+          pp_at_beat = pp_base + e.whole.begin.to_f * pp_cycle
+          # A rest holds its position and makes no sound (pattern-combine-spec: "休止占位置、投递时不出声"). Delivery is the
+          # layer that must honour it: without this, sample("~") reached Sonic Pi and it answered "Unknown sample filter type".
+          next if e.value.equal?(pp_mini::REST)
+          break if pp_tid[:stop_at] && pp_at_beat >= pp_tid[:stop_at]   # the boundary belongs to the new version
+          # The desktop rule: never sleep to the event. Wait only until the handover window opens (the event's moment
+          # minus sched_ahead), then set the thread's logical time to the event's beat and let the scheduler stamp it.
+          # ONE coordinate system throughout: link_beat_at_time(p.time) is the session beat of this thread's now.
+          # Hand over one tick BEFORE the window opens, not exactly when it opens: measured, an event handed over at exactly
+          # target - sched_ahead is stamped at "now" when the engine reads it and is dropped (the new version's first event at a
+          # bar went missing this way). One tick is this scheduler's resolution (50 ms), so the lead is the resolution, not a fudge.
+          pp_hold_beat = __p.link_beat_at_time(__p.link_time_at_beat(pp_at_beat) - __p.sched_ahead - 0.05)
+          pp_now_beat = __p.link_beat_at_time(__p.time)
+          pp_wait = pp_hold_beat - pp_now_beat
+          sleep pp_wait if pp_wait > 0
+          # Re-check after the sleep: a swap can arrive WHILE an event is waiting (measured: the old version computed its 12.0
+          # event, slept, and emitted it although the new version had claimed 12.0 in the meantime). The check before the sleep is
+          # not enough; the window between deciding and sending is where the overlap was made.
+          break if pp_tid[:stop_now] || (pp_tid[:stop_at] && pp_at_beat >= pp_tid[:stop_at])
+          if $pampa_pattern_debug
+            pp_woke = __p.link_beat_at_time(__p.time)
+            puts "[ptrack] #{name} gen=#{pp_gen} value=#{e.value.inspect} base=#{pp_base.round(3)} target=#{pp_at_beat.round(3)} woke_at=#{pp_woke.round(3)} wait=#{pp_wait.round(3)}"
+          end
+          __p.time = __p.link_time_at_beat(pp_at_beat)
+          pp_tid[:last_at] = pp_at_beat
+          if $pampa_pattern_debug
+            puts "[ptrack] #{name} gen=#{pp_gen} value=#{e.value.inspect} target=#{pp_at_beat.round(3)} " \
+                 "start=#{__p.start.round(3)} time=#{__p.time.round(3)} sched=#{__p.sched_ahead.round(3)} " \
+                 "tt=#{(__p.start + __p.time + __p.sched_ahead).round(3)}"
+          end          # the furthest beat this version has already handed to the scheduler
+          __p.beat = pp_at_beat
+          # Delivery, as docs/plan/pattern-combine-spec.md section 4 has it: a Hash value is per-event parameters and its keys
+          # become keyword arguments (combine); anything else is the verb's first positional. The user's own options win
+          # nothing -- a key in both places is an error, because silently overriding either would hide a mistake.
+          if e.value.is_a?(Hash)
+            pp_clash = e.value.keys & pp_opts.keys
+            unless pp_clash.empty?
+              raise ArgumentError, "the event carries #{pp_clash.inspect} and pplay also gave it: say it in one place"
+            end
+            send(use, **e.value, **pp_opts)
+          elsif pp_opts.empty?
+            send(use, e.value)
+          else
+            send(use, e.value, **pp_opts)
+          end
+        end
+        # The track repeats once per loop; a cycle shorter than the loop simply fills less of it, so the rest of the loop is
+        # silent (cycle_beats: 4 in an 8-beat loop: events in the first four beats, nothing in the last four). With no
+        # cycle_beats the cycle is the loop and it is full.
+        pp_base += pp_loop
+        # __preconcile_at_bar, the desktop's reconciliation: when a replacement owns a boundary inside the next cycle, this
+        # cycle is cut at that boundary rather than overrunning it -- which is what put one straggler beside the new
+        # version's first event (measured: 16.73 against 16.00).
+        if pp_tid[:stop_at] && pp_base > pp_tid[:stop_at]
+          pp_base = pp_tid[:stop_at]
+        end
+        pp_hold_beat = __p.link_beat_at_time(__p.link_time_at_beat(pp_base) - __p.sched_ahead)
+        pp_wait = pp_hold_beat - __p.link_beat_at_time(__p.time)
+        sleep pp_wait if pp_wait > 0
+      end
+      puts "[ptrack] #{name} gen=#{pp_gen} left at beat=#{__p.link_beat_at_time(__p.time).round(3)}" if $pampa_pattern_debug
+      pp_tid[:stopped] = true
+    end
+
+    { track: pp_track_name, generation: pp_gen, start_beat: pp_start.to_f, pp_events: pp_events.length,
+      superseded_before: !pp_old.nil?, old_last_at: (pp_old && pp_old[:last_at]),
+      cycle_beats: pp_cycle, loop_beats: pp_loop,
+      superseded_before: !pp_old.nil? }
+  end
+
+  # pdeclared :begin / :end bracket a Run: a track a Run does not re-declare is one the buffer no longer asks for, so
+  # commenting a pplay out stops sounding instead of playing forever.
+  define_method(:pdeclared) do |phase|
+    if phase == :begin
+      $pampa_pattern_token = ($pampa_pattern_token || 0) + 1
+      $pampa_decl = 0            # unnamed tracks take pattern_1, pattern_2, ... in this Run's order
+    else
+      ($pampa_pattern_tracks || {}).each do |_pp_k, pp_t|
+        pp_t[:stop_at] = 0 if pp_t[:token] != $pampa_pattern_token && !pp_t[:stop_now]
+      end
+    end
+    { token: $pampa_pattern_token, tracks: ($pampa_pattern_tracks || {}).keys }
+  end
+
+  define_method(:pstop) do |name = nil|
+    pp_tracks = ($pampa_pattern_tracks ||= {})
+    if name
+      t = pp_tracks[name]
+      t[:stop_at] = 0 if t          # 0: leave at its next cycle line
+    else
+      pp_tracks.each_value { |t| t[:stop_at] = 0 }
+    end
+    nil
+  end
+end
+
+"prelude ok"

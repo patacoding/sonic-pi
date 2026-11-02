@@ -1,0 +1,507 @@
+//--
+// This file is part of Sonic Pi: http://sonic-pi.net
+// Full project source: https://github.com/sonic-pi-net/sonic-pi
+// License: https://github.com/sonic-pi-net/sonic-pi/blob/main/LICENSE.md
+//
+// Copyright 2026 by Sam Aaron (http://sam.aaron.name).
+// All rights reserved.
+//
+// Permission is granted for use, copying, modification, and
+// distribution of modified versions of this work as long as this
+// notice is included.
+//++
+
+#include "GraphicsWindow.h"
+#include "GraphicsLog.h"
+#include "GraphicsSettings.h"
+#include "GraphicsTextureView.h"
+
+#include <QDateTime>
+
+#include <QCloseEvent>
+#include <QGuiApplication>
+#include <QKeyEvent>
+#include <QOpenGLContext>
+#include <QOpenGLFunctions>
+#include <QOpenGLExtraFunctions>
+#include <QScreen>
+
+namespace SonicPi
+{
+
+GraphicsWindow::GraphicsWindow(QWindow* parent)
+    : QOpenGLWindow(NoPartialUpdate, parent)
+{
+    setTitle(QStringLiteral("Sonic Pi - Graphics Output"));
+    resize(kDefaultWidth, kDefaultHeight);
+
+    // A 3.3 Core context, matching the render thread. The Qt default is 2.0 with
+    // no profile, which would silently deny the FBO.
+    QSurfaceFormat fmt = QSurfaceFormat::defaultFormat();
+    fmt.setVersion(3, 3);
+    fmt.setProfile(QSurfaceFormat::CoreProfile);
+    fmt.setRenderableType(QSurfaceFormat::OpenGL);
+    fmt.setDepthBufferSize(0);
+    fmt.setStencilBufferSize(0);
+    fmt.setSwapInterval(1);
+    setFormat(fmt);
+
+    // A screen change is the other way the display's refresh rate can change, and Qt reports
+    // it directly. Connected here rather than relied on via the move/fullscreen paths, which
+    // only cover the changes this class causes itself.
+    connect(this, &QWindow::screenChanged, this, [this](QScreen*) { reportDisplayRefresh(); });
+}
+
+GraphicsWindow::~GraphicsWindow()
+{
+    // The view's GL objects are Qt RAII types and their destructors need the owning
+    // context current. A window whose surface is already gone cannot provide one, in
+    // which case Qt warns and leaks rather than crashing - which is the better failure.
+    if (context() && context()->makeCurrent(this))
+    {
+        // m_view is a value member and is destroyed after this body runs, while the
+        // context is still current. Nothing to do but make it current; the doneCurrent()
+        // is deliberately NOT called, because the member destruction happens after it
+        // would have.
+    }
+}
+
+void GraphicsWindow::setRenderThread(GraphicsRenderThread* thread)
+{
+    // Stored, not used to set a size: the window does not decide the output
+    // resolution. It is kept so the window can report which render target it is
+    // displaying, and so it can tell the render thread what this display can show.
+    m_renderThread = thread;
+    reportDisplayRefresh();
+}
+
+// Tell the render thread what this window's display can actually show.
+//
+// The render thread cannot work this out for itself: it renders offscreen, so nothing
+// throttles its loop to a display, and the screen is a GUI-thread object that does not exist
+// when the thread starts. This window is the only thing that knows.
+//
+// Reported on every placement as well as at startup, because QScreen::refreshRate() belongs
+// to the screen the window is on and moving the window is the normal way to change it.
+//
+// Why it matters: without it, a request for 240Hz was met exactly - 240.3 fps, logged as
+// healthy - on a 165Hz panel. The frames were really produced and the screen really could
+// not show them, so the honest answer to "what rate am I getting" is bounded by the display.
+void GraphicsWindow::reportDisplayRefresh()
+{
+    if (!m_renderThread)
+        return;
+
+    QScreen* s = screen();
+    if (!s)
+        return;
+
+    const qreal hz = s->refreshRate();
+    if (hz <= 0.0)
+        return;
+
+    m_renderThread->setDisplayRefreshHz(int(qRound(hz)));
+    GraphicsLog::info(QStringLiteral("window: display on %1 reports %2Hz")
+                          .arg(s->name())
+                          .arg(int(qRound(hz))));
+}
+
+void GraphicsWindow::initializeGL()
+{
+    if (!context() || !context()->isValid())
+    {
+        GraphicsLog::error(QStringLiteral("window: no valid GL context in initializeGL"));
+        return;
+    }
+
+    QOpenGLFunctions* f = context()->functions();
+    if (f)
+    {
+        GraphicsLog::info(QStringLiteral("window GL context: %1")
+                              .arg(QString::fromLatin1(
+                                  reinterpret_cast<const char*>(f->glGetString(GL_VERSION)))));
+    }
+
+    // Whether this window can actually see the render thread's textures. Reported
+    // because the failure is silent - everything runs, the picture is just missing
+    // - and because the answer depends on AA_ShareOpenGLContexts having been set
+    // before QApplication, which is easy to get wrong and impossible to see.
+    {
+        QOpenGLContext* group = QOpenGLContext::globalShareContext();
+        GraphicsLog::info(QStringLiteral("window: share group %1")
+               .arg(!group ? QStringLiteral("NONE (Qt has no global share context)")
+                           : (context()->shareGroup() == group->shareGroup()
+                                  ? QStringLiteral("matches Qt's global group")
+                                  : QStringLiteral("DIFFERENT from Qt's global group"))));
+    }
+
+    // Reported for the log only; the placement itself reads the live size every frame, because
+    // the output resolution is settable at runtime from the Graphics menu and a window that
+    // kept a copy would fit a size the renderer had stopped using.
+    m_outputSize = m_renderThread ? m_renderThread->renderTargetSize()
+                                  : GraphicsSettings::outputSize();
+    {
+        const qreal dpr = devicePixelRatio();
+        const QSize surface(qMax(1, int(width() * dpr)), qMax(1, int(height() * dpr)));
+        const QRect dest = fittedRect();
+        GraphicsLog::info(QStringLiteral("window: showing the whole %1x%2 output fitted into %3x%4; "
+                                         "surface is %5x%6 device pixels (logical %7x%8 at dpr %9), "
+                                         "so the picture occupies %10x%11")
+                              .arg(m_outputSize.width()).arg(m_outputSize.height())
+                              .arg(width()).arg(height())
+                              .arg(surface.width()).arg(surface.height())
+                              .arg(width()).arg(height())
+                              .arg(dpr)
+                              .arg(dest.width()).arg(dest.height()));
+    }
+
+    // Nothing else to set up here: this window displays the render thread's
+    // texture and builds its display shader lazily on the first frame it can show.
+}
+
+void GraphicsWindow::resizeGL(int w, int h)
+{
+    // Nothing to rebuild: the render target is the fixed output resolution and the
+    // window only shows a crop of it, so a resize changes what is visible rather
+    // than what is rendered. The repaint is all that is needed.
+    //
+    // Logged, because a size change IS worth an entry: it changes what is on screen and it is
+    // the first thing worth knowing when the picture does not look right. This is the kind of
+    // entry the log is for - a fact that changed - as opposed to the once-a-second figures
+    // that were removed.
+    GraphicsLog::info(QStringLiteral("window: resized to %1x%2 (logical)").arg(w).arg(h));
+    update();
+}
+
+void GraphicsWindow::paintGL()
+{
+    QOpenGLFunctions* f = context() ? context()->functions() : nullptr;
+    if (!f)
+        return;
+
+    ++m_paintCount;
+
+    // This window is a CONSUMER. It displays the frame the render thread produced and
+    // never draws a shader of its own.
+    //
+    // What it deliberately does not own any more is the sampling itself: the display
+    // shader, the quad, the fence protocol and the repeat-the-last-frame behaviour all
+    // live in GraphicsTextureView, because the debug preview needs exactly the same
+    // behaviour. Two copies of the access rules would be two chances to get them wrong,
+    // and this feature has already spent three attempts learning that.
+    //
+    // What is left here is what makes this a window: its surface, the crop, the clear, and
+    // the cadence. The view draws into whatever viewport it is given.
+    //
+    // There is still no fallback that draws the shader here. A consumer that cannot get a
+    // frame shows the background, which is honest; a second thing able to draw the picture
+    // would be a second producer, with two renderers, two clocks, and a uniform that has
+    // to be set in two places.
+    const qreal dpr = devicePixelRatio();
+    const QSize surface(qMax(1, int(width() * dpr)), qMax(1, int(height() * dpr)));
+
+    // Clear the whole surface first, so the area outside the crop is the documented
+    // background rather than whatever the previous frame left there. A window
+    // larger than the output shows margin, and the margin has to be painted by
+    // someone.
+    f->glViewport(0, 0, surface.width(), surface.height());
+    f->glClearColor(GraphicsRenderer::kClearR,
+                    GraphicsRenderer::kClearG,
+                    GraphicsRenderer::kClearB,
+                    GraphicsRenderer::kClearA);
+    f->glClear(GL_COLOR_BUFFER_BIT);
+
+    // The whole output, fitted and centred - see fittedRect(). The clear above painted the
+    // margin, so whatever the aspect ratio does not fill reads as black rather than as
+    // whatever the previous frame left there.
+    const QRect destination = fittedRect();
+    if (destination.isEmpty())
+        return;
+
+    // glViewport takes framebuffer pixels with the origin at the BOTTOM-left, while
+    // the crop rectangle is in Qt's top-left coordinates - hence the y conversion.
+    // Done here because this is where the two conventions meet. The view draws into
+    // whatever viewport it is given, which is the whole of what it needs to know about
+    // geometry.
+    f->glViewport(destination.x(),
+                  surface.height() - (destination.y() + destination.height()),
+                  destination.width(),
+                  destination.height());
+
+    // Sampling, the fence handoff and "repeat the last frame if the producer has not
+    // finished" all happen in here. The window deliberately does not know how.
+    m_view.drawSharedFrame();
+
+    // Report what is on screen, once a second.
+    //
+    // The acceptance check for the whole handover: the render thread logs its iFrame,
+    // and if this window is showing that thread's output then the two must describe one
+    // sequence. Before sharing they were two unrelated counters that both happened to
+    // advance, which looks fine and proves nothing.
+    //
+    // The two failure counters are the other half of the check. "It looks smooth" is
+    // not a measurement; a target that was busy or a fence that had not signalled is,
+    // and each points at a different cause. Both being zero is what says the handoff
+    // is actually free rather than merely fast enough to be unnoticeable.
+    //
+    // Timed by hand rather than through GraphicsLog::throttled(), which suppresses by
+    // message CONTENT - a message carrying a frame number differs every frame, so
+    // nothing is ever suppressed and the log gets one line per frame.
+    //
+    // Once a minute, reduced from once a second and then from once per five seconds.
+    //
+    // This line is diagnostic detail about a VIEWER: how often it repainted, which buffers it
+    // saw. It is not as important as whether the requested frame rate is being met, which is
+    // now drawn in the debug window's corner, and detail that repeats is what made the log
+    // unreadable - three lines a second of figures that had not changed.
+    //
+    // What it still catches is the failure nothing else would: a window that has STOPPED
+    // repainting stops advancing the frame number, and this is where that shows up.
+    constexpr qint64 kReportIntervalMs = 60000;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (now - m_lastFrameReportMs >= kReportIntervalMs)
+    {
+        const qint64 elapsed = m_lastFrameReportMs == 0 ? 0 : (now - m_lastFrameReportMs);
+        m_lastFrameReportMs = now;
+        m_staleFrames += m_view.takeStaleCount();
+        const GraphicsSharedFrame shared = m_sharedFrame ? m_sharedFrame->read()
+                                                         : GraphicsSharedFrame();
+        // Reported as a RATE, not a count, and that matters: this report is once a minute,
+        // so a bare count would be a minute's worth of paints being read as if it described
+        // the frame number next to it, which is one second old. A count without its interval
+        // is a number that cannot be interpreted.
+        //
+        // The rate is worth having because the window paces ITSELF now, so "how often is it
+        // actually repainting" is the only way to tell whether that pacing is the display's
+        // or a busy loop's. Measured before this line existed: a preview window repainting
+        // 139 times a second while the producer ran at 60.
+        const double paintsPerSec =
+            elapsed > 0 ? double(m_paintCount) * 1000.0 / double(elapsed) : 0.0;
+
+        GraphicsLog::info(shared.valid()
+                              ? QStringLiteral("window: showing shared frame %1 (texture %2, "
+                                               "%3x%4); %5 stale, %6 paints/s over the last %7s")
+                                    .arg(shared.frameIndex)
+                                    .arg(shared.texture)
+                                    .arg(shared.size.width())
+                                    .arg(shared.size.height())
+                                    .arg(m_staleFrames)
+                                    .arg(paintsPerSec, 0, 'f', 0)
+                                    .arg(double(elapsed) / 1000.0, 0, 'f', 0)
+                              : QStringLiteral("window: no frame published yet (%1 paints/s over the "
+                                               "last %2s)")
+                                    .arg(paintsPerSec, 0, 'f', 0)
+                                    .arg(double(elapsed) / 1000.0, 0, 'f', 0));
+        m_staleFrames = 0;
+        m_paintCount = 0;
+    }
+
+    // Ask for the next frame. This is what keeps the window repainting, and it is why
+    // nothing outside this window has to know the window's cadence.
+    //
+    // The previous arrangement was a 16ms QTimer in MainWindow, owned by the main
+    // window and running at a rate it had no reason to know about. That is three
+    // problems in one: a second clock (16ms is 62.5Hz, not any rate the user chose),
+    // a hardcoded number in a class that does not render, and a piece of the graphics
+    // feature living in MainWindow - the same "state that should exist once, existing
+    // somewhere it does not belong" shape as the other incidents in
+    // graphics-architecture-review.md.
+    //
+    // requestUpdate() rather than update(): it schedules the repaint for the next
+    // frame in the platform's own cycle and coalesces repeats, so this is paced by the
+    // display rather than by a timer's guess at it. A 60Hz screen gets 60 updates a
+    // second and a 144Hz screen gets 144, with no setting to keep in sync and no
+    // writer of that setting to get wrong.
+    //
+    // There is deliberately no frame-cap check here. The producer is what the user
+    // capped, in graphics.ini; this window is a view of whatever the producer made,
+    // and re-showing the same texture because the producer has not drawn a new one yet
+    // is the correct behaviour rather than a waste - it is exactly the "no new frame,
+    // show the old one" rule, and it costs one textured quad.
+    requestUpdate();
+}
+
+// Where the whole frame goes on this window's surface.
+//
+// Fitted, never cropped. This was a 1:1 centred crop, which meant a window smaller than the
+// output - a 4K output on a 2K screen, or simply a small window - showed a magnified middle of
+// the picture with no indication that most of it was off-screen. The output resolution is a
+// property of the OUTPUT, not of this window: it is what an external consumer receives, and
+// Spout has no window at all, so this window has no standing to crop it.
+//
+// The fitting itself is fittedFrameRect(), shared with the debug preview so the two cannot
+// drift apart.
+QRect GraphicsWindow::fittedRect() const
+{
+    const QSize output = m_renderThread ? m_renderThread->renderTargetSize() : m_outputSize;
+    if (output.isEmpty())
+        return QRect();
+
+    const qreal dpr = devicePixelRatio();
+    const QSize surface(qMax(1, int(width() * dpr)), qMax(1, int(height() * dpr)));
+    return fittedFrameRect(output, surface);
+}
+
+QScreen* GraphicsWindow::showOnNextScreen()
+{
+    const QList<QScreen*> screens = QGuiApplication::screens();
+    if (screens.size() < 2)
+    {
+        GraphicsLog::info(QStringLiteral("window: only one screen, nothing to move to"));
+        return nullptr;
+    }
+
+    const int current = qMax(0, screens.indexOf(screen()));
+    QScreen* next = screens.at((current + 1) % screens.size());
+
+    // Re-place the window explicitly. setScreen() alone only takes effect on the
+    // next show, and while fullscreen the geometry has to be reset too or the
+    // window keeps the old screen's bounds.
+    const QRect geom = next->geometry();
+    if (m_fullscreen)
+    {
+        leaveFullscreen();
+        setScreen(next);
+        setGeometry(geom);
+        enterFullscreen(next);
+    }
+    else
+    {
+        setScreen(next);
+        setGeometry(QRect(geom.x() + 40, geom.y() + 40, kDefaultWidth, kDefaultHeight));
+    }
+
+    GraphicsLog::info(QStringLiteral("window moved to screen: %1").arg(describeOutput()));
+    reportDisplayRefresh();
+    return next;
+}
+
+bool GraphicsWindow::enterFullscreen(QScreen* target)
+{
+    QScreen* want = target ? target : screen();
+    if (!want)
+    {
+        GraphicsLog::warn(QStringLiteral("window: no screen to go fullscreen on"));
+        return false;
+    }
+
+    if (!m_fullscreen)
+    {
+        m_screenBeforeFullscreen = screen();
+    }
+
+    setScreen(want);
+    // Some window managers keep the pre-fullscreen geometry unless it is set
+    // explicitly first. Same precaution the main window takes.
+    const QRect geom = want->geometry();
+    setGeometry(geom.x(), geom.y(), geom.width(), geom.height());
+    showFullScreen();
+
+    m_fullscreen = true;
+    GraphicsLog::info(QStringLiteral("window fullscreen on: %1").arg(describeOutput()));
+    reportDisplayRefresh();
+    return m_fullscreen;
+}
+
+void GraphicsWindow::leaveFullscreen()
+{
+    if (!m_fullscreen)
+        return;
+
+    showNormal();
+    m_fullscreen = false;
+
+    // Put it back as a small, centred, fully on-screen window - always.
+    //
+    // The original report was "the menu bar is gone and the window cannot be
+    // moved, so the Graphics menu is the only way to close it". The cause was
+    // neither: the window was coming back *off-screen* at negative coordinates
+    // (-13,-58), so its whole frame - and therefore its title bar and close
+    // button - sat outside the visible area. Nothing was missing; it was simply
+    // out of reach, and with no visible title bar there was nothing to drag.
+    //
+    // Why it landed there: enterFullscreen() stretches the window to the screen
+    // before showFullScreen(), so showNormal()'s notion of "normal" is that
+    // screen-sized rect - measured at 1280x784, the full available screen. No
+    // windowed geometry had ever been recorded, so there was nothing to restore.
+    //
+    // Fix: never restore. Always assign a small centred rect, clamped to the
+    // screen's availableGeometry. No saved state means no ambiguous "restore to
+    // what" to get wrong, and the frame is guaranteed to be reachable.
+    QScreen* back = m_screenBeforeFullscreen ? m_screenBeforeFullscreen : screen();
+    if (back)
+        setScreen(back);
+
+    const QRect avail = back ? back->availableGeometry() : QRect(0, 0, kWindowedWidth, kWindowedHeight);
+    // Clamp, so a small screen cannot leave part of the window off it.
+    const int w = qMin(kWindowedWidth, avail.width());
+    const int h = qMin(kWindowedHeight, avail.height());
+    setGeometry(avail.x() + (avail.width() - w) / 2,
+                avail.y() + (avail.height() - h) / 2,
+                w, h);
+
+    GraphicsLog::info(QStringLiteral("window left fullscreen, now: %1  geometry=%2x%3 at %4,%5")
+                          .arg(describeOutput())
+                          .arg(width())
+                          .arg(height())
+                          .arg(x())
+                          .arg(y()));
+    reportDisplayRefresh();
+}
+
+QString GraphicsWindow::describeOutput() const
+{
+    QScreen* s = screen();
+    if (!s)
+        return QStringLiteral("(no screen)");
+
+    return QStringLiteral("%1 %2x%3%4")
+        .arg(s->name())
+        .arg(s->geometry().width())
+        .arg(s->geometry().height())
+        .arg(m_fullscreen ? QStringLiteral(" fullscreen") : QStringLiteral(" windowed"));
+}
+
+void GraphicsWindow::keyPressEvent(QKeyEvent* e)
+{
+    // Fullscreen has no title bar and the menu bar belongs to the main window,
+    // so the window has to be able to give itself back on its own.
+    switch (e->key())
+    {
+    case Qt::Key_Escape:
+        if (m_fullscreen)
+        {
+            leaveFullscreen();
+            e->accept();
+            return;
+        }
+        break;
+    case Qt::Key_F11:
+        if (m_fullscreen)
+            leaveFullscreen();
+        else
+            enterFullscreen(nullptr);
+        e->accept();
+        return;
+    case Qt::Key_F12:
+        showOnNextScreen();
+        e->accept();
+        return;
+    default:
+        break;
+    }
+    QOpenGLWindow::keyPressEvent(e);
+}
+
+void GraphicsWindow::closeEvent(QCloseEvent* e)
+{
+    // Closing the window must un-tick the menu action that opened it. For a dock
+    // widget Qt would report this; for an independent window it has to be said
+    // out loud.
+    GraphicsLog::info(QStringLiteral("window closed by user"));
+    m_fullscreen = false;
+    emit closedByUser();
+    QOpenGLWindow::closeEvent(e);
+}
+
+} // namespace SonicPi

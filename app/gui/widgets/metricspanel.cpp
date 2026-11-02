@@ -12,8 +12,11 @@
 //++
 
 #include "metricspanel.h"
+#include "metricslog.h"
+#include "metricvalue.h"
 #include "nodetreegraph.h"
 #include "model/sonicpitheme.h"
+#include "utils/framepacer.h"
 
 #include <api/sonicpi_api.h>
 #include <api/audio/server_shm.hpp>
@@ -39,7 +42,6 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHideEvent>
-#include <QHostAddress>
 #include <QLabel>
 #include <QResizeEvent>
 #include <QScrollArea>
@@ -50,13 +52,6 @@
 #include <QSplitter>
 #include <QSplitterHandle>
 #include <QStyle>
-#include <QTextBlock>
-#include <QTextCharFormat>
-#include <QTextCursor>
-#include <QTextDocument>
-#include <QTextEdit>
-#include <QTextFrame>
-#include <QTextFrameFormat>
 #include <QDateTime>
 #include <QTime>
 #include <QTimer>
@@ -70,10 +65,6 @@
 #include "chevronbutton.h"
 #include "dpi.h"
 #include "utils/reducedmotion.h"
-
-// Custom QTextCharFormat property storing a run's colour role, so text already
-// in the OSC/debug views can be re-tinted on a theme change (see recolourLogViews).
-static constexpr int RoleProp = QTextFormat::UserProperty + 1;
 
 // ─── Static layout model ────────────────────────────────────────────────
 //
@@ -392,30 +383,10 @@ QColor MetricsPanel::colorForRole(const QString& role) const
 
 void MetricsPanel::recolourLogViews()
 {
-    QTextEdit* views[] = { m_oscOutView, m_oscInView, m_debugView };
-    for (QTextEdit* v : views)
-    {
-        if (!v) continue;
-        QTextDocument* doc = v->document();
-        QTextCursor edit(doc);
-        edit.beginEditBlock();
-        for (QTextBlock block = doc->begin(); block.isValid(); block = block.next())
-        {
-            for (QTextBlock::iterator it = block.begin(); !it.atEnd(); ++it)
-            {
-                const QTextFragment frag = it.fragment();
-                if (!frag.isValid()) continue;
-                QTextCharFormat f = frag.charFormat();
-                if (!f.hasProperty(RoleProp)) continue;
-                f.setForeground(colorForRole(f.property(RoleProp).toString()));
-                QTextCursor fc(doc);
-                fc.setPosition(frag.position());
-                fc.setPosition(frag.position() + frag.length(), QTextCursor::KeepAnchor);
-                fc.setCharFormat(f);
-            }
-        }
-        edit.endEditBlock();
-    }
+    SonicPi::MetricsLog* views[] = { m_oscOutView, m_oscInView, m_debugView };
+    for (SonicPi::MetricsLog* v : views)
+        if (v)
+            v->recolour([this](const QString& role) { return colorForRole(role); });
 }
 
 void MetricsPanel::buildUi()
@@ -431,7 +402,7 @@ void MetricsPanel::buildUi()
     m_mainSplit = mainRow;
     outer->addWidget(mainRow);
 
-    auto* leftCol = new QSplitter(Qt::Vertical);
+    auto* leftCol = new ThinSplitter(Qt::Vertical);
     m_leftSplit = leftCol;
     buildNodeColumn(leftCol);
 
@@ -501,16 +472,14 @@ void MetricsPanel::buildUi()
         m_rowLabels.append(lbl);
         rows->addWidget(lbl, r, 0, Qt::AlignLeft);
 
-        auto* val = new QLabel;
+        auto* val = new SonicPi::MetricValue;
         val->setFont(mono);
         applyTip(val);
-        val->setTextFormat(Qt::RichText);
-        val->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
         // Don't let the value's width drive the card width — otherwise a digit
         // crossing (e.g. 9→10, or a growing counter) reflows the whole grid.
         val->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-        rows->addWidget(val, r, 1, 1, 2, Qt::AlignRight);
-        m_valueRows.append({ &row, val, QString() });
+        rows->addWidget(val, r, 1, 1, 2);
+        m_valueRows.append({ &row, val });
     };
 
     // Build the cards; their placement in the grid is done by reflowMetricsGrid
@@ -558,17 +527,15 @@ void MetricsPanel::buildUi()
 
     mainRow->setStretchFactor(0, 618);  // (tree + metrics) : logs ≈ golden ratio
     mainRow->setStretchFactor(1, 382);
-    // A wide grab area whose centre is a thin 2px line at rest, revealed to the
-    // full width on hover (ThinSplitter). Fixed px (not DPI-scaled) so the reveal
-    // stays clearly wider than the resting line on macOS's sub-1.0 display scale.
-    const int kHandleW = 7;
-    const int kLineW = 2;
+    // The one divider (Divider::paint): a wide grab area whose centre is a thin
+    // line at rest, revealed to the full width on hover.
+    const int kHandleW = Divider::kExtent;
     mainRow->setHandleWidth(kHandleW);
     mainRow->setChildrenCollapsible(false);
 
     // Both vertical columns are draggable, and laid out by revealColumns()
     // until the user drags a divider (then that column is left to the user).
-    for (QSplitter* col : { leftCol, static_cast<QSplitter*>(rightCol) })
+    for (QSplitter* col : std::initializer_list<QSplitter*>{ leftCol, rightCol })
     {
         // Non-collapsible so a zero-height pane stays visible and keeps its
         // handle, leaving the divider bar (and its chevron) draggable even when
@@ -592,34 +559,29 @@ void MetricsPanel::buildUi()
         col->installEventFilter(this);   // track height changes to re-reveal
     }
 
-    // Chevron grip on the node-tree / metrics divider. Parented to the panel,
-    // not the splitter (a QSplitter would adopt a child widget as a pane), so
-    // it floats as an overlay, positioned onto the divider by
-    // positionMetricsToggle().
-    // Spans the whole tree/metrics divider (sized/placed in positionMetricsToggle)
-    // so the divider line and its glyph are one button: hover or click anywhere
-    // on the divider hits it. A click toggles the metrics' visibility.
+    // The grips on the dividers: the one chevron control (ChevronButton), the
+    // help divider's 36x16 pill, laid over the divider at its right as the
+    // web's is. Parented to the panel, not the splitter (a QSplitter would
+    // adopt a child widget as a pane), so each floats as an overlay, placed by
+    // positionMetricsToggle / positionLogsToggle. The divider line is the
+    // splitter handle's own (Divider::paint); a grip and its handle are
+    // filtered together so hovering either reveals both as one control, and
+    // double-clicking the line does what the grip does.
+    // Tree / metrics: a click minimises the metrics and restores them.
     m_metricsToggle = new ChevronButton(this);
-    // Thin divider line across the full width + a 48px knob box on the right
-    // (6px inset) holding the triangle — restores the box look while keeping the
-    // whole divider as one hover/click target. On hover the line reveals to the
-    // handle width (kHandleW), matching the ThinSplitter dividers.
-    m_metricsToggle->setBox(kLineW, 48, 6, ChevronButton::Horizontal, kHandleW);
+    m_metricsToggle->setFixedSize(ScaleForDPI(36, 16));
     connect(m_metricsToggle, &QToolButton::clicked, this, &MetricsPanel::toggleMetrics);
     updateChevron();
+    if (QSplitterHandle* treeHandle = leftCol->handle(1))
+        treeHandle->installEventFilter(this);
+    m_metricsToggle->installEventFilter(this);
 
-    // Vertical chevron on the main (left columns | logs) divider — the rotated
-    // sibling of the metrics chevron. A knob centred on the divider: clicking it
-    // (or double-clicking the divider line, handled in eventFilter) minimises the
-    // logs column off to the right and restores it. The line itself stays
-    // draggable for resizing, so the knob is short rather than full-height.
+    // Left columns | logs: the rotated sibling, near the top of the divider. A
+    // click minimises the logs column off to the right and restores it.
     m_logsToggle = new ChevronButton(this);
-    m_logsToggle->setBox(kLineW, 48, 0, ChevronButton::Vertical, kHandleW);
+    m_logsToggle->setFixedSize(ScaleForDPI(16, 36));
     connect(m_logsToggle, &QToolButton::clicked, this, &MetricsPanel::toggleLogs);
     updateLogsChevron();
-    // The short logs knob overlays the main divider handle; filter both so their
-    // hover states stay in sync and they reveal as one control (as the full-width
-    // metrics chevron does over its own divider).
     if (QSplitterHandle* mainHandle = mainRow->handle(1))
         mainHandle->installEventFilter(this);
     m_logsToggle->installEventFilter(this);
@@ -714,115 +676,48 @@ void MetricsPanel::buildNodeColumn(QSplitter* topRow)
     title->setFont(mono);
     m_rowLabels.append(title);
 
-    // Legend + live counts (populated in updateNodeTree()).
+    // Legend + live counts (populated in updateNodeTree()), and the labels'
+    // switch beside them, as the web's tree has it.
     m_treeStats = new QLabel(card);
     m_treeStats->setFont(mono);
     m_treeStats->setTextFormat(Qt::RichText);
-    body->addWidget(m_treeStats);
+    m_treeLabels = new QToolButton(card);
+    m_treeLabels->setObjectName("ssTreeLabels");
+    m_treeLabels->setText(tr("Labels"));
+    m_treeLabels->setCheckable(true);
+    m_treeLabels->setChecked(true);
+    m_treeLabels->setFocusPolicy(Qt::StrongFocus);
+    m_treeLabels->setToolTip(tr("Name the fx under them"));
+    m_treeLabels->setAccessibleName(tr("Node tree labels"));
+    auto* head = new QHBoxLayout;
+    head->setContentsMargins(0, 0, 0, 0);
+    head->addWidget(m_treeStats, 1);
+    head->addWidget(m_treeLabels, 0, Qt::AlignVCenter);
+    body->addLayout(head);
 
     m_nodeGraph = new NodeTreeGraph(card);
+    m_nodeGraph->setAccessibleName(tr("Node tree"));
     body->addWidget(m_nodeGraph, 1);
+    connect(m_treeLabels, &QToolButton::toggled, m_nodeGraph, &NodeTreeGraph::setLabelsShown);
+    // The switch says when there are too many to label, so it never looks dead.
+    connect(m_nodeGraph, &NodeTreeGraph::labelsHiddenChanged, this, [this](bool hidden) {
+        const QString why = hidden ? tr("Too many to label at once: the labels come back when there are fewer")
+                                   : QString();
+        m_treeLabels->setToolTip(hidden ? why : tr("Name the fx under them"));
+        m_treeLabels->setAccessibleDescription(why);
+    });
     topRow->addWidget(card);
 }
 
 namespace
 {
-// Read-only log view that behaves like a terminal: newest lines sit at the
-// bottom. When the text is taller than the view it scrolls and stays pinned to
-// the bottom (unless the user scrolls up); when it's shorter, a top margin
-// pushes it down so the empty space is above, not below.
-class LogView : public QTextEdit
-{
-public:
-    explicit LogView(QWidget* parent = nullptr) : QTextEdit(parent)
-    {
-        QScrollBar* sb = verticalScrollBar();
-        // Track whether the view is parked at the bottom — but only from genuine
-        // scrolls, not our own programmatic setValue()s (guarded by m_adjusting),
-        // so layout churn can't silently un-pin a quiet pane.
-        connect(sb, &QScrollBar::valueChanged, this, [this](int v) {
-            if (m_adjusting) return;
-            m_pinned = v >= verticalScrollBar()->maximum() - 2;
-        });
-        // A large one-shot insert (e.g. the Info pane's boot summary) updates the
-        // scrollbar range asynchronously, so updateBottomFill()'s setValue(maximum)
-        // can land short of the true bottom. A busy pane (To/From) is nudged the
-        // rest of the way by the next line a tick later; a quiet pane (Info) would
-        // sit stranded mid-history. Re-assert the bottom once the range catches up,
-        // while still pinned.
-        connect(sb, &QScrollBar::rangeChanged, this, [this](int, int max) {
-            if (!m_pinned || m_adjusting) return;
-            QScrollBar* s = verticalScrollBar();
-            if (s->value() != max) {
-                const QSignalBlocker block(s);   // re-pin without re-evaluating m_pinned
-                s->setValue(max);
-            }
-        });
-        connect(document(), &QTextDocument::contentsChanged, this,
-                [this]() { updateBottomFill(); });
-    }
-
-protected:
-    void resizeEvent(QResizeEvent* e) override
-    {
-        QTextEdit::resizeEvent(e);
-        updateBottomFill();
-    }
-
-private:
-    void updateBottomFill()
-    {
-        // Mutating the document below re-fires contentsChanged, which re-enters
-        // this slot; without this guard that recursion is unbounded and blows
-        // the stack (a silent crash on startup). The QSignalBlocker is the
-        // primary defence; the bool guards the resizeEvent path too.
-        if (m_adjusting)
-            return;
-        m_adjusting = true;
-
-        QScrollBar* sb = verticalScrollBar();
-        const bool atBottom = m_pinned || sb->value() >= sb->maximum() - 2;
-
-        // Bottom-align short content by pushing it down with a top margin on the
-        // document's root frame (the widget won't reset this, unlike the
-        // viewport margins). Measure the content's natural height with the
-        // margin zeroed first, so the gap can't drift across updates.
-        if (QTextFrame* root = document()->rootFrame())
-        {
-            const QSignalBlocker block(document());
-            QTextFrameFormat fmt = root->frameFormat();
-            if (fmt.topMargin() != 0)
-            {
-                fmt.setTopMargin(0);
-                root->setFrameFormat(fmt);
-            }
-            const int contentH = document()->size().toSize().height();
-            const int gap = qMax(0, viewport()->height() - contentH);
-            if (gap != 0)
-            {
-                fmt.setTopMargin(gap);
-                root->setFrameFormat(fmt);
-            }
-        }
-        if (atBottom)
-        {
-            sb->setValue(sb->maximum());
-            m_pinned = true;   // committed to the bottom; the rangeChanged re-assert relies on this
-        }
-
-        m_adjusting = false;
-    }
-
-    bool m_pinned = true;
-    bool m_adjusting = false;
-};
 } // namespace
 
 void MetricsPanel::buildLogs(QSplitter* col)
 {
     QFont mono = makeMonoFont();
 
-    auto addLogCard = [&](const QString& title) -> QTextEdit* {
+    auto addLogCard = [&](const QString& title) -> SonicPi::MetricsLog* {
         QVBoxLayout* body = nullptr;
         QLabel* t = nullptr;
         QFrame* card = makeCard(title, &body, &t);
@@ -835,12 +730,8 @@ void MetricsPanel::buildLogs(QSplitter* col)
         t->setFont(mono);
         m_rowLabels.append(t);
 
-        auto* view = new LogView(card);
-        view->setReadOnly(true);
+        auto* view = new SonicPi::MetricsLog(card);
         view->setFont(mono);
-        view->setLineWrapMode(QTextEdit::NoWrap);
-        view->setFrameShape(QFrame::NoFrame);
-        view->document()->setMaximumBlockCount(2000);  // bound memory
         body->addWidget(view, 1);
         col->addWidget(card);
         return view;
@@ -901,7 +792,7 @@ QVector<LogRun> MetricsPanel::formatOscRuns(const uint8_t* data, uint32_t size,
                                             uint32_t sourceId)
 {
     // Sonic Pi theme syntax colours (fall back to fixed hues pre-theme). Built as
-    // coloured runs (not HTML) so the log inserts them via QTextCharFormat,
+    // coloured runs (not HTML), which the log draws as they are,
     // skipping the rich-text HTML parser on this per-message hot path.
     auto tc = [&](const char* name, const char* fallback) -> QColor {
         return m_theme ? m_theme->color(name) : QColor(QString::fromLatin1(fallback));
@@ -945,55 +836,10 @@ QVector<LogRun> MetricsPanel::formatOscRuns(const uint8_t* data, uint32_t size,
     return runs;
 }
 
-// Flood cap: under heavy traffic we'd format and insert thousands of lines per
-// refresh that maximumBlockCount(2000) trims away the same frame. Keep only the
-// most recent and note how many were dropped — bounds the per-refresh relayout.
-static constexpr int kMaxLinesPerRefresh = 256;
-
-// Append a whole refresh's worth of log lines in one coalesced edit. Each line
-// stays its own block (so maximumBlockCount still bounds memory), but the
-// expensive QTextDocument relayout + text shaping happens once for the batch
-// instead of once per QTextEdit::append(). Runs are inserted with
-// QTextCharFormat (no HTML parse); '\n' inside a run becomes a soft line break so
-// a multi-line entry stays a single block. Auto-scrolls to the bottom.
-static void appendLogBatch(QTextEdit* view, QVector<QVector<LogRun>>& lines)
-{
-    if (!view || lines.isEmpty()) return;
-    if (lines.size() > kMaxLinesPerRefresh)
-    {
-        const int dropped = lines.size() - kMaxLinesPerRefresh;
-        lines.remove(0, dropped);   // keep the newest
-        lines.prepend({ { QColor(128, 128, 128),
-                          QStringLiteral("… %1 lines suppressed (flood)").arg(dropped) } });
-    }
-    QTextCursor c(view->document());
-    c.movePosition(QTextCursor::End);
-    const bool startEmpty = view->document()->isEmpty();
-    c.beginEditBlock();
-    for (int i = 0; i < lines.size(); ++i)
-    {
-        // append() doesn't prepend an empty block to an empty document.
-        if (!(startEmpty && i == 0)) c.insertBlock();
-        for (const LogRun& r : lines.at(i))
-        {
-            QTextCharFormat fmt;
-            if (r.color.isValid()) fmt.setForeground(r.color);
-            if (!r.role.isEmpty()) fmt.setProperty(RoleProp, r.role);
-            QString t = r.text;
-            t.replace(QLatin1Char('\n'), QChar(QChar::LineSeparator));  // keep multi-line entries in one block
-            c.insertText(t, fmt);
-        }
-    }
-    c.endEditBlock();   // single relayout + maximumBlockCount trim here
-    // No moveCursor/ensureCursorVisible: that scrolls horizontally to the end of
-    // the last line, drifting the view right. LogView::updateBottomFill keeps it
-    // pinned to the bottom-left (and only while the user is already at the bottom).
-}
-
 void MetricsPanel::drainOscRing(bool outgoing)
 {
     if (!m_api) return;
-    QTextEdit* view = outgoing ? m_oscOutView : m_oscInView;
+    SonicPi::MetricsLog* view = outgoing ? m_oscOutView : m_oscInView;
     if (!view) return;
     ring_view rv = outgoing ? m_api->AudioProcessor_GetInRing()
                             : m_api->AudioProcessor_GetOutRing();
@@ -1003,7 +849,7 @@ void MetricsPanel::drainOscRing(bool outgoing)
         [&](uint32_t /*seq*/, uint32_t src, const uint8_t* payload, uint32_t n) {
             lines.append(formatOscRuns(payload, n, src));
         });
-    appendLogBatch(view, lines);
+    view->append(std::move(lines));
 }
 
 // Drain one engine→host ring, splitting by type: /clockwork/debug → Debug pane
@@ -1037,7 +883,7 @@ void MetricsPanel::drainEgressRing(bool nrt)
                         // A leading \x01 marks the engine's boot banner (the
                         // status summary): render it verbatim with no timestamp.
                         // Everything else is a timestamped debug line. Embedded
-                        // '\n' becomes a soft break in appendLogBatch (one block).
+                        // '\n' is a line of its own in the log.
                         const bool banner = text.startsWith(QChar(0x01));
                         if (banner) text.remove(0, 1);
                         if (banner) {
@@ -1055,9 +901,9 @@ void MetricsPanel::drainEgressRing(bool nrt)
             if (m_oscInView)
                 oscInLines.append(formatOscRuns(osc, oscN, src));
         });
-    // One coalesced relayout per view, instead of one per drained message.
-    appendLogBatch(m_debugView, debugLines);
-    appendLogBatch(m_oscInView, oscInLines);
+    // One frame per view for the whole drain, drawn off the GUI thread.
+    if (m_debugView) m_debugView->append(std::move(debugLines));
+    if (m_oscInView) m_oscInView->append(std::move(oscInLines));
 }
 
 void MetricsPanel::updateNodeTree()
@@ -1076,7 +922,8 @@ void MetricsPanel::updateNodeTree()
     if (version == m_lastTreeVersion) return;   // unchanged — skip rebuild
     m_lastTreeVersion = version;
 
-    QVector<NodeTreeGraph::Node> nodes;
+    std::vector<NodeTreeGraph::LiveNode> nodes;
+    nodes.reserve(nt.header->node_count.load(std::memory_order_relaxed));
     int groups = 0, fx = 0, samples = 0, synths = 0;
 
     for (uint32_t i = 0; i < nt.max_nodes; ++i)
@@ -1092,25 +939,18 @@ void MetricsPanel::updateNodeTree()
         const int32_t nextId  = e.next_id;
         const int32_t headId  = e.head_id;
         const char* nm = e.def_name;
-        QString name = QString::fromUtf8(nm, qstrnlen(nm, NODE_TREE_DEF_NAME_SIZE));
+        std::string name(nm, qstrnlen(nm, NODE_TREE_DEF_NAME_SIZE));
 
-        const bool isFx     = name.contains("-fx_") || name.contains("-fx-");
-        const bool isSample = name.contains("stereo_player") || name.contains("mono_player");
-        NodeTreeGraph::Kind kind;
-        if (isGroup)       { kind = NodeTreeGraph::Group;  ++groups; }
-        else if (isFx)     { kind = NodeTreeGraph::Fx;     ++fx; ++synths; }
-        else if (isSample) { kind = NodeTreeGraph::Sample; ++samples; ++synths; }
-        else               { kind = NodeTreeGraph::Synth;  ++synths; }
+        const NodeTreeGraph::Kind kind = SonicPi::NodeTreeMotion::kindOf(isGroup != 0, name);
+        switch (kind)
+        {
+        case NodeTreeGraph::Kind::Group:  ++groups; break;
+        case NodeTreeGraph::Kind::Fx:     ++fx; ++synths; break;
+        case NodeTreeGraph::Kind::Sample: ++samples; ++synths; break;
+        case NodeTreeGraph::Kind::Synth:  ++synths; break;
+        }
 
-        NodeTreeGraph::Node node;
-        node.id = id;
-        node.parent = parent;
-        node.head = headId;
-        node.next = nextId;
-        node.kind = kind;
-        node.label = isGroup ? (name.isEmpty() ? QStringLiteral("group") : name)
-                             : name;
-        nodes.append(node);
+        nodes.push_back({ id, parent, headId, nextId, kind, isGroup ? std::string() : std::move(name) });
     }
 
     const int pureSynths = synths - fx - samples;
@@ -1118,18 +958,19 @@ void MetricsPanel::updateNodeTree()
     m_nodeGraph->setTree(nodes);
     if (m_treeStats)
     {
-        // Swatch colours match the graph's node colours (set in applyTheme).
-        auto sw = [&](const char* themeName, const char* label, int n) {
+        // Swatches in the graph's node colours (set in applyTheme) and shapes:
+        // groups circles, fx squares, synths and samples diamonds.
+        auto sw = [&](const char* themeName, const char* shape, const char* label, int n) {
             const QString dot = m_theme ? m_theme->color(themeName).name() : m_textColor.name();
-            return QStringLiteral("<span style=\"color:%1\">&#9679;</span> "
-                                  "<span style=\"color:%2\">%3 %4</span>")
-                .arg(dot, kindColor(K_Dim).name(), QString::fromUtf8(label), QString::number(n));
+            return QStringLiteral("<span style=\"color:%1\">%2</span> "
+                                  "<span style=\"color:%3\">%4 %5</span>")
+                .arg(dot, QString::fromUtf8(shape), kindColor(K_Dim).name(), QString::fromUtf8(label), QString::number(n));
         };
         const QString gap = QStringLiteral("&nbsp;&nbsp;&nbsp;");
-        m_treeStats->setText(sw("NumberForeground", "Groups", groups) + gap
-                             + sw("FunctionMethodNameForeground", "Synths", pureSynths) + gap
-                             + sw("KeywordForeground", "FX", fx) + gap
-                             + sw("DoubleQuotedStringForeground", "Samples", samples));
+        m_treeStats->setText(sw("NumberForeground", "&#9679;", "Groups", groups) + gap
+                             + sw("FunctionMethodNameForeground", "&#9670;", "Synths", pureSynths) + gap
+                             + sw("KeywordForeground", "&#9632;", "FX", fx) + gap
+                             + sw("DoubleQuotedStringForeground", "&#9670;", "Samples", samples));
     }
 }
 
@@ -1138,23 +979,13 @@ void MetricsPanel::renderDisconnected()
     for (ValueRowUi& ui : m_valueRows)
     {
         const RowDef* def = static_cast<const RowDef*>(ui.def);
-        QString html;
+        QVector<LogRun> runs;
         if (def->cap > 0 || def->nowField >= 0)   // ring usage % / age row
-            html = QString("<span style=\"color:%1\">-</span>").arg(kindColor(K_Muted).name());
+            runs = { { kindColor(K_Muted), QStringLiteral("-"), QString() } };
         else
             for (const Seg& s : def->segs)
-            {
-                if (s.isText)
-                    html += QString("<span style=\"color:%1\">%2</span>")
-                                .arg(kindColor(s.kind).name(), QString::fromUtf8(s.text).toHtmlEscaped());
-                else
-                    html += QString("<span style=\"color:%1\">-</span>").arg(kindColor(s.kind).name());
-            }
-        if (html != ui.lastHtml)
-        {
-            ui.value->setText(html);
-            ui.lastHtml = html;
-        }
+                runs.append({ kindColor(s.kind), s.isText ? QString::fromUtf8(s.text) : QStringLiteral("-"), QString() });
+        ui.value->setRuns(std::move(runs));
     }
     // Drop ring cursors so a reconnect re-primes at the live head (no replay).
     m_inCursor = RingCursor{};
@@ -1191,33 +1022,24 @@ void MetricsPanel::refresh()
     for (ValueRowUi& ui : m_valueRows)
     {
         const RowDef* def = static_cast<const RowDef*>(ui.def);
-        QString html;
+        QVector<LogRun> runs;
         if (def->cap > 0)   // ring usage % readout: "used% / peak%"
         {
             const uint32_t used = (def->usedField >= 0) ? v[def->usedField] : 0;
             const uint32_t peak = (def->peakField >= 0) ? v[def->peakField] : 0;
             const double cap = double(def->cap);
-            const double usedPct = (used / cap) * 100.0;
-            const double peakPct = (peak / cap) * 100.0;
-            html = QString("<span style=\"color:%1\">%2</span>"
-                           "<span style=\"color:%3\"> / %4%</span>")
-                       .arg(kindColor(K_Normal).name(), QString::number(usedPct, 'f', 1),
-                            kindColor(K_Muted).name(), QString::number(peakPct, 'f', 1));
+            runs = { { kindColor(K_Normal), QString::number((used / cap) * 100.0, 'f', 1), QString() },
+                     { kindColor(K_Muted), QStringLiteral(" / %1%").arg(QString::number((peak / cap) * 100.0, 'f', 1)), QString() } };
         }
         else if (def->nowField >= 0)   // age readout: process calls since an event
         {
             const uint32_t now  = v[def->nowField];
             const uint32_t then = v[def->thenField];
             if (then == 0)   // event never fired this session
-                html = QString("<span style=\"color:%1\">-</span>").arg(kindColor(K_Dim).name());
+                runs = { { kindColor(K_Dim), QStringLiteral("-"), QString() } };
             else
-            {
-                const uint32_t age = now >= then ? now - then : 0;
-                html = QString("<span style=\"color:%1\">%2</span>"
-                               "<span style=\"color:%3\"> ticks</span>")
-                           .arg(kindColor(K_Dim).name(), QString::number(age),
-                                kindColor(K_Muted).name());
-            }
+                runs = { { kindColor(K_Dim), QString::number(now >= then ? now - then : 0), QString() },
+                         { kindColor(K_Muted), QStringLiteral(" ticks"), QString() } };
         }
         else
         {
@@ -1225,29 +1047,23 @@ void MetricsPanel::refresh()
             {
                 QString piece;
                 if (s.isText)
-                    piece = QString::fromUtf8(s.text).toHtmlEscaped();
+                    piece = QString::fromUtf8(s.text);
                 else if (s.na || s.field < 0 || s.field >= kPanelFieldCount)
                     piece = QStringLiteral("-");
                 else if (s.nativeOnly && !nativeOk)
                     piece = QStringLiteral("-");
                 else
                     piece = formatField(v[s.field], s.fmt);
-
-                html += QString("<span style=\"color:%1\">%2</span>").arg(kindColor(s.kind).name(), piece);
+                runs.append({ kindColor(s.kind), piece, QString() });
             }
         }
-        if (html != ui.lastHtml)
-        {
-            ui.value->setText(html);
-            ui.lastHtml = html;
-        }
+        ui.value->setRuns(std::move(runs));   // repaints only if it changed
     }
 
-    // Tail the rings + node tree.
+    // Tail the rings. (The node tree is read on the frame tick: startTreeTicks.)
     drainOscRing(/*outgoing=*/true);   // IN ring     → To SuperSonic (what Sonic Pi sent)
     drainEgressRing(/*nrt=*/false);    // OUT ring     → /clockwork/debug → Debug, rest → From SuperSonic
     drainEgressRing(/*nrt=*/true);     // NRT-out ring → /clockwork/debug → Debug, rest → From SuperSonic
-    updateNodeTree();
 
     // Now that the debug cursor is primed (tailing live), ask SuperSonic once
     // for its build/runtime summary — it replies down the debug ring, so the
@@ -1293,6 +1109,9 @@ void MetricsPanel::applyTheme(SonicPiTheme* theme)
     m_textColor   = theme->color("LogForeground");
     m_bgColor     = theme->color("LogBackground");
     m_borderColor = theme->color("MarginForeground");
+    for (SonicPi::MetricsLog* v : { m_oscOutView, m_oscInView, m_debugView })
+        if (v)
+            v->setColours(m_bgColor, m_textColor);
 
     // All colours come from the palette; label colours via the
     // ssRole/objectName selectors set once at construction.
@@ -1307,23 +1126,33 @@ void MetricsPanel::applyTheme(SonicPiTheme* theme)
     QString panelQss = QString(
         // Enforce the (small) panel font in the sheet itself — a setStyleSheet()
         // call otherwise resets fonts applied via setFont() back to the default.
-        "MetricsPanel, MetricsPanel * { font-family:'Hack'; font-size:%8px; }"
+        "MetricsPanel, MetricsPanel * { font-family:'Hack'; font-size:%7px; }"
         "MetricsPanel, QScrollArea, QFrame#ssCard, QFrame#ssCardFlat,"
         " QFrame#ssCell { background:%1; }"
         // Border-top/left on the container + border-right/bottom per cell =
         // shared single grid lines, no gaps.
-        "QWidget#ssZones { background:%1; border-top:%7px solid %6; border-left:%7px solid %6; }"
-        "QFrame#ssCell { border-right:%7px solid %6; border-bottom:%7px solid %6; }"
+        "QWidget#ssZones { background:%1; border-top:%6px solid %5; border-left:%6px solid %5; }"
+        "QFrame#ssCell { border-right:%6px solid %5; border-bottom:%6px solid %5; }"
         "QFrame#ssCell[lastrow=\"true\"] { border-bottom:none; }"
         // Rightmost cells drop their right border so the grid doesn't draw a
         // line hard up against the scrollbar.
         "QFrame#ssCell[lastcol=\"true\"] { border-right:none; }"
         // #ssCardFlat is the same card without the border (node tree, logs).
-        "QFrame#ssCard { border:1px solid %3; border-radius:@radiusMedium; }"
-        "QLabel#ssCardTitle { color:%5; padding-bottom:1px; }"
-        "QLabel[ssRole=\"rowlabel\"] { color:%4; }"
-        "QTextEdit { color:%2; background:%1; border:none; }")
-        .arg(bg, fg, border, dim, muted, winBorder).arg(gridW).arg(qMax(6, 11 + m_fontZoom));
+        "QFrame#ssCard { border:1px solid %2; border-radius:@radiusMedium; }"
+        "QLabel#ssCardTitle { color:%4; padding-bottom:1px; }"
+        "QLabel[ssRole=\"rowlabel\"] { color:%3; }")
+        .arg(bg, border, dim, muted, winBorder).arg(gridW).arg(qMax(6, 11 + m_fontZoom));
+    // The node tree's Labels switch, as the web's: a small chip with a 2px
+    // border in the button colour, lit in the accent while on. Hover and focus
+    // take the hover colour, focus last so the keyboard's place always shows.
+    const QString hoverCol = theme->color("HoverButton").name();
+    panelQss += QString(
+        "QToolButton#ssTreeLabels { color:%1; background:transparent; border:2px solid %2;"
+        " border-radius:@radiusMedium; padding:0px 8px; margin:0px; font-weight:600; }"
+        "QToolButton#ssTreeLabels:hover { color:%3; border-color:%3; }"
+        "QToolButton#ssTreeLabels:checked { color:%4; border-color:%4; }"
+        "QToolButton#ssTreeLabels:focus { color:%3; border-color:%3; }")
+        .arg(fg, theme->color("Button").name(), hoverCol, theme->color("HighlightedBackground").name());
     // Card radius from the shared scale (dpi.h), as a named token rather than
     // another %N arg in an already-crowded sequence.
     panelQss.replace("@radiusMedium", QString::number(ScaleHeightForDPI(kRadiusMediumDx)) + "px");
@@ -1334,45 +1163,31 @@ void MetricsPanel::applyTheme(SonicPiTheme* theme)
     // theme colours in; bg blends the wide grab area with the panel.
     const QColor divLine  = theme->color("WindowBorder");
     const QColor divHover = theme->color("ScrollBarHover");
-    if (m_mainSplit)  m_mainSplit->setDividerColors(m_bgColor, divLine, divHover);
-    if (m_rightSplit) m_rightSplit->setDividerColors(m_bgColor, divLine, divHover);
-    // The tree/metrics divider line is painted by the metrics ChevronButton (its
-    // band spans the whole divider), so that splitter's own handle stays
-    // transparent to avoid a doubled line.
-    if (m_leftSplit)
-        m_leftSplit->setStyleSheet("QSplitter::handle { background:transparent; image:none; }");
-    // The logs chevron's band is short, so the main divider's full-height line is
-    // the splitter handle itself — shown while the logs are visible, hidden once
-    // they're collapsed (setDividerLineVisible toggles it).
+    for (ThinSplitter* s : { m_mainSplit, m_leftSplit, m_rightSplit })
+        if (s) s->setDividerColors(m_bgColor, divLine, divHover);
+    // A divider's line shows while its pane is visible, and goes once the pane
+    // is collapsed (setDividerLineVisible toggles it): just the grip remains.
     setDividerLineVisible(m_mainSplit, !m_logsMinimised);
+    setDividerLineVisible(m_leftSplit, !m_metricsMinimised);
 
-    // The chevron grip is painted by ChevronButton (not styled via QSS): fill
-    // with the exact divider-line colour, brighten to the accent on hover like
-    // the splitter handle, glyph in the foreground colour. In high-contrast mode
-    // LogForeground is near-black, which vanishes on the grey divider grip — so
-    // force the glyph to white there to keep the chevron legible.
-    if (m_metricsToggle)
-    {
-        const QColor glyph = (theme->getColourScheme() == SonicPiTheme::HighContrastScheme)
-                                 ? QColor(Qt::white)
-                                 : m_textColor;
-        m_metricsToggle->setColors(theme->color("WindowBorder"),
-                                   theme->color("ScrollBarHover"),
-                                   glyph);
-    }
-
-    if (m_logsToggle)
-    {
-        const QColor glyph = (theme->getColourScheme() == SonicPiTheme::HighContrastScheme)
-                                 ? QColor(Qt::white)
-                                 : m_textColor;
-        m_logsToggle->setColors(theme->color("WindowBorder"),
-                                theme->color("ScrollBarHover"),
-                                glyph);
-    }
+    // The grips' palette (MainWindow::updateHelpChevronIcons): the window
+    // border colour at rest with the muted foreground on it, the accent and its
+    // contrast text under the pointer. In high-contrast mode LogForeground is
+    // near-black, which vanishes on the grey grip, so the glyph is white there.
+    const QColor glyph = (theme->getColourScheme() == SonicPiTheme::HighContrastScheme)
+                             ? QColor(Qt::white)
+                             : SonicPiTheme::blend(m_textColor, theme->color("LogBackground"), 0.30);
+    for (ChevronButton* grip : { m_metricsToggle, m_logsToggle })
+        if (grip)
+            grip->setColors(theme->color("WindowBorder"),
+                            theme->color("HighlightedBackground"),
+                            glyph,
+                            theme->contrastingText(theme->color("HighlightedBackground")));
 
     if (m_nodeGraph)
-        m_nodeGraph->applyTheme(m_textColor, m_bgColor, m_borderColor,
+        m_nodeGraph->applyTheme(m_textColor, m_bgColor,
+                                theme->color("Background"),                   // each node's outline
+                                theme->mutedForeground(),                     // labels
                                 theme->color("NumberForeground"),             // group  (blue)
                                 theme->color("FunctionMethodNameForeground"), // synth  (pink)
                                 theme->color("KeywordForeground"),            // fx     (yellow)
@@ -1382,9 +1197,10 @@ void MetricsPanel::applyTheme(SonicPiTheme* theme)
     // (scheme + hue) instead of keeping the colours it was inserted with.
     recolourLogViews();
 
-    // Re-render with the new palette on the next tick by clearing the diff cache.
+    // The values paint their cell's colour under their text; their runs take
+    // the new palette on the refresh below.
     for (ValueRowUi& ui : m_valueRows)
-        ui.lastHtml.clear();
+        ui.value->setBackground(m_bgColor);
     m_lastTreeVersion = 0xFFFFFFFFu;  // force legend (colours) to re-render
 
     if (isVisible())
@@ -1430,38 +1246,68 @@ void MetricsPanel::showEvent(QShowEvent* e)
     positionLogsToggle();
     refresh();
     m_timer->start();
+    startTreeTicks();
 }
 
 void MetricsPanel::hideEvent(QHideEvent* e)
 {
     QWidget::hideEvent(e);
     m_timer->stop();
+    stopTreeTicks();
+}
+
+// Destroyed while shown, no hide event comes: the pacer is let go here.
+MetricsPanel::~MetricsPanel()
+{
+    stopTreeTicks();
+}
+
+void MetricsPanel::startTreeTicks()
+{
+    if (m_treeTicking) return;
+    m_treeTicking = true;
+    // A read is one word when nothing has changed (updateNodeTree's version
+    // gate), so a tick costs nothing while the tree is still.
+    connect(SonicPi::FramePacer::instance(), &SonicPi::FramePacer::tick,
+            this, &MetricsPanel::updateNodeTree, Qt::UniqueConnection);
+    SonicPi::FramePacer::instance()->retain();
+    updateNodeTree();
+}
+
+void MetricsPanel::stopTreeTicks()
+{
+    if (!m_treeTicking) return;
+    m_treeTicking = false;
+    disconnect(SonicPi::FramePacer::instance(), &SonicPi::FramePacer::tick,
+               this, &MetricsPanel::updateNodeTree);
+    SonicPi::FramePacer::instance()->release();
 }
 
 bool MetricsPanel::eventFilter(QObject* obj, QEvent* e)
 {
-    // Double-clicking the main divider line toggles the logs column, mirroring a
-    // click on its chevron knob.
-    if (m_mainSplit && e->type() == QEvent::MouseButtonDblClick
-        && obj == m_mainSplit->handle(1))
+    // A grip and the divider it overlays are one control: double-clicking the
+    // line does what the grip does, and hovering either reveals both.
+    struct GripOnDivider { ThinSplitter* split; ChevronButton* grip; void (MetricsPanel::*toggle)(); };
+    for (const GripOnDivider& d : { GripOnDivider{ m_mainSplit, m_logsToggle, &MetricsPanel::toggleLogs },
+                                    GripOnDivider{ m_leftSplit, m_metricsToggle, &MetricsPanel::toggleMetrics } })
     {
-        toggleLogs();
-        return true;
-    }
-    // Keep the logs chevron knob and the main divider handle it overlays in sync:
-    // hovering either reveals both, so they act as one control.
-    QSplitterHandle* mainHandle = m_mainSplit ? m_mainSplit->handle(1) : nullptr;
-    if (obj == mainHandle || obj == m_logsToggle)
-    {
+        QSplitterHandle* handle = d.split ? d.split->handle(1) : nullptr;
+        if (!handle || (obj != handle && obj != d.grip))
+            continue;
+        if (obj == handle && e->type() == QEvent::MouseButtonDblClick)
+        {
+            (this->*d.toggle)();
+            return true;
+        }
         if (e->type() == QEvent::Enter || e->type() == QEvent::HoverEnter)
         {
-            if (m_mainSplit) m_mainSplit->setForcedHover(true);
-            if (m_logsToggle) m_logsToggle->setHovering(true);
+            d.split->setForcedHover(true);
+            if (d.grip) d.grip->setHovering(true);
         }
         else if (e->type() == QEvent::Leave || e->type() == QEvent::HoverLeave)
         {
-            if (m_mainSplit) m_mainSplit->setForcedHover(false);
-            if (m_logsToggle) m_logsToggle->setHovering(false);
+            d.split->setForcedHover(false);
+            if (d.grip) d.grip->setHovering(false);
         }
     }
     // A minimised logs column must hold at zero width, but a restyle (the main
@@ -1613,16 +1459,17 @@ void MetricsPanel::positionMetricsToggle()
     if (h <= 0)
         return;
     const int hw = m_leftSplit->handleWidth();
-    // The grip spans the whole divider width and is a bit taller than the line so
-    // its knob box can rise above/below it; centre that band on the divider. The
-    // metrics pane is fixed-height and sits at the bottom, so the divider is
-    // directly above it — derive its position from that height (sizes() would be
-    // momentarily stale right after a toggle, as the splitter relayouts async).
+    // The grip sits centred on the divider, 24px in from its right end, as the
+    // help's does. The metrics pane is fixed-height and sits at the bottom, so
+    // the divider is directly above it — derive its position from that height
+    // (sizes() would be momentarily stale right after a toggle, as the splitter
+    // relayouts async).
     const int m = m_metricsMinimised ? 0 : qBound(0, m_metricsNeededH, qMax(0, h - hw));
     const int dividerCentre = h - m - hw / 2;
-    const int boxH = ScaleHeightForDPI(18);
-    const int top = qBound(0, dividerCentre - boxH / 2, qMax(0, h - boxH));
-    m_metricsToggle->setGeometry(0, top, m_leftSplit->width(), boxH);
+    const QSize knob = m_metricsToggle->size();
+    const int top = qBound(0, dividerCentre - knob.height() / 2, qMax(0, h - knob.height()));
+    const int left = qMax(0, m_leftSplit->width() - ScaleWidthForDPI(24) - knob.width());
+    m_metricsToggle->move(left, top);
 }
 
 void MetricsPanel::toggleMetrics()
@@ -1672,8 +1519,8 @@ void MetricsPanel::updateChevron()
     m_metricsToggle->setToolTip(m_metricsMinimised ? tr("Show metrics") : tr("Minimise metrics"));
     m_metricsToggle->setAccessibleName(m_metricsMinimised ? tr("Show metrics") : tr("Minimise metrics"));
     // The divider line shows while the metrics are visible, and disappears (just
-    // the knob remains) once collapsed.
-    m_metricsToggle->setLineVisible(!m_metricsMinimised);
+    // the grip remains) once collapsed.
+    setDividerLineVisible(m_leftSplit, !m_metricsMinimised);
 }
 
 void MetricsPanel::setDividerLineVisible(ThinSplitter* s, bool visible)
@@ -1761,9 +1608,8 @@ void MetricsPanel::updateLogsChevron()
     m_logsToggle->setDir(m_logsMinimised ? ChevronButton::Left : ChevronButton::Right);
     m_logsToggle->setToolTip(m_logsMinimised ? tr("Show logs") : tr("Minimise logs"));
     m_logsToggle->setAccessibleName(m_logsMinimised ? tr("Show logs") : tr("Minimise logs"));
-    // The divider line (chevron band + the full-height splitter handle behind it)
-    // shows while the logs are visible, and disappears once collapsed.
-    m_logsToggle->setLineVisible(!m_logsMinimised);
+    // The divider line shows while the logs are visible, and disappears (just
+    // the grip remains) once collapsed.
     setDividerLineVisible(m_mainSplit, !m_logsMinimised);
 }
 
@@ -1776,13 +1622,11 @@ void MetricsPanel::positionLogsToggle()
     if (w <= 0 || h <= 0)
         return;
     const int hw = m_mainSplit->handleWidth();
-    // The divider sits just right of the left column. Centre a short knob band on
-    // it — short enough that the rest of the divider line stays draggable.
+    // The divider sits just right of the left column: centre the grip on it,
+    // near the top (the rest of the line stays draggable).
     const int dividerCentreX = m_leftSplit->width() + hw / 2;
-    const int bandW = ScaleHeightForDPI(18);
-    const int bandH = ScaleHeightForDPI(64);
-    const int left = qBound(0, dividerCentreX - bandW / 2, qMax(0, w - bandW));
-    // Near the top of the divider (top-right of the pane) rather than centred.
-    const int top = qBound(0, ScaleHeightForDPI(10), qMax(0, h - bandH));
-    m_logsToggle->setGeometry(left, top, bandW, bandH);
+    const QSize knob = m_logsToggle->size();
+    const int left = qBound(0, dividerCentreX - knob.width() / 2, qMax(0, w - knob.width()));
+    const int top = qBound(0, ScaleHeightForDPI(24), qMax(0, h - knob.height()));
+    m_logsToggle->move(left, top);
 }

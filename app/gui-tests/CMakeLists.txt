@@ -31,9 +31,11 @@ if(NOT EXISTS ${GUI_ROOT}/utils/completion_argkinds.gen.h OR
 endif()
 
 set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)   # the app's images and themes, compiled in below: a widget under test loads them as the app does
 
 add_executable(${PROJECT_NAME}
     ${GUI_TESTS_ROOT}/main.cpp
+    ${GUI_ROOT}/SonicPi.qrc
     ${GUI_TESTS_ROOT}/completionpopup_a11y.test.cpp
     ${GUI_TESTS_ROOT}/completionpopup_select.test.cpp
     ${GUI_TESTS_ROOT}/announcementpolicy.test.cpp
@@ -52,7 +54,36 @@ add_executable(${PROJECT_NAME}
     ${GUI_TESTS_ROOT}/tutorialwidgets_a11y.test.cpp
     ${GUI_TESTS_ROOT}/tutorialpane_clip.test.cpp
     ${GUI_TESTS_ROOT}/trackspanel_look.test.cpp
+    ${GUI_TESTS_ROOT}/helprail_look.test.cpp
+    ${GUI_TESTS_ROOT}/chevron_look.test.cpp
+    ${GUI_TESTS_ROOT}/recorder_limits.test.cpp
+    ${GUI_TESTS_ROOT}/recorder_audio_mix.test.cpp
+    ${GUI_TESTS_ROOT}/helppanelmodel.test.cpp
+    ${GUI_TESTS_ROOT}/sidecolumnmodel.test.cpp
+    ${GUI_TESTS_ROOT}/nodetreemotion.test.cpp
+    ${GUI_TESTS_ROOT}/nodetreegraph_look.test.cpp
+    ${GUI_TESTS_ROOT}/loopscope_lifecycle.test.cpp
+    ${GUI_TESTS_ROOT}/metricslog.test.cpp
+    ${GUI_TESTS_ROOT}/metricspanel_font.test.cpp
+    ${GUI_TESTS_ROOT}/metricvalue.test.cpp
+    ${GUI_TESTS_ROOT}/opaque_widgets.test.cpp
+    ${GUI_TESTS_ROOT}/window_layout.test.cpp
+    ${GUI_TESTS_ROOT}/repaint_pacing.test.cpp
+    ${GUI_TESTS_ROOT}/linkaudio_engine_ready.test.cpp
+    ${GUI_TESTS_ROOT}/plugins.test.cpp
+    ${GUI_TESTS_ROOT}/card_deck.test.cpp
+    ${GUI_TESTS_ROOT}/quickstart_card.test.cpp
+    ${GUI_TESTS_ROOT}/tutorial_cards.test.cpp
+    ${GUI_ROOT}/widgets/nodetreegraph.cpp
+    ${GUI_ROOT}/widgets/metricslog.cpp
+    ${GUI_ROOT}/widgets/metricspanel.cpp
+    ${GUI_ROOT}/widgets/metricvalue.cpp
     ${GUI_ROOT}/widgets/trackspanel.cpp
+    ${GUI_ROOT}/widgets/quickstartpane.cpp
+    ${GUI_ROOT}/widgets/codecard.cpp
+    ${GUI_ROOT}/widgets/carddeck.cpp
+    ${GUI_ROOT}/widgets/linkaudiostreamswidget.cpp
+    ${GUI_ROOT}/widgets/linkvisibilitytoggle.cpp
     ${GUI_ROOT}/widgets/tutorialpane.cpp
     ${GUI_ROOT}/widgets/sonicpiscintilla.cpp
     ${GUI_ROOT}/widgets/sonicpilexer.cpp
@@ -61,6 +92,7 @@ add_executable(${PROJECT_NAME}
     ${GUI_ROOT}/model/sonicpitheme.cpp
     ${GUI_ROOT}/widgets/editortoolbar.cpp
     ${GUI_ROOT}/widgets/findpopup.cpp
+    ${GUI_ROOT}/widgets/chevronbutton.cpp
     ${GUI_TESTS_ROOT}/sampleheaderinfo.test.cpp
     ${GUI_TESTS_ROOT}/setbundle.test.cpp
     ${GUI_TESTS_ROOT}/splash_quit_policy.test.cpp
@@ -70,13 +102,40 @@ add_executable(${PROJECT_NAME}
     ${GUI_ROOT}/utils/sampleheaderinfo.cpp
     ${GUI_ROOT}/utils/completion_context.cpp
     ${GUI_ROOT}/utils/reducedmotion.cpp
+    ${GUI_ROOT}/utils/framepacer.cpp
     ${GUI_ROOT}/utils/tutorialdocs.cpp
     ${GUI_ROOT}/widgets/tutorialwidgets.cpp
     ${GUI_ROOT}/utils/setbundle.cpp
     ${GUI_ROOT}/utils/scintilla_api.cpp
 )
 
+# The Objective-C++ guard every system callback block goes through, and the
+# lint that keeps it so: macOS only, with the frameworks the guard test
+# provokes a real exception from. As in gui/, the .mm files go to the C++
+# compiler, which reads Objective-C++ from the extension.
+if(APPLE)
+  target_sources(${PROJECT_NAME} PRIVATE
+      ${GUI_TESTS_ROOT}/objc_guard.test.mm
+      ${GUI_ROOT}/platform/objc_guard.mm)
+  set_source_files_properties(${GUI_TESTS_ROOT}/objc_guard.test.mm ${GUI_ROOT}/platform/objc_guard.mm
+      PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+  target_link_libraries(${PROJECT_NAME} PRIVATE "-framework Foundation" "-framework AVFoundation")
+endif()
+
 target_include_directories(${PROJECT_NAME} PRIVATE
+# The Objective-C++ guard every system callback block goes through, and the
+# lint that keeps it so: macOS only, with the frameworks the guard test
+# provokes a real exception from. As in gui/, the .mm files go to the C++
+# compiler, which reads Objective-C++ from the extension.
+if(APPLE)
+  target_sources(${PROJECT_NAME} PRIVATE
+      ${GUI_TESTS_ROOT}/objc_guard.test.mm
+      ${GUI_ROOT}/platform/objc_guard.mm)
+  set_source_files_properties(${GUI_TESTS_ROOT}/objc_guard.test.mm ${GUI_ROOT}/platform/objc_guard.mm
+      PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+  target_link_libraries(${PROJECT_NAME} PRIVATE "-framework Foundation" "-framework AVFoundation")
+endif()
+
     ${GUI_ROOT}
     ${GUI_ROOT}/widgets
     ${GUI_ROOT}/QScintilla_src-2.14.1/src   # <Qsci/...> headers (declarations only)
@@ -85,7 +144,8 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 )
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE
-    SP_ROOT="${SP_APP_ROOT}/..")
+    SP_ROOT="${SP_APP_ROOT}/.."
+    SONIC_PI_PLUGINS=$<BOOL:${CLOCKWORK_PLUGINS}>)   # as the GUI's (gui/CMakeLists.txt)
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
     sonic-pi-api

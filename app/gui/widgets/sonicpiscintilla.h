@@ -51,6 +51,7 @@ public:
     // each ctor opens its own when null.
     SonicPiScintilla(SonicPiLexer* lexer, SonicPiTheme* theme, QString fileName, bool autoIndent,
                      QSettings* keyBindings = nullptr);
+    ~SonicPiScintilla() override;
 
     virtual QStringList apiContext(int pos, int& context_start,
         int& last_word_start);
@@ -135,11 +136,18 @@ public slots:
     // its current line, so flashes stay correct as the code is edited live.
     void snapshotRunLines();
     void flashRunLine(int runLine, bool codeWash = true, bool gutterDot = false);
+    // Whether a flash is showing on line (0-based): drawn and not yet cleared.
+    bool isFlashing(int line) const { return m_flashGen.contains(line); }
     // Pin a mini oscilloscope to a live_loop's header line (runLine is the
     // 0-based line at run time, mapped through the same edit-tracking anchors
-    // as the flashes). Re-registering an existing name updates its line and
-    // reader; endLiveLoopScope removes it when the loop dies.
-    void setLiveLoopScope(const QString& name, int runLine, const shm_scope_stream_reader& reader);
+    // as the flashes), reading scope slot scopeNum. Re-registering an existing
+    // name updates its line and reader; endLiveLoopScope removes it when the
+    // loop dies. A slot belongs to one loop: another loop's scope on the same
+    // slot goes.
+    void setLiveLoopScope(const QString& name, int runLine, int scopeNum, const shm_tap_stream_reader& reader);
+    // Let go of the scopes for a loop that now lives in another buffer: any
+    // named `name`, and any on slot scopeNum.
+    void dropLiveLoopScopesFor(int scopeNum, const QString& name);
     // Roll-mode (scrolling strip) vs the default triggered sweep; applies to
     // current and future loop scopes (preference: loop_scope_scroll).
     void setLiveLoopScopeScroll(bool scroll);
@@ -342,6 +350,7 @@ public:
     bool m_inReplaceBuffer = false; // suppress incremental tracking during a full replace
     int m_flashAlpha = SonicPi::kFlashWashAlpha; // code-wash indicator alpha (setFlashBrightness)
     void applyFlashMarkerColours();
+    void flashLineNow(int line, bool codeWash, bool gutterDot);   // flashLine, on the tick
     void clearFlashWash(int line);
     void trackEditForFlash(int position, int modificationType, int length);
     int runLineToCurrent(int runLine);
@@ -350,7 +359,12 @@ public:
     QHash<QString, class LiveLoopScopeWidget*> m_loopScopes;
     bool m_loopScopeScroll = false;
     QHash<QString, int> m_loopScopeLines;
-    QTimer* m_loopScopeTimer = nullptr;
+    QHash<QString, int> m_loopScopeSlots;   // name → the scope slot it reads
+    bool m_loopScopesPaced = false;           // holding the FramePacer for the scopes
+    QMetaObject::Connection m_loopScopeTick;  // its tick, while held
+    void unpaceLiveLoopScopes();
+    void placeLiveLoopScopesSoon();   // positionLiveLoopScopes, after the current paint
+    bool m_loopScopePlacePending = false;
     SonicPi::SonicPiAPI* m_audioApi = nullptr;
     void positionLiveLoopScopes();
     void applyLoopScopeColours();

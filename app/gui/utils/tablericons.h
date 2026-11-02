@@ -46,19 +46,18 @@ enum class Glyph
     Check,           // copied! confirmation tick
     Search,          // docs filter
     Restore,         // reset dials
-    ChevronUp,       // find bar: previous match
-    ChevronDown,     // find bar: next match
     Scissors,        // editor toolbar: cut
     Clipboard,       // editor toolbar: paste
     ArrowBackUp,     // editor toolbar: undo
     ArrowForwardUp,  // editor toolbar: redo
-    ChevronLeft,     // tracks: move a device earlier in the chain
-    ChevronRight,    // tracks: move a device later in the chain
     Power,           // tracks: a device's bypass
     AppWindow,       // tracks: a plugin's own window
     Adjustments,     // tracks: configure a device's face
     Plus,            // tracks: new track / add to track
-    Plug             // Tracks tab
+    Plug,            // Tracks tab
+    Pencil,          // card: edit the code
+    Reset,           // card: back to the code as written
+    ExternalLink     // card: open in the editor
 };
 
 // Solid glyphs are tinted via fill; everything else via stroke.
@@ -173,10 +172,6 @@ inline QString glyphPaths(Glyph glyph)
             "<path d='M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0' />");
     case Glyph::Check:
         return QStringLiteral("<path d='M5 12l5 5l10 -10' />");
-    case Glyph::ChevronUp:
-        return QStringLiteral("<path d='M6 15l6 -6l6 6' />");
-    case Glyph::ChevronDown:
-        return QStringLiteral("<path d='M6 9l6 6l6 -6' />");
     case Glyph::Scissors:
         return QStringLiteral(
             "<path d='M6 7m-3 0a3 3 0 1 0 6 0a3 3 0 1 0 -6 0' />"
@@ -195,10 +190,6 @@ inline QString glyphPaths(Glyph glyph)
     case Glyph::ArrowForwardUp:
         return QStringLiteral(
             "<path d='M15 14l4 -4l-4 -4' /><path d='M19 10h-11a4 4 0 1 0 0 8h1' />");
-    case Glyph::ChevronLeft:
-        return QStringLiteral("<path d='M15 6l-6 6l6 6' />");
-    case Glyph::ChevronRight:
-        return QStringLiteral("<path d='M9 6l6 6l-6 6' />");
     case Glyph::Power:
         return QStringLiteral("<path d='M7 6a7.75 7.75 0 1 0 10 0' /><path d='M12 4l0 8' />");
     case Glyph::AppWindow:
@@ -213,6 +204,20 @@ inline QString glyphPaths(Glyph glyph)
             "<path d='M16 7a2 2 0 1 0 4 0a2 2 0 0 0 -4 0' /><path d='M18 4v1' /><path d='M18 9v11' />");
     case Glyph::Plus:
         return QStringLiteral("<path d='M12 5l0 14' /><path d='M5 12l14 0' />");
+    // The card's three, as the web draws them (app/web/app/src/icons.js).
+    case Glyph::Pencil:
+        return QStringLiteral(
+            "<path d='M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4' />"
+            "<path d='M13.5 6.5l4 4' />");
+    case Glyph::Reset:
+        return QStringLiteral(
+            "<path d='M4.5 12a7.5 7.5 0 1 0 2.2 -5.3' />"
+            "<path d='M4.5 3.5v4h4' />");
+    case Glyph::ExternalLink:
+        return QStringLiteral(
+            "<path d='M12 6h-6a2 2 0 0 0 -2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-6' />"
+            "<path d='M11 13l9 -9' />"
+            "<path d='M15 4h5v5' />");
     case Glyph::Plug:
         return QStringLiteral(
             "<path d='M9.785 6l8.215 8.215l-2.054 2.054a5.81 5.81 0 1 1 -8.215 -8.215l2.054 "

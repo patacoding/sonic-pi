@@ -193,6 +193,13 @@ QTabWidget::tab-bar
 
 }
 
+/* The help's tab rail: its icons from the top, under the divider, as the
+   web's rail has them. */
+QTabWidget#southTabs::tab-bar
+{
+    alignment: left;
+}
+
 QTabWidget::pane
 {
     border: 0dx;
@@ -224,6 +231,14 @@ QDockWidget
 {
   /* Opaque themed frame so a floated-out pane isn't a bare white window. */
   background: paneColor;
+}
+
+/* The placeholders that keep a divider while the help panel or the side
+   column is away (widgets/awaydock.h): no frame; their pixel takes the
+   divider's background from the palette (setAwayDockColour). */
+QDockWidget#helpAwayDock, QDockWidget#sideAwayDock
+{
+  border: none;
 }
 
 /* Shared "section title" look, matching the SuperSonic debug pane's log titles
@@ -778,11 +793,11 @@ QToolButton:focus
     border-top: 2px solid hoverButtonColor;
 }
 
-/* Dock-title-row icon buttons: the help pane's persistent close ✕ and the
-   A-/A+ zoom pairs (zoombar.cpp). Flat: the glyphs carry their own form, so
-   the buttons draw no chip; hover brightens the glyph in code. One shared
-   rule so all their boxes are identical and the row's icons space evenly. */
-QPushButton#helpCloseButton,
+/* The help pane's flat icon buttons: its persistent close ✕ in the dock
+   title row, and the A-/A+ zoom pairs at the foot of its tab rail
+   (zoombar.cpp). Flat: the glyphs carry their own form, so the buttons draw
+   no chip; hover brightens the glyph in code. One shared rule so all their
+   boxes are identical. */
 QPushButton#zoomBtn
 {
     background: transparent;
@@ -1423,24 +1438,6 @@ QWidget#qsNav
     background: subtleFillColor;
 }
 
-QPushButton#qsArrow
-{
-    background: transparent;
-    border: none;
-    color: mutedForegroundColor;
-    font-weight: 700;
-}
-
-QPushButton#qsArrow:hover:enabled
-{
-    color: highlightedBackgroundColor;
-}
-
-QPushButton#qsArrow:disabled
-{
-    color: ghostForegroundColor;
-}
-
 /* One dot per card; the lit run is the cards currently on screen. */
 /* Radius is set per-dot in quickstartpane.cpp (rebuildDots): it must be half
    the dot's size, and the size scales with the pane's A-/A+ zoom. A fixed
@@ -1488,8 +1485,11 @@ QFrame#qsCard
 }
 
 /* The selected card: arrow keys move the selection one card at a time and
-   the deck scrolls to keep it in view. */
-QFrame#qsCard:focus
+   the deck scrolls to keep it in view. A card that plays lights under the
+   pointer too, and while it plays; one that only reads does not. */
+QFrame#qsCard:focus,
+QFrame#qsCard[cardHover="true"],
+QFrame#qsCard[playing="true"]
 {
     border-color: windowForegroundColor;
 }
@@ -1562,9 +1562,10 @@ QPushButton#qsCardBtn[device="true"]:focus
     background: focusWashColor;
 }
 
-/* A device's Configure, armed: the bar's colours turned inside out (the glyph
-   takes the accent, in trackspanel.cpp), so a mode the user is in reads from
-   across the room, as Live's lit Configure does. */
+/* A device's Configure, or a card's Edit, armed: the bar's colours turned
+   inside out (the glyph takes the accent, in trackspanel.cpp and
+   codecard.cpp), so a mode the user is in reads from across the room, as
+   Live's lit Configure does. */
 QPushButton#qsCardBtn[armed="true"],
 QPushButton#qsCardBtn[armed="true"]:hover
 {
@@ -1576,18 +1577,13 @@ QWidget#qsCardBody
     background-color: accentTintColor;
 }
 
+/* A card's code (codecard.cpp), and a device's code lines (trackspanel.cpp). */
+TutProseText#qsCode,
 QLabel#qsCodeLine
 {
     color: windowForegroundColor;
     background: transparent;
     font-family: 'Hack';
-    border-radius: radiusSmall;
-}
-
-/* Trigger flash: the same accent wash the editor uses. */
-QLabel#qsCodeLine[flashing="true"]
-{
-    background: flashWashColor;
 }
 
 QWidget#qsCardFooter
@@ -1602,6 +1598,36 @@ QLabel#qsCardBlurb
     color: softForegroundColor;
     background: transparent;
     font-style: italic;
+}
+
+/* A card's code made editable in place: the body's tint and type, so nothing
+   moves when Edit is pressed. */
+QPlainTextEdit#qsCardEditor
+{
+    background-color: accentTintColor;
+    color: windowForegroundColor;
+    border: none;
+    font-family: 'Hack';
+    padding: 6dx 10dx;
+}
+
+/* The program's error, upright, marked down its left edge in the accent. */
+QLabel#qsCardError
+{
+    color: windowForegroundColor;
+    background: transparent;
+    font-family: 'Hack';
+    border-left: 4dx solid highlightedBackgroundColor;
+    padding: 4dx 0 4dx 10dx;
+}
+
+/* What the program puts: the last few lines, the newest in the foreground
+   (codecard.cpp colours it). */
+QLabel#qsCardOutput
+{
+    color: softForegroundColor;
+    background: transparent;
+    font-family: 'Hack';
 }
 
 /* The scope is the play/stop control; the disc icon carries the visuals. */

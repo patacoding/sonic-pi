@@ -1,0 +1,324 @@
+//--
+// This file is part of Sonic Pi: http://sonic-pi.net
+// Full project source: https://github.com/sonic-pi-net/sonic-pi
+// License: https://github.com/sonic-pi-net/sonic-pi/blob/main/LICENSE.md
+//
+// Copyright 2026 by Sam Aaron (http://sam.aaron.name).
+// All rights reserved.
+//
+// Permission is granted for use, copying, modification, and
+// distribution of modified versions of this work as long as this
+// notice is included.
+//++
+
+#pragma once
+
+#include <QComboBox>
+#include <QStackedWidget>
+#include <QTabBar>
+#include <QWidget>
+
+#include <memory>
+
+#include "GraphicsPasses.h"
+#include "GraphicsRenderThread.h"
+// The document save/load format: widget-free and GL-free, so the round trip is exercised on its own by a
+// probe rather than through a file dialog (docs/dev-discipline.md 4.1).
+#include "GraphicsDocumentFile.h"
+
+class QLabel;
+class QPlainTextEdit;
+class QPushButton;
+class QSettings;
+class QTabWidget;
+class QTimer;
+
+class SonicPiScintilla;
+class SonicPiTheme;
+
+namespace SonicPi
+{
+
+class GlslLexer;
+
+// The shader editor: a text pane, a Compile action, and the compiler's own answer.
+//
+// SAVING AND COMPILING ARE ONE ACTION, deliberately. There is no useful state in which the file on
+// disk differs from what is being rendered and the user believes otherwise: an edited-but-uncompiled
+// shader is the same as an unsaved one, except that it makes "why has nothing changed" a question
+// worth asking. One button that writes the file and asks the render thread to rebuild removes the
+// question.
+//
+// THE COMPILER RUNS ON THE RENDER THREAD, NEVER HERE. This window never compiles anything and has no
+// GL context to compile with; it writes a file and asks GraphicsRenderThread to try. The failure that
+// already cost this feature a rewrite was compiling against whatever context happened to be current
+// on the GUI thread, so the request goes one way and the verdict comes back through
+// shaderCompileFinished.
+//
+// Text editing is deliberately plain in behaviour - no autocompletion, no API docs - but it IS
+// highlighted: GLSL through GlslLexer, which subclasses the QScintilla C++ lexer already in the
+// tree rather than adding a lexer to the vendored fork (see GlslLexer.h for why that matters). The
+// editor is the audio editor's own widget class, so key bindings, zoom and accessibility come for
+// free, and the text font arrives through the lexer exactly as it does for the code buffers.
+class ShaderBufferWindow : public QWidget
+{
+    Q_OBJECT
+
+public:
+    // `theme`, `renderThread` and `settings` are not owned, and must outlive this window. MainWindow
+    // owns all three.
+    //
+    // `settings` is the GUI's own settings object, passed in rather than opened here so that the file
+    // dialogs' remembered directory lives with the rest of the GUI's preferences instead of this
+    // feature inventing a second place to keep state.
+    ShaderBufferWindow(SonicPiTheme* theme, GraphicsRenderThread* renderThread, QSettings* settings,
+                       QWidget* parent = nullptr);
+    ~ShaderBufferWindow() override;
+
+    // Re-read the look from the theme: the application stylesheet, the editor's syntax colours and
+    // the text fonts. Public because MainWindow applies a new theme to the whole application and
+    // this window is not a child of it, so it has to be told. Called on construction.
+    void applyTheme();
+
+    // Text size, as a Scintilla zoom level in the code buffers' own units.
+    //
+    // Two reasons this exists rather than being left to the editor's own property. The code buffers
+    // START at SonicPiScintilla::kDefaultZoom (2), not 0, so an editor left at 0 is two points
+    // smaller than the buffer beside it. And the zoom is per-editor state that only MainWindow's
+    // Code Size actions and Ctrl+wheel touch - both of which act on the current audio buffer, so
+    // without this the shader editor's font never changed at all.
+    void setEditorZoom(int zoom);
+    int editorZoom() const;
+    void zoomIn();
+    void zoomOut();
+
+    // Write the CURRENT TAB's text to that buffer's file and ask the render thread to compile it and put
+    // it on screen. The reply arrives at compileFinished().
+    //
+    // Bound to Ctrl+Return as well as the Compile button - the audio editor's Run key, and the habit of
+    // every shader tool.
+    void compile();
+
+    // Show the window on one buffer, creating its tab if it is not there yet, and make it current.
+    void showBuffer(const QString& shaderName);
+
+    // A DOCUMENT is what is saved, loaded and created - never a single pass. An Image that samples a Buffer
+    // that is fed by a Common function is one thing; saving one text of it saves something that cannot run.
+    //
+    //   newDocument()      pick an empty folder; the six passes and the record are written into it
+    //   loadFromFile()     pick a saved document's shadertoy.json
+    //   saveToFile()       pick a folder to save the whole document into
+    //   reloadFromDisk()   re-read the document from the shaders directory, discarding unsaved edits
+    //
+    // The reading and writing is separated from the dialogs that choose a path (GraphicsDocumentFile.h), so
+    // the round trip is exercised by a probe rather than through a modal dialog - and the dialog is the only
+    // part left untested.
+    void newDocument();
+    void loadFromFile();
+    void saveToFile();
+    void reloadFromDisk();
+
+    bool importDocumentFrom(const QString& recordPath);
+    bool saveDocumentTo(const QString& targetDirectory);
+    bool createDocumentIn(const QString& targetDirectory, const QString& name);
+    // Re-read the document being edited from the shaders directory into this session's editors. Shared by
+    // Reload and New, because both mean "the files on disk are now the truth".
+    void reloadEditorsFromDisk(const QString& name);
+    // The document as the EDITOR has it - six texts, channels included - which is what a save must write:
+    // the user may have typed without compiling, and those keystrokes are the point of saving.
+    GraphicsDocumentFile currentDocumentFile() const;
+
+signals:
+    // Emitted when the user closes this window, so the menu action that opened it can be un-ticked.
+    void closedByUser();
+
+public slots:    // The render thread's verdict. Connected to GraphicsRenderThread::shaderCompileFinished.
+    //
+    // `errorFile` is named the way ShaderText::diagnosticName() names files - relative to the shader
+    // directory when it is inside it - which is what makes it comparable with this window's own file.
+    // `includedShaders` is what the compile read: the #include chain, for the report.
+    void compileFinished(bool ok, const QString& compilerLog, const QString& errorFile,
+                         int errorLine, const QStringList& includedShaders);
+
+protected:
+    void closeEvent(QCloseEvent* e) override;
+    // Ctrl+wheel, matching what the code buffers do on Windows. Handled here rather than letting the
+    // event reach MainWindow, whose handler zooms the current AUDIO buffer whichever window the
+    // pointer is over.
+    void wheelEvent(QWheelEvent* event) override;
+    // The tab bar's wheel: turn it into "previous/next buffer". Handled here rather than left to Qt, so
+    // the behaviour is OURS to state - the bar is a list that can overflow, and a wheel over it should
+    // walk the buffers rather than depend on whether the tabs happen to fit.
+    bool eventFilter(QObject* watched, QEvent* event) override;
+
+private:
+    // Show the compiler's output, prefixed with where the problem is (file:line). Empty text with ok
+    // true clears the report.
+    //
+    // The report belongs to the BUFFER it is about, not to the window: each buffer keeps its own, and
+    // switching tabs brings that buffer's report back with it. One shared pane would show a stale error
+    // from another shader beside code it has nothing to do with.
+    void showCompileReport(bool ok, const QString& compilerLog, const QString& errorFile,
+                           int errorLine, const QString& shaderName = QString(),
+                           const QStringList& includedShaders = QStringList());
+    // Put the cursor on `line` (1-based) and make sure it is visible. No-op for a line number that is
+    // not in the document, because a diagnostic referring to a line the editor does not have would
+    // otherwise move the cursor somewhere arbitrary and look like a bug.
+    //
+    // A convenience only: the report names the file and the line, so nothing is lost when this does
+    // nothing. It is also what had to learn about includes - a diagnostic inside an included library
+    // is not a line in this document at all, so the caller compares files before asking
+    // (docs/shader-includes-plan.md 4).
+    void jumpToLine(int line);
+
+    // ---- the buffers, as tabs ---------------------------------------------------------------
+    //
+    // One editor per buffer, kept for the life of the window: switching tabs must not throw away
+    // unsaved text, which is the audio side's behaviour too (its ten buffers are ten editors, not one
+    // reused editor).
+    //
+    // The LIST comes from the shader directory (GraphicsSettings::shaderNames()), so a buffer is a file
+    // and nothing else has to be maintained. It is re-read on every rebuildTabs() - opening the window,
+    // creating a buffer - rather than watched with a file watcher: a watcher is a thread and a set of
+    // platform behaviours for a list that changes only when the user changes it.
+    void rebuildTabs(const QString& selectName = QString());
+    // The buffer currently being edited (the current tab's name). Empty only when there are no tabs at
+    // all, which needs the shader directory to be unreadable.
+    QString editingShaderName() const;
+    // Make `name` the current tab. No-op when it is already current.
+    void selectTab(const QString& name);
+    // The editor for the current tab, or null.
+    SonicPiScintilla* currentEditor() const;
+    // Re-label the tabs: the buffer that is on screen gets the mark, and every tab's tooltip says what
+    // pressing Compile would do. Called whenever the picture or the current tab changes.
+    void updateTabLabels();
+    // The window title names the buffer being edited, and says when that buffer is the picture. The window
+    // is meant to sit OVER the output during a performance, so "which buffer is this" has to be answerable
+    // without reading the tab bar under it.
+    void updateWindowTitle();
+    // Show the CURRENT tab's own report and status line. Called on every tab change and after a verdict,
+    // because a report belongs to a buffer and must not be left beside another buffer's code.
+    void showCurrentBuffer();
+    // Create a new buffer: ask for a name, write a minimal shader to its file, and open it in a tab.
+    void newBuffer();
+    // Close a buffer's tab: the tab, its editor, its report, and its compiled program.
+    //
+    // THE FILE IS NOT TOUCHED. Closing a tab is an editor action, not a file operation - the shader stays
+    // on disk and comes back the next time the window is built (the list IS the directory), which is also
+    // why closing needs no "are you sure" about losing a shader: nothing is lost, only un-edited.
+    void closeBuffer(const QString& shaderName);
+
+    // Rename a buffer: the name IS the file name, so this renames the file too.
+    //
+    // Without it a mistyped name is permanent from inside the application, which is the wrong shape for an
+    // editor whose whole model is "a buffer is a file". If the renamed buffer is the one on screen it is
+    // recompiled under its new name, so the picture keeps following the file it came from.
+    void renameBuffer(const QString& oldName);
+    // A minimal valid shader for a new buffer. Valid on purpose: a new buffer that shows a blank output
+    // with a compile error teaches the wrong thing about what just happened.
+    static QString newBufferTemplate(const QString& name);
+
+    // The file a buffer's text lives in, and where it is written. Empty when the name is unknown.
+    static QString bufferFilePath(const QString& shaderName, GraphicsPass pass = GraphicsPass::Image);
+
+    // Whether `name` is a multi-pass document - a directory holding image.frag - rather than a single-pass
+    // .frag. The two are compiled by different machinery (GraphicsPassPrograms vs one GraphicsRenderer), so
+    // Compile has to know which one it is asking about; asked of the same scan the renderer uses.
+    bool documentIsMultiPass(const QString& name) const;
+
+    SonicPiTheme* m_theme = nullptr;
+    GraphicsRenderThread* m_renderThread = nullptr;
+    // Not owned. The GUI's settings, for the file dialogs' remembered directory only.
+    QSettings* m_settings = nullptr;
+
+    QTabWidget* m_tabs = nullptr;
+    // The editor of each tab, by buffer name. Owned by the tab widget.
+    QHash<QString, SonicPiScintilla*> m_editors;
+    // Each buffer's report and status line, so switching tabs does not mix two shaders' diagnostics.
+    QHash<QString, QString> m_reports;
+    QHash<QString, QString> m_statusByBuffer;
+    // The name of the buffer the LAST compile request was made for, so a verdict arriving later can be
+    // filed against the right buffer even if the user has switched tabs in the meantime.
+    QString m_compilingShaderName;
+
+    // Which pass of each DOCUMENT is being edited. A document is a directory holding image.frag (plan
+    // 17.2); its tab edits one pass at a time, and Image until the selector says otherwise - which is also
+    // the only pass a top-level .frag has, so this changes nothing for what is on disk today.
+    QHash<QString, GraphicsPass> m_passByDocument;
+
+    // The text of each pass, kept in memory while the window is open, keyed by "<document>/<pass>". The
+    // document IS its code (web 4.8): switching passes must not touch the disk, and editing one pass while
+    // another is on screen must not lose the first one's unsaved text. Writing happens when the user
+    // compiles, which is also when the renderer needs the file.
+    QHash<QString, QString> m_textByPass;
+
+    // One EDITOR per pass, as Shadertoy has: switching pass tabs is a change of view, so undo, selection
+    // and scroll belong to the pass. A single editor handed different text shares all three silently -
+    // which is what this did before, and it is the difference between a Shadertoy editor and a text box.
+    QHash<QString, QStackedWidget*> m_editorStacks;
+    QHash<QString, SonicPiScintilla*> m_editorsByPass;   // "<document>/<pass>"
+
+    // The pass selector of the current document: which of Common/Image/Buffer A-D this tab is editing.
+    QTabBar* m_passBar = nullptr;
+
+    // The four channels, INLINE under the editor rather than behind a dialog: it is the layout Shadertoy
+    // and the web version both use, and a setting you can see while looking at the code it feeds is worth
+    // more than one you have to open. One row per DOCUMENT (all passes share it), as in web 4.8.
+    // What a channel combo's item data means. Every item carries the SOURCE TEXT the file stores
+    // ("none", "bufferA", "texture:<path>") - so a click needs no second lookup to become a value - and
+    // these two strings are the entries that are not a source but a REQUEST for one.
+    //
+    // One image entry, not "Texture" plus "image": a channel that reads a file reads an image, and the
+    // renderer decides how to load it.
+    static constexpr const char* kChannelSourceChooseImage = "choose-image";
+    static constexpr const char* kChannelSourceChooseCubemap = "choose-cubemap";
+
+    QComboBox* m_channelCombos[4] = { nullptr, nullptr, nullptr, nullptr };
+
+    // The picture of what each channel reads, UNDER its combo: the chosen image at thumbnail size, the
+    // name of a file that will not load (in the same box, so nothing moves), or nothing at all for a buffer
+    // - whose picture is the pass editor two lines up, and drawing it twice would cost a readback.
+    //
+    // Sized in DESIGN pixels and scaled by the DPI helper: big enough to tell two screenshots apart, which
+    // is what the user asked for after four 30-pixel icons proved too small to recognise anything in.
+    static constexpr int kChannelPreviewWidth = 132;
+    static constexpr int kChannelPreviewHeight = 88;
+
+    QLabel* m_channelPreviews[4] = { nullptr, nullptr, nullptr, nullptr };
+    // What that channel reads, in words, under its picture: the file's name, or "none"/"Buffer A". The
+    // combo above says the KIND; this says which one, without widening anything.
+    QLabel* m_channelHints[4] = { nullptr, nullptr, nullptr, nullptr };
+    // Fill them in from the same sources the combos were built from. Called with refreshChannelRow().
+    void refreshChannelPreviews(const QList<GraphicsChannelSource>& sources);
+
+    QWidget* m_channelRow = nullptr;
+    void refreshChannelRow();
+
+    // Adding and removing the passes of a document, as Shadertoy's tab bar does. ensurePassEditor() is split
+    // out because a pass created after the tab was built still needs an editor of its own.
+    SonicPiScintilla* ensurePassEditor(const GraphicsDocument& document, GraphicsPass pass);
+    void addPass(GraphicsPass pass);
+
+    // Shadertoy's New: the passes this document does not have yet. Shared by the tab bar's + and the toolbar
+    // button, so there is one list and one behaviour rather than two that drift apart.
+    void showAddPassMenu(QWidget* anchor);
+    void deletePass(GraphicsPass pass);
+    void writeChannelsFromRow();
+    GraphicsPass editingPass() const;
+    void setEditingPass(GraphicsPass pass);
+    void refreshPassSelector();
+
+    // Owned by the editors (set on them), and held here so applyTheme() can re-colour them.
+    GlslLexer* m_lexer = nullptr;
+    QPlainTextEdit* m_report = nullptr;
+    QLabel* m_status = nullptr;
+    QPushButton* m_compileButton = nullptr;
+
+    // Shadertoy jumps you to the failing line; this is that, as a button because the report pane is plain
+    // text. Enabled only when the last compile named a line inside the document being edited.
+    QPushButton* m_goToErrorButton = nullptr;
+    int m_lastErrorLine = 0;
+    QString m_lastErrorFile;
+};
+
+} // namespace SonicPi

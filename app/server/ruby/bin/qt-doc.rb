@@ -14,6 +14,7 @@
 
 require 'cgi'
 require 'fileutils'
+require 'json'
 
 require_relative "../core.rb"
 require_relative "../paths"
@@ -26,6 +27,28 @@ require_relative "../lib/sonicpi/lang/midi"
 require_relative "../lib/sonicpi/note"
 require_relative "../lib/sonicpi/chord"
 require_relative "../lib/sonicpi/scale"
+
+# ---------------------------------------------------------------------------
+# The timing extension registers its verbs into Sonic Pi's shared docs registry
+# (the @@docs class variable in DocSystem, shared by every includer), and this
+# file reads that same registry to build the help pages and the editor's
+# autocompletion list. Loading it here is what makes those verbs appear in both.
+#
+# Additive only: nothing else depends on this, and a missing extension is not an
+# error - the build simply proceeds with upstream's verbs alone.
+#
+# The app tree is checked first (installed / portable layout), then one level
+# above sonic-pi/ (a dev checkout, where the extension lives beside the checkout).
+# ---------------------------------------------------------------------------
+begin
+  _pampa_ext = [
+    File.join(SonicPi::Paths.app_path, 'server', 'ruby', 'lib', 'sonicpi', 'extensions', 'pattern', 'async.rb'),
+    File.expand_path('../../../../../extensions/pattern/async.rb', __dir__)
+  ].find { |p| File.exist?(p) }
+  require _pampa_ext if _pampa_ext
+rescue StandardError, ScriptError => e
+  STDERR.puts "[qt-doc] timing extension not loaded: #{e.class}: #{e.message}"
+end
 
 
 include SonicPi::Util
@@ -237,12 +260,16 @@ make_tutorial = lambda do |lang|
 end
 
 
+# An example is named as its card names it (etc/examples/cards.json, which
+# the GUI and the web's Examples page read too); any other for its file, a word
+# a part.
+example_cards = JSON.parse(File.read(File.join(SonicPi::Paths.examples_path, "cards.json")))
 example_html_map = {}
 example_dirs = ["Apprentice", "Illusionist", "Magician", "Sorcerer", "Wizard", "Algomancer"]
 example_dirs.each do |ex_dir|
   Dir["#{SonicPi::Paths.examples_path}/#{ex_dir.downcase}/*.rb"].sort.each do |path|
-    bname = File.basename(path, ".rb")
-    bname = bname.titleize
+    key = File.basename(path, ".rb")
+    bname = example_cards.dig(key, "title") || key.split("_").map(&:capitalize).join(" ")
     name = "[#{ex_dir}] #{bname}"
     lines = IO.readlines(path).map(&:chop).map{|s| CGI.escapeHTML(s)}
     html = "<meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\"/>\n\n"
@@ -968,7 +995,6 @@ generate_ui_lang_names()
 # etc/doc/generated/native/.
 ###
 
-require 'json'
 require 'ripper'
 
 native_docs_root = File.join(SonicPi::Paths.docs_generated_path, "native")
@@ -1204,7 +1230,7 @@ SonicPi::Lang::Core.docs.each do |k, v|
   usage_args = (v[:args] || []).map { |arg| n, t = *arg; "#{n} (#{t})" }
   usage = v[:name].to_s
   usage = "#{usage} #{usage_args.join(', ')}" unless usage_args.empty?
-  native_lang_pages << {
+  page = {
     "key" => k.to_s,
     "summary" => summary,
     "usage" => usage,
@@ -1215,6 +1241,10 @@ SonicPi::Lang::Core.docs.each do |k, v|
       { "code" => code, "runnable" => native_code_runnable.call(code) }
     end
   }
+  # What a build must have for the function to be there (plugins): the GUI
+  # leaves it out of a build without it.
+  page["needs"] = v[:needs].to_s if v[:needs]
+  native_lang_pages << page
 end
 native_lang_pages.sort_by! { |p| p["key"] }
 write_native_json.call(File.join(native_docs_root, "reference", "lang.json"),

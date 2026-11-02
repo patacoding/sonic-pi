@@ -135,17 +135,15 @@ private:
 QList<ScopeWindow*> ScopeWindow::s_instances;
 
 ScopeWindow::ScopeWindow(std::shared_ptr<QtAPIClient> spClient, std::shared_ptr<SonicPiAPI> spAPI, QWidget* parent)
-    : QWidget(parent)
+    : SonicPi::KeptOpaque<QWidget>(parent)
     , m_spClient(spClient)
     , m_spAPI(spAPI)
 {
     s_instances.append(this);
-    // Raster widget: we repaint every pixel ourselves and rely on the backing
-    // store being preserved between frames, so the faded background clear in
-    // paintEvent leaves a decaying trace (phosphor persistence). Not a
-    // QOpenGLWidget — a GL widget would force the whole window onto Qt's RHI
-    // texturized-composition flush path (a full backing-store copy per frame).
-    setAttribute(Qt::WA_OpaquePaintEvent);
+    // Raster widget, opaque (KeptOpaque): every pixel is painted from the
+    // trail buffer each frame (see paintEvent). Not a QOpenGLWidget — a GL
+    // widget would force the whole window onto Qt's RHI texturized-composition
+    // flush path (a full backing-store copy per frame).
 
     QVBoxLayout* layout = new QVBoxLayout();
     layout->setContentsMargins(0, 0, 0, 0);
@@ -348,7 +346,7 @@ void ScopeWindow::DrawLevels(const ProcessedAudio& audio, QPainter& painter, Sco
         {
             m_preLimLastEnd = end;
             const uint32_t frames = 1024;
-            m_grScratch.resize(size_t(frames) * SHM_SCOPE_STREAM_CHANNELS);
+            m_grScratch.resize(size_t(frames) * SHM_TAP_STREAM_CHANNELS);
             uint32_t chans = 1;
             const uint32_t got = m_preLimReader.copy_window(end, frames, m_grScratch.data(), &chans);
             float p = 0.0f;
@@ -714,18 +712,34 @@ void ScopeWindow::DrawLissajous(const ProcessedAudio& audio, QPainter& painter, 
     // Use the newest tail of the rolling window, not the oldest — the
     // figure tracks the live sound instead of lagging ~64ms behind.
     auto samples = std::min(LissajousSamples, int(m_audioFrameSamples));
-    int offset = int(m_audioFrameSamples) - samples;
-    panel.wavePoints.resize(samples);
-    for (int sample = 0; sample < samples; sample++)
+    if (samples < 2)
     {
-        auto left = audio.m_samples[0][offset + sample];
-        auto right = audio.m_samples[1][offset + sample];
-        panel.wavePoints[sample] = center + QPoint(left * xScale, right * yScale);
+        return;
     }
-    // The only diagonal-line panel; AA is cheap here and removes the jaggies.
+    int offset = int(m_audioFrameSamples) - samples;
+    auto point = [&](int sample) {
+        return center + QPoint(audio.m_samples[0][offset + sample] * xScale,
+                               audio.m_samples[1][offset + sample] * yScale);
+    };
+
+    // One line per sample step, not one polyline. Qt strokes a polyline as a
+    // single outline and antialiases it whole, which costs with how often the
+    // figure crosses itself: decorrelated stereo (noise, reverb tails, wide
+    // pads) crosses everywhere, taking 0.2-0.5s a frame on a Retina dock and
+    // freezing the whole GUI in bursts. Separate segments look the same and
+    // stay in single-digit milliseconds on any signal.
+    panel.waveLines.resize(samples - 1);
+    QPoint from = point(0);
+    for (int sample = 1; sample < samples; sample++)
+    {
+        QPoint to = point(sample);
+        panel.waveLines[sample - 1] = QLine(from, to);
+        from = to;
+    }
+    // The only diagonal-line panel; AA removes the jaggies.
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setPen(panel.pen);
-    painter.drawPolyline(&panel.wavePoints[0], int(panel.wavePoints.size()));
+    painter.drawLines(panel.waveLines.data(), int(panel.waveLines.size()));
     painter.setRenderHint(QPainter::Antialiasing, false);
 }
 
@@ -734,7 +748,11 @@ void ScopeWindow::paintEvent(QPaintEvent* pEv)
     if (size().isEmpty())
         return;
 
-    auto backColor = m_backColor;
+    // Opaque whatever the theme says: the trail is copied onto the window,
+    // not blended, so every pixel of it must be opaque. The decay below is a
+    // translucent wash over this, which keeps it so.
+    QColor backColor = m_backColor;
+    backColor.setAlpha(255);
     auto textColor = QWidget::palette().color(QWidget::foregroundRole());
     auto shadowColor = QWidget::palette().color(QPalette::ColorRole::AlternateBase);
 
@@ -818,7 +836,7 @@ void ScopeWindow::paintEvent(QPaintEvent* pEv)
 
     painter.end();
     QPainter widgetPainter(this);
-    widgetPainter.drawImage(0, 0, m_trail);
+    SonicPi::drawOpaqueFrame(widgetPainter, QPointF(0, 0), m_trail);   // opaque throughout: see the clear above
 }
 
 void ScopeWindow::Layout()

@@ -91,6 +91,49 @@ set(NEW_API_SOURCES
     ${QTAPP_ROOT}/visualizer/scope_window.h
     )
 
+# Graphics output feature. Phase 0 is the rendering side only - a render thread
+# with its own offscreen GL context; the display window arrives in Phase 1.
+set(GRAPHICS_SOURCES
+    ${QTAPP_ROOT}/graphics/ShaderText.h
+    ${QTAPP_ROOT}/graphics/osc/GraphicsOscReceiver.cpp
+    ${QTAPP_ROOT}/graphics/osc/GraphicsOscReceiver.h
+    ${QTAPP_ROOT}/graphics/osc/GraphicsUniformMessage.h
+    ${QTAPP_ROOT}/graphics/osc/GraphicsUniformValues.cpp
+    ${QTAPP_ROOT}/graphics/osc/GraphicsUniformValues.h
+    ${QTAPP_ROOT}/graphics/output/GraphicsSpoutPublisher.cpp
+    ${QTAPP_ROOT}/graphics/output/GraphicsSpoutPublisher.h
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsFrame.h
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsLog.cpp
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsLog.h
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsPacer.cpp
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsPacer.h
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsRenderer.cpp
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsRenderer.h
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsSharedFrame.h
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsTarget.cpp
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsBufferTargets.cpp
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsBufferTargets.h
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsPasses.h
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsDocuments.h
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsPassPrograms.cpp
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsPassPrograms.h
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsTarget.h
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsRenderThread.cpp
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsRenderThread.h
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsSettings.cpp
+    ${QTAPP_ROOT}/graphics/rendering/GraphicsSettings.h
+    ${QTAPP_ROOT}/graphics/ui/GraphicsWindow.cpp
+    ${QTAPP_ROOT}/graphics/ui/GraphicsWindow.h
+    ${QTAPP_ROOT}/graphics/ui/GraphicsTextureView.cpp
+    ${QTAPP_ROOT}/graphics/ui/GraphicsTextureView.h
+    ${QTAPP_ROOT}/graphics/ui/GraphicsPreviewWindow.cpp
+    ${QTAPP_ROOT}/graphics/ui/GraphicsPreviewWindow.h
+    ${QTAPP_ROOT}/graphics/ui/GlslLexer.cpp
+    ${QTAPP_ROOT}/graphics/ui/GlslLexer.h
+    ${QTAPP_ROOT}/graphics/ui/ShaderBufferWindow.cpp
+    ${QTAPP_ROOT}/graphics/ui/ShaderBufferWindow.h
+    )
+
 set(EDITOR_SOURCES
     ${QTAPP_ROOT}/widgets/sonicpiscintilla.cpp
     ${QTAPP_ROOT}/widgets/sonicpierrorcard.cpp
@@ -102,6 +145,7 @@ set(EDITOR_SOURCES
     ${QTAPP_ROOT}/widgets/completionpopup.cpp
     ${QTAPP_ROOT}/widgets/completionpopup.h
     ${QTAPP_ROOT}/widgets/findpopup.cpp
+    ${QTAPP_ROOT}/widgets/chevronbutton.cpp
     ${QTAPP_ROOT}/widgets/findpopup.h
     ${QTAPP_ROOT}/widgets/editortoolbar.cpp
     ${QTAPP_ROOT}/widgets/editortoolbar.h
@@ -116,6 +160,10 @@ set(QT_SOURCES
     ${QTAPP_ROOT}/widgets/linkaudiostreamswidget.h
     ${QTAPP_ROOT}/widgets/linkvisibilitytoggle.cpp
     ${QTAPP_ROOT}/widgets/linkvisibilitytoggle.h
+    ${QTAPP_ROOT}/widgets/metricslog.cpp
+    ${QTAPP_ROOT}/widgets/metricslog.h
+    ${QTAPP_ROOT}/widgets/metricvalue.cpp
+    ${QTAPP_ROOT}/widgets/metricvalue.h
     ${QTAPP_ROOT}/widgets/sonicpitooltip.cpp
     ${QTAPP_ROOT}/widgets/sonicpitooltip.h
     ${QTAPP_ROOT}/mainwindow.cpp
@@ -127,6 +175,9 @@ set(QT_SOURCES
     ${QTAPP_ROOT}/widgets/devicelistwidget.cpp
     ${QTAPP_ROOT}/widgets/devicelistwidget.h
     ${QTAPP_ROOT}/widgets/chevronbutton.h
+    ${QTAPP_ROOT}/model/helppanelmodel.h
+    ${QTAPP_ROOT}/model/sidecolumnmodel.h
+    ${QTAPP_ROOT}/widgets/awaydock.h
     ${QTAPP_ROOT}/widgets/logpanel.cpp
     ${QTAPP_ROOT}/widgets/logpanel.h
     ${QTAPP_ROOT}/widgets/metricspanel.cpp
@@ -144,10 +195,12 @@ set(QT_SOURCES
     ${QTAPP_ROOT}/widgets/splashwidget.cpp
     ${QTAPP_ROOT}/widgets/splashwidget.h
     ${QTAPP_ROOT}/widgets/quickstartpane.cpp
+    ${QTAPP_ROOT}/widgets/codecard.cpp
+    ${QTAPP_ROOT}/widgets/carddeck.cpp
     ${QTAPP_ROOT}/widgets/quickstartpane.h
     ${QTAPP_ROOT}/widgets/zoombar.cpp
     ${QTAPP_ROOT}/widgets/zoombar.h
-    ${QTAPP_ROOT}/widgets/tutscope.h
+    ${QTAPP_ROOT}/widgets/scopesampler.h
     ${QTAPP_ROOT}/widgets/cardscope.h
     ${QTAPP_ROOT}/widgets/icontabbar.h
     ${QTAPP_ROOT}/utils/flash_style.h
@@ -164,6 +217,7 @@ set(SOURCES
     ${QTAPP_ROOT}/utils/setbundle.h
     ${QTAPP_ROOT}/utils/completion_context.cpp
     ${QTAPP_ROOT}/utils/framepacer.cpp
+    ${QTAPP_ROOT}/utils/opaque.h
     ${QTAPP_ROOT}/utils/framepacer.h
     ${QTAPP_ROOT}/utils/reducedmotion.cpp
     ${QTAPP_ROOT}/utils/reducedmotion.h
@@ -276,7 +330,17 @@ elseif(APPLE)
   SET (SOURCES ${SOURCES} ${QTAPP_ROOT}/platform/capture_target.mm)
   SET (SOURCES ${SOURCES} ${QTAPP_ROOT}/platform/syphon_publisher.mm)
   SET (SOURCES ${SOURCES} ${QTAPP_ROOT}/platform/recorder.mm)
+  SET (SOURCES ${SOURCES} ${QTAPP_ROOT}/platform/objc_guard.mm)
+  SET (SOURCES ${SOURCES} ${QTAPP_ROOT}/platform/objc_guard.h)
+  SET (SOURCES ${SOURCES} ${QTAPP_ROOT}/platform/recorder_limits.h)
+  SET (SOURCES ${SOURCES} ${QTAPP_ROOT}/platform/recorder_audio_mix.h)
+  SET (SOURCES ${SOURCES} ${QTAPP_ROOT}/platform/recorder_settings.h)
 
+  SET (SOURCES ${SOURCES} ${QTAPP_ROOT}/platform/objc_guard.mm)
+  SET (SOURCES ${SOURCES} ${QTAPP_ROOT}/platform/objc_guard.h)
+  SET (SOURCES ${SOURCES} ${QTAPP_ROOT}/platform/recorder_limits.h)
+  SET (SOURCES ${SOURCES} ${QTAPP_ROOT}/platform/recorder_audio_mix.h)
+  SET (SOURCES ${SOURCES} ${QTAPP_ROOT}/platform/recorder_settings.h)
   # Syphon-Framework — vendored, server-side Metal subset only (no GL,
   # no client). Compiled into the app binary as ARC Objective-C.
   set(SYPHON_DIR ${APP_ROOT}/external/Syphon-Framework)
@@ -306,9 +370,13 @@ elseif(APPLE)
     PROPERTIES COMPILE_FLAGS "-fobjc-arc")
   set_source_files_properties(${QTAPP_ROOT}/platform/recorder.mm
     PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+  set_source_files_properties(${QTAPP_ROOT}/platform/objc_guard.mm
+    PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 endif()
+  set_source_files_properties(${QTAPP_ROOT}/platform/objc_guard.mm
+    PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 
-set(ALL_SOURCES ${QT_SOURCES} ${SOURCES} ${EDITOR_SOURCES} ${OLD_API_SOURCES} ${NEW_API_SOURCES})
+set(ALL_SOURCES ${QT_SOURCES} ${SOURCES} ${EDITOR_SOURCES} ${OLD_API_SOURCES} ${NEW_API_SOURCES} ${GRAPHICS_SOURCES})
 
 # Create the Qt version of the app
 if (APPLE)
@@ -316,6 +384,11 @@ if (APPLE)
 else()
   add_executable(${APP_NAME} WIN32 ${ALL_SOURCES} ${RESOURCES}) # Win32 ignored on non-windows
 endif()
+
+# Plugin hosting is the build's (CLOCKWORK_PLUGINS, external/CMakeLists.txt):
+# only a build with it shows the Tracks tab and the track functions, and tells
+# Spider so (utils/plugins.h).
+target_compile_definitions(${APP_NAME} PRIVATE SONIC_PI_PLUGINS=$<BOOL:${CLOCKWORK_PLUGINS}>)
 
 # Translations: Convert the .ts files into .qm files
 set_source_files_properties(${TS_FILES} PROPERTIES OUTPUT_LOCATION ${QTAPP_ROOT}/lang)
@@ -543,6 +616,8 @@ target_include_directories(${APP_NAME}
     ${QTAPP_ROOT}/osc
     ${QTAPP_ROOT}/model
     ${QTAPP_ROOT}/visualizer
+    ${QTAPP_ROOT}/graphics/rendering
+    ${QTAPP_ROOT}/graphics/ui
     ${QTAPP_ROOT}/widgets
     ${QTAPP_ROOT}/Utils
     ${CMAKE_BINARY_DIR}
@@ -597,6 +672,7 @@ target_link_libraries(${APP_NAME}
     PRIVATE
     SonicPi::API
     QScintilla
+    Qt6::OpenGL
     Threads::Threads)
 
 # ─── The Tracks tab ──────────────────────────────────────────────────────────
@@ -649,8 +725,16 @@ if(WIN32)
         set(WINDEPLOYQT_BIN "windeployqt")
     endif()
     message(STATUS "windeployqt: ${WINDEPLOYQT_BIN}")
-    add_custom_command(TARGET ${APP_NAME} POST_BUILD
-        COMMAND ${WINDEPLOYQT_BIN} $<TARGET_FILE:${APP_NAME}>)
+    # SONIC_PI_GUI_ONLY (see app/CMakeLists.txt): windeployqt re-copies the
+    # Qt runtime and every .qm into the output directory on every build, which
+    # a GUI-only iteration does not need - the previous deploy is still there
+    # and is only invalidated by a Qt change, which is not a GUI-only change.
+    if(SONIC_PI_GUI_ONLY)
+        message(STATUS "SONIC_PI_GUI_ONLY=ON: skipping windeployqt; the existing deployment is left as it is.")
+    else()
+        add_custom_command(TARGET ${APP_NAME} POST_BUILD
+            COMMAND ${WINDEPLOYQT_BIN} $<TARGET_FILE:${APP_NAME}>)
+    endif()
 endif() # Win32
 
 # Make convenient source groups in the IDE
@@ -663,3 +747,34 @@ source_group(NewApi FILES ${NEW_API_SOURCES})
 
 source_group(Qt\\AutoMoc FILES ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}_automoc.cpp )
 source_group(Qt\\AutoMoc REGULAR_EXPRESSION "(mocs_*|qrc_.*)" )
+
+# Where the renderer looks for shader files. Placed after the target is
+# created: target_compile_definitions cannot be called before that.
+# The user copy under ~/.sonic-pi/graphics/shaders takes priority; this is
+# the fallback so a fresh checkout works with no copying step. Deliberately
+# not installed as an asset - the point is that these files stay readable
+# and editable where they are.
+target_compile_definitions(${APP_NAME} PRIVATE
+    GRAPHICS_SHADER_DIR="${QTAPP_ROOT}/graphics/shaders")
+
+# AND THE FILES HAVE TO BE THERE AT RUNTIME, not only in the source tree.
+#
+# That compiled-in path is an absolute path into the checkout, and the comment above assumed it would still
+# be there when the application runs. For a build that stays in its tree that holds; for anything that is
+# PACKAGED it does not - and the symptom is quiet and total: a machine with no ~/.sonic-pi yet has no
+# graphics output at all, because the user copy does not exist and the shipped copy was never packaged.
+#
+# Measured, 2026-10-02: a portable build had NO shader files anywhere under its app/gui (the packager copies
+# the executable's output directory and nothing else), and neither the MSI recipe nor any install() rule
+# mentioned them. It went unnoticed here because this machine's ~/.sonic-pi was seeded by an older run.
+#
+# SO THEY ARE COPIED NEXT TO THE EXECUTABLE, which is the one place every packager already takes:
+#   * the portable build copies app/gui/build/Release wholesale;
+#   * the MSI stages the same directory.
+# The user copy still wins at runtime, so nothing about editing or overriding changes.
+add_custom_command(TARGET ${APP_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${QTAPP_ROOT}/graphics/shaders
+        $<TARGET_FILE_DIR:${APP_NAME}>/graphics/shaders
+    COMMENT "Copying the shipped shaders next to the executable")
+

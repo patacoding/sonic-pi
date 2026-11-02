@@ -1,0 +1,658 @@
+//--
+// This file is part of Sonic Pi: http://sonic-pi.net
+// Full project source: https://github.com/sonic-pi-net/sonic-pi
+// License: https://github.com/sonic-pi-net/sonic-pi/blob/main/LICENSE.md
+//
+// Copyright 2026 by Sam Aaron (http://sam.aaron.name).
+// All rights reserved.
+//
+// Permission is granted for use, copying, modification, and
+// distribution of modified versions of this work as long as this
+// notice is included.
+//++
+
+#pragma once
+
+#include <QOpenGLTexture>
+
+#include "GraphicsRenderer.h"
+#include "GraphicsSharedFrame.h"
+#include "GraphicsTarget.h"
+#include "GraphicsBufferTargets.h"
+#include "GraphicsPasses.h"
+#include "GraphicsDocuments.h"
+#include "GraphicsPassPrograms.h"
+// The Spout sender. Held by unique_ptr, so the complete type is needed here - and it is Windows-only by
+// construction (its .cpp includes the Spout SDK), which is why the class itself is declared for every
+// platform and simply never started elsewhere.
+#include "graphics/output/GraphicsSpoutPublisher.h"
+
+#include <QThread>
+#include <QString>
+#include <QMutex>
+#include <QWaitCondition>
+// Returned by value below, so this one cannot be a forward declaration.
+#include <QSurfaceFormat>
+
+#include <atomic>
+#include <map>
+#include <memory>
+
+class QOffscreenSurface;
+class QOpenGLContext;
+
+namespace SonicPi
+{
+
+// Measures the render loop's output rate gives the window something to display
+// later, and is the evidence step 0.4 is judged on.
+//
+// Written only by the render thread and read from anywhere, so every field is
+// atomic: a reader sees a consistent snapshot of counters rather than a torn
+// one. It is deliberately plain atomics rather than a mutex - the readers are
+// diagnostic (the window's status line, a log line) and must never be able to
+// stall a frame.
+struct GraphicsFrameStats
+{
+    quint64 frames        = 0;   // frames drawn since the loop started
+    double  fps           = 0.0; // average over the last reporting window
+    double  lastFrameMs   = 0.0; // CPU time of the most recent frame
+    double  worstFrameMs  = 0.0; // largest frame time in the current window
+    bool    loopRunning   = false;
+    bool    hung          = false; // stopped by the driver-watchdog guard
+
+    // The handoff, measured on the producer's side because that is where it happens.
+    //
+    // These are here rather than re-derived by whoever displays them: a surface that
+    // measured its own idea of the handoff would be a second implementation of a figure
+    // the render thread already knows, and the two would eventually disagree.
+    double  consumerWaitAvgUs   = 0.0;  // mean time blocked waiting for readers
+    double  consumerWaitWorstUs = 0.0;  // worst single wait in the last window
+    quint64 slowReaderCount     = 0;    // waits that hit the 500ms guard
+    quint64 waitFailedCount     = 0;    // glClientWaitSync refused the fence
+    int     targetCount         = 0;    // how many targets are published
+    int     frameCapHz          = 0;    // the user's ceiling, 0 when unset
+
+    // Whether the real rate has fallen short of the user's ceiling.
+    //
+    // The ceiling is how the user states an EXPECTATION; a rate above it is not news, so
+    // only the shortfall is reported. Decided by the render thread because it is the side
+    // that measures both numbers, so every surface that reports it reads one answer
+    // instead of each comparing the two and possibly disagreeing. Carries hysteresis -
+    // see where it is set, and why a rate sitting on the threshold must not flicker it.
+    double  gpuMs              = -1.0;  // GPU time of the last measured frame, -1 if unavailable
+    double  gpuMsAvg           = -1.0;  // mean over the last reporting window
+    double  gpuMsWorst         = -1.0;  // worst in the last reporting window
+    bool    belowTarget         = false;
+
+    // Spout publishing, per reporting window. Here for the same reason as the figures above: the render
+    // thread is where the frames and the read-back are counted, and a display that counted them itself
+    // would be a second implementation of the same number.
+    //
+    // The DROP count is the one that matters to a user: a nonzero drop rate means the receiving side is
+    // behind, and the picture being sent is not the picture being drawn. `spoutReadbackMs` is what the
+    // hand-off costs the render loop, -1 when nothing has been measured yet.
+    bool    spoutPublishing     = false;
+    quint64 spoutSentPerSec     = 0;
+    quint64 spoutDroppedPerSec  = 0;
+    double  spoutReadbackMs     = -1.0;
+};
+
+// The Graphics renderer's own thread, its own OpenGL context, and its frame loop.
+//
+// Why a separate context rather than the GUI's: the render loop must not be
+// blocked by GUI work, and a shader compile can take 100ms to 1s. The context
+// is paired with a QOffscreenSurface so this thread needs no window of its own.
+//
+// Threading contract: the context is created *inside* run(), and is current on
+// this thread only. Nothing outside this thread may make it current, and the
+// context must be released before the thread stops. All GL entry points must be
+// obtained while the context is current - QOpenGLFunctions fatal-errors
+// otherwise.
+//
+// Shader compiles are REQUESTS, not calls. The context belongs to this thread, so a
+// caller on another thread cannot make it current; requestShaderCompile() sets a flag
+// that the loop picks up on its next iteration, where the context is current by
+// construction.
+class GraphicsRenderThread : public QThread
+{
+    Q_OBJECT
+
+public:
+    // The surface format every Graphics context must use. The Qt default is
+    // OpenGL 2.0 with no profile, which silently denies the FBO and the
+    // `#version 330 core` shaders this feature is built on, so it is requested
+    // explicitly. Shared between this thread and the display window so their
+    // contexts end up shareable.
+    static QSurfaceFormat requestedFormat();
+
+    // Frame rate cap used when nothing else is configured.
+    //
+    // A cap, not a fixed rate: the loop paces to this and no faster. It exists so
+    // the renderer cannot monopolise the machine - this is an optional feature
+    // running beside an audio engine that must not stutter - and it is what makes
+    // the CPU cost of graphics predictable regardless of how cheap a particular
+    // shader happens to be. 60 is the design's V1 figure and the common display
+    // refresh rate; 75 or 144 suit a display that runs faster.
+    static constexpr int kDefaultFrameCapHz = 60;
+
+    // NOTE on starting this: do not block the caller on it.
+    //
+    // Creating a GL context pulls in the GPU driver, which is not cheap - on
+    // this machine it measured around four seconds. Running it on the startup
+    // critical path delayed audio device setup far enough that Spider's
+    // five-second promise timed out in load_synthdefs, and Sonic Pi failed to
+    // boot. Connect to contextReady() instead, or start it from a worker.
+    //
+    // contextReady() is emitted from the render thread once the context exists
+    // (or has failed), so the result can be reported without waiting.
+
+    explicit GraphicsRenderThread(QObject* parent = nullptr);
+    ~GraphicsRenderThread() override;
+
+    // Set before start(). Logs what the driver actually gave us.
+    void setVerbose(bool verbose) { m_verbose = verbose; }
+
+    // The frame rate ceiling, in Hz. Zero or negative means "use the default".
+    //
+    // Safe to call while the loop is running: the loop re-reads it at the top of the next
+    // frame and restarts its pacing from there. See applyRateRequest() for why a restart is
+    // the correct response rather than an adjustment.
+    void setTargetFps(int fps);
+
+    // What the display the output window is on can actually show, in Hz. Zero means
+    // unknown.
+    //
+    // Reported by the output window, because this thread cannot know it: the window is
+    // created long after this thread starts, it can be moved between screens, and its screen
+    // is a GUI-thread object. The window is therefore the only thing that can answer.
+    //
+    // Why it matters at all: this thread renders OFFSCREEN, so its frame rate is its own
+    // loop's rate and nothing throttles it to a display. Measured here, a 240Hz cap was met
+    // exactly - 240.3 fps, reported as healthy - on a 165Hz panel, because the loop really
+    // was producing 240 frames a second; the screen simply could not show them. Reporting
+    // "on target" there is a false good-news message, and a user asking what rate they are
+    // getting was told a number they cannot see.
+    //
+    // Safe to call while the loop is running: the effective rate is re-derived at the top of
+    // the next frame.
+    void setDisplayRefreshHz(int hz);
+
+    bool contextIsValid() const { return m_contextOk; }
+    QString rendererName() const { return m_renderer; }
+
+    // Which buffer is being rendered. Set once, before start(), from the configured name; after that it
+    // changes only when a compile puts another buffer on screen. The editor asks this to know which tab
+    // the picture belongs to, and the live answer has to be the thread's rather than a setting's.
+    void setActiveShaderName(const QString& name);
+    QString shaderName() const;
+
+    // Build a buffer and put it on screen. Applied at the top of a frame; returns immediately.
+    //
+    // ONE operation, not two ("compile", then "switch"), because for a picture there is no useful state
+    // in between: a buffer that has compiled but is not on screen is work nobody can see, and a switch
+    // to a buffer that has not compiled is a picture that cannot be drawn. They are the same act, and it
+    // is the gesture live coding needs - edit a buffer, press the key, the picture becomes it.
+    //
+    // An empty name means "the buffer currently on screen", which is what Reload Shader means.
+    //
+    // A buffer that will not build does NOT reach the screen: the picture stays exactly as it was, and
+    // the compiler's own output comes back through shaderCompileFinished so the editor can show it where
+    // the user is looking. Returns false when there is no running loop to apply it to.
+    // Ask the render loop to render a different DOCUMENT's passes. Requested rather than applied, for the
+    // same reason every other switch is: a program belongs to a context, and the loop owns it. The switch
+    // happens at a frame boundary. A single-pass .frag is ignored here - it stays with the active-buffer path.
+    //
+    // `rebuild` says the request is "the files changed, compile them again" rather than "show me that
+    // document". Without it the loop refuses a request for the document that is already on screen - which is
+    // exactly what pressing Compile in a document tab asks for, and why an edited pass never reached the
+    // picture: the file was written, and the programs that read it were never rebuilt.
+    bool requestPassDocument(const QString& documentName, bool rebuild = false);
+
+    bool requestShaderCompile(const QString& shaderName = QString());
+
+    // Drop a buffer's renderer, because the buffer is no longer open in the editor.
+    //
+    // The FILE is not touched - only the compiled program, which can be rebuilt from the file at any time.
+    // Applied at the top of a frame like the other requests. The one case it refuses is a buffer whose
+    // program is the picture on screen: that program is still being drawn with, so it is kept until
+    // something else goes on screen, and the log says so rather than leaving a silent exception.
+    //
+    // This exists because "a renderer is never evicted" (see m_renderers) was written when nothing could
+    // stop being open. Now that a tab can be closed, unbounded growth would be a real leak rather than a
+    // theoretical one - and the invariant that made the atomic pointer safe (entries are never destroyed
+    // while the thread runs) is preserved by only ever dropping a buffer that is NOT the active one.
+    bool requestShaderForget(const QString& shaderName);
+
+    // Result of the Phase 0 framebuffer readback check. False if the check did
+    // not run, so a caller cannot mistake "not attempted" for "passed".
+    bool renderVerified() const { return m_renderVerified; }
+
+    // A snapshot of the loop's counters. Safe from any thread.
+    GraphicsFrameStats frameStats() const;
+
+    // Where this thread publishes the frame it has just drawn, for the output
+    // window to display.
+    //
+    // Handed in rather than owned, because the same slot has to reach the window,
+    // which lives on the GUI thread. Must be set before start(): the loop publishes
+    // from its first frame, and a slot set later would silently drop early frames.
+    //
+    // Null is legal and means "publish nowhere" - the loop then runs without a
+    // consumer, which is the case when no window will ever be shown.
+    void setSharedFrameSlot(GraphicsSharedFrameSlot* slot) { m_sharedFrame = slot; }
+
+    // Where OSC-driven uniform values come from. Not owned; null means frames carry no dynamic
+    // values at all, which is also what a build without the graphics OSC feature would do.
+    //
+    // A snapshot is taken only when the store's version changes, and is held for the frame it is
+    // handed to - so the renderer reads a set of values that cannot change underneath it, and a
+    // message costs the GUI thread one hash write rather than anything per frame.
+    void setUniformValues(GraphicsUniformValues* values) { m_uniformValues = values; }
+
+
+    // The size the render target should be, in pixels.
+    //
+    // Set once from the user's configured output resolution. It is not driven by
+    // the output window: the window crops this image rather than defining it, so
+    // resizing the window must not change what is rendered or what an external
+    // consumer receives.
+    //
+    // Kept as a request rather than a direct assignment because the framebuffer
+    // belongs to this thread's context and only this thread may make that context
+    // current. Nothing here allocates or touches GL, so it is safe to call from any
+    // thread at any time; the render thread applies it at the top of its next
+    // frame.
+    //
+    // A request that differs from the current size is not applied until that
+    // frame, so callers should not expect the change to have happened on return.
+    void setRenderTargetSize(const QSize& sizeInPixels);
+
+    // An alias, because the two callers speak differently: the startup path "sets" the size it
+    // read from settings, while the menu asks for a size the user chose. Same function, and
+    // deliberately not a second one.
+    void requestRenderTargetSize(const QSize& sizeInPixels) { setRenderTargetSize(sizeInPixels); }
+
+    // The size currently being rendered into. May differ from the last requested
+    // size until the render thread has applied it.
+    QSize renderTargetSize() const;
+
+    // Publish the graphics output as a Spout sender ("Sonic Pi Graphics"), or stop doing so.
+    //
+    // Returns whether the REQUEST was accepted, not whether a sender exists yet: starting one needs the
+    // output size, which is only known once the render loop has built its targets, so the work is applied
+    // on the render thread at the top of a frame like every other request in this feature. The outcome -
+    // and the reason when it fails - is in the log, which is where a user looks when a menu item seems to
+    // do nothing.
+    //
+    // Safe from any thread. NOT the window publisher in platform/spout_publisher.cpp - that sends the
+    // application window, this sends the picture at the configured output size.
+    bool setSpoutPublishing(bool publish);
+    bool isSpoutPublishing() const;
+
+    // Ask the loop to finish and block until the thread has stopped.
+    //
+    // Safe to call more than once and safe when the thread was never started.
+    // The wait is bounded: a thread that will not stop is reported and left
+    // running rather than hanging application shutdown.
+    void shutdown();
+
+signals:
+    // Emitted from the render thread once the context succeeds or fails. Lets a
+    // caller report the outcome without blocking on start(), which matters
+    // because context creation is slow enough to break Sonic Pi's boot if it
+    // runs on the critical path.
+    void contextReady(bool ok);
+
+    // Emitted from the render thread on every stats window. Queued to whoever
+    // wants it, so nothing blocks the loop.
+    void frameStatsUpdated();
+
+    // Emitted from the render thread when an attempt to compile the shader finishes, with the
+    // compiler's own output when it failed.
+    //
+    // This is what makes a shader editor safe to use against a live output: the editor learns whether
+    // its text compiled, and learns the reason when it did not, without ever compiling anything
+    // itself. Compiling on the GUI thread would mean using the wrong context - the failure that
+    // already cost this feature a rewrite - so the request goes one way and the verdict comes back
+    // this way.
+    //
+    // `errorFile` and `errorLine` say where the first diagnostic points, with the file named rather
+    // than numbered, because only the renderer can do that translation: the map from a source string
+    // number to a file belongs to the compile that produced it. The editor needs it for one decision
+    // it cannot make from the text - whether the line it is being told about is a line of the document
+    // it is showing. Empty and 0 when no diagnostic named a position.
+    //
+    // `includedShaders` is what the compile READ: the #include chain, in the order it was inlined, each
+    // entry named the way a report names files. It arrives on success as well as failure, because a
+    // successful build is otherwise silent - and since library files are never checked on their own, this
+    // list is the only place a library's presence or absence is ever visible.
+    void shaderCompileFinished(bool ok, const QString& compilerLog, const QString& errorFile,
+                               int errorLine, const QStringList& includedShaders);
+
+protected:
+    void run() override;
+
+private:
+    // KHR_debug style callback target, if the driver offers one.
+    void installDebugLogger();
+
+    // Re-read the shader files. Must be called with the context current.
+    void applyShaderReload();
+
+    // Apply a pending setRenderTargetSize() request, rebuilding the framebuffer at
+    // the top of a frame. Returns true if the target was rebuilt. Must be called
+    // with the context current.
+    bool applyRenderTargetSizeRequest();
+
+    // The rate to pace to: the user's request capped by what the display can show. Both
+    // inputs are guarded, so this is the one place the pair is read together.
+    int effectiveTargetHz() const;
+
+    // Apply a pending rate change to the loop's local pacing state. Returns true when the
+    // rate actually changed, in which case the caller MUST restart its pacing and its
+    // statistics rather than adjust them - see the call site for why that is the correct
+    // response and not a shortcut.
+    bool applyRateChange(int* capHz, qint64* intervalNs, qint64* spinWindowNs);
+
+    std::unique_ptr<QOpenGLContext>   m_context;
+    std::unique_ptr<QOffscreenSurface> m_surface;
+
+    // Guards the renderer and the targets against the reload request racing the
+    // loop.
+    //
+    // The loop holds it for the whole of a frame's draw, which is what makes a
+    // reload safe: a reload cannot land in the middle of a draw. It does NOT
+    // protect the texture a consumer samples - see the double-buffer note below.
+    mutable QMutex m_rendererMutex;
+
+    // ONE RENDERER PER BUFFER - which is what a renderer already was: it owns exactly what should exist
+    // once per shader (the program, the quad, the uniform locations). A second buffer is therefore a
+    // second renderer, not an array of programs inside one object.
+    //
+    // Owned by, and only ever touched from, the render thread: a renderer holds GL objects, and those
+    // belong to this thread's context. Readers on other threads use m_activeRenderer below, which is
+    // safe because an entry is NEVER evicted - a buffer that exists stays compiled for the session, so a
+    // published pointer cannot dangle. (Scoped to the session on purpose: with a handful of buffers that
+    // is a few hundred kilobytes, and eviction would buy a use-after-free waiting to happen.)
+    //
+    // std::map rather than QHash: the value is a unique_ptr, which Qt's container cannot hold, and an
+    // ordered map also makes the "renderers alive" log line stable between runs.
+    //
+    // Declared after the context so it is destroyed before it - GL objects need a current context to
+    // tear down. run() also clears it explicitly before releasing the context, so this ordering is belt
+    // and braces.
+    std::map<QString, std::unique_ptr<GraphicsRenderer>> m_renderers;
+
+    // The renderer currently being drawn with, or null before the first one exists.
+    //
+    // An atomic POINTER rather than a lock: the frame loop reads it once per frame and must not take a
+    // mutex to do it, and the writers are the render thread itself plus nothing else (a switch is
+    // applied on this thread - that is the whole reason switches are requests).
+    std::atomic<GraphicsRenderer*> m_activeRenderer{nullptr};
+
+    // The buffer's name: what is ACTUALLY being rendered, and what has been asked for (a compile
+    // request carries its buffer with it, because "compile the one I am looking at" and "compile the one
+    // I am editing" are different questions once the editor has tabs).
+    mutable QMutex m_bufferMutex;
+    QString m_activeShaderName = GraphicsSettings::defaultShaderName();
+    QString m_requestedShaderName = GraphicsSettings::defaultShaderName();
+    // The buffer whose renderer should be dropped, and the flag that says one is waiting. Guarded by the
+    // same mutex as the names above.
+    QString m_forgetShaderName;
+    std::atomic<bool> m_forgetRequested{false};
+
+    // Bring up the renderer for a buffer, creating it if this is the first time it has been needed.
+    //
+    // MUST be called on the render thread with the context current, and with m_rendererMutex held.
+    // The renderer comes back with its GEOMETRY only: the compile is the caller's next step, because the
+    // caller is the one that has to report the result and decide whether the buffer may go on screen.
+    //
+    // Returns null when the buffer could not even be created (no context, no VAO), in which case the
+    // caller keeps whatever is on screen.
+    GraphicsRenderer* createRenderer(const QString& shaderName);
+
+    // Apply a pending compile request at the top of a frame: build the requested buffer and, only if it
+    // built, make it the one being drawn with. A buffer that fails leaves the picture alone and sends the
+    // compiler's own words back to whoever asked.
+    void applyShaderCompile();
+
+    // Apply a pending forget request: destroy that buffer's renderer, unless it is the one on screen.
+    void applyShaderForget();
+
+    // The Spout sender, created on demand from the menu and owned here because this thread is the one
+    // producing frames. It has its own thread for the DX upload; this object is only the handle.
+    //
+    // Guarded by its own mutex rather than by the renderer mutex: a menu click creating or dropping the
+    // sender must not wait for a frame, and the sender's own thread does the waiting.
+    mutable QMutex m_spoutMutex;
+    std::unique_ptr<GraphicsSpoutPublisher> m_spoutPublisher;
+
+    // Whether the frame loop should hand frames to the sender. An atomic bool read per frame without the
+    // lock, so toggling it from the menu is not a lock in the hot path.
+    std::atomic<bool> m_spoutPublishing{false};
+
+    // A change asked for from another thread, applied at the top of a frame - see setSpoutPublishing().
+    std::atomic<bool> m_spoutRequestPending{false};
+    std::atomic<bool> m_spoutRequestWanted{false};
+
+    // Apply a pending Spout request: create the sender at the current output size, or drop it. Runs on the
+    // render thread, where the size is known and (for the frame hand-off that follows) the context is
+    // current by construction.
+    void applySpoutRequest();
+
+    // ---- the Spout frame hand-off -------------------------------------------------------------
+    //
+    // TWO PIXEL-PACK BUFFERS, ONE FRAME BEHIND. The naive read-back - glReadPixels straight into memory -
+    // makes the CPU wait for the GPU to finish the frame, every frame. Reading into a buffer instead
+    // queues the copy, and taking the PREVIOUS frame's buffer next frame means the copy has long finished:
+    // measured on this machine at the configured 1920x1080, 0.77 ms a frame against 1.41 ms for the naive
+    // route, with the map wait at 0.23 ms (tools/gl-readback-probe, docs/graphics-output-design.md 8.6).
+    //
+    // Created and destroyed with the render targets, because their size is the target's size.
+    bool setUpSpoutReadback();
+    void releaseSpoutReadback();
+    // Issue this frame's read-back and hand the previous frame to the sender. Called after the draw, with
+    // the target's framebuffer still bound.
+    void publishFrameToSpout();
+    bool spoutReadbackReady() const { return m_readbackPbos[0] != 0 && m_readbackPbos[1] != 0; }
+
+    GLuint m_readbackPbos[2] = { 0, 0 };
+    // Which buffer this frame's copy goes into; the other one holds the frame being taken.
+    int m_readbackSlot = 0;
+    // False until one frame has been issued: on the first frame there is no previous frame to take.
+    bool m_readbackHasPrevious = false;
+
+    // What the hand-off costs, accumulated over the reporting window and logged with the other figures.
+    // Kept split three ways because "9 ms" is not actionable on its own: queueing the copy, waiting for
+    // the driver to hand the pixels over, and copying them into the sender are three different problems
+    // with three different fixes, and only the second one is allowed to be slow.
+    double m_spoutReadbackMsSum = 0.0;
+    double m_spoutIssueMsSum = 0.0;
+    double m_spoutMapMsSum = 0.0;
+    double m_spoutPublishMsSum = 0.0;
+    double m_spoutUnmapMsSum = 0.0;
+    int m_spoutReadbackCount = 0;
+    // How many reporting windows have carried a read-back measurement, so the warm-up can be skipped.
+    int m_spoutMeasuredWindows = 0;
+    // The figure that was last written to the log, so a later move can be reported as a move.
+    double m_spoutLoggedMs = -1.0;
+    // When it was written, so a move has to persist before it earns a line of its own.
+    int m_spoutLoggedWindow = 0;
+
+    // The window's Spout figures, published to GraphicsFrameStats once a second.
+    std::atomic<quint64> m_spoutSentWindow{0};
+    std::atomic<quint64> m_spoutDroppedWindow{0};
+    std::atomic<double> m_spoutReadbackMsAvg{-1.0};
+
+    // The one-off measurement line, and the drop warning. Both are logged on CHANGE rather than once a
+    // second - this file's rule: no per-second statistics in the log, because the figures belong on screen
+    // and a log full of frame rates is harder to read than the thing it reports on.
+    bool m_spoutFirstMeasurementLogged = false;
+    bool m_spoutDropping = false;
+
+    // The two render targets, alternating.
+    //
+    // Two textures rather than one because "show the last complete frame" requires
+    // there to BE a last complete frame: with a single texture the consumer samples
+    // the same memory the producer is writing, and there is nothing to fall back to.
+    // The producer writes whichever target is NOT currently published, so the one a
+    // consumer is reading is never written until the next publish.
+    static constexpr int kTargetCount = 2;
+    std::unique_ptr<GraphicsTarget> m_targets[kTargetCount];
+
+    // One front/back pair per buffer, for the multi-pass pipeline (P2c): a buffer draws into `back`
+    // while its dependants sample `front`, then swaps. Separate from m_targets above on purpose - those
+    // two are the producer/consumer handoff and are published to the consumers every frame, so drawing
+    // a buffer into them would fight that.
+    //
+    // Created and replaced in applyRenderTargetSizeRequest() (where the context is certainly current),
+    // and NOT drawn into yet: the per-frame A -> B -> C -> D -> Image ordering is the next step, so
+    // behaviour is still exactly as before.
+    // See GraphicsBufferTargets.h and docs/graphics-desktop-multipass-plan.md 13/14.
+    // Image plus Buffer A-D: Shadertoy's five passes, four buffers fixed by decision (2026-10-02).
+    // One entry per pass.
+    static constexpr int kPassCount = 5;
+    std::unique_ptr<GraphicsBufferTargets> m_bufferTargets[kPassCount];
+
+    // One set of per-pass programs, compiled from a DOCUMENT on disk (a directory holding image.frag).
+    // Separate from m_renderers, which stays the candidate/active model for single-shader buffers: this
+    // is what the per-frame A -> B -> C -> D -> Image ordering will drive. Compiled and reported here,
+    // not yet drawn into, so the screen is unchanged.
+    std::unique_ptr<GraphicsPassPrograms> m_passPrograms;
+
+    // How many passes were drawn last frame, so the line is emitted when that CHANGES and not per frame.
+    int m_passesDrawnLastFrame = -1;
+
+    // The document whose passes are compiled, kept so the frame loop can ask for each pass's OWN channels
+    // (Shadertoy binds them per pass) rather than one set for all of them.
+    GraphicsDocument m_passDocument;
+
+    // What each pass's four channels read, per draw index - read from the document's channels file ONCE,
+    // where the document is prepared, and used by every frame until the document or the file changes.
+    //
+    // The frame loop used to read and parse the file twenty times per frame (four channels times five
+    // passes). Beyond the cost, it made a per-frame decision out of a file a person edits, so a write that
+    // landed mid-frame could give two passes of one frame different assignments.
+    QList<GraphicsChannelSource> m_channelSources[kDrawOrderCount];
+    // Whether the document has a channels file at all. False means the historical default (channel i reads
+    // Buffer i); true means the file said what it said, including "none" for a channel it is silent about.
+    bool m_channelFileDescribesDocument = false;
+    // Read the document's channel file into m_channelSources. Requires nothing but the document.
+    void refreshChannelSources();
+
+    void applyPassDocumentRequest();
+    QString m_requestedPassDocument;              // guarded by m_bufferMutex, like m_requestedShaderName
+    QString m_activePassDocument;
+    // Whether the pending request means "compile this document's passes AGAIN" (the editor saved a pass)
+    // rather than "show me this document". Guarded by m_bufferMutex with the name above, so the pair cannot
+    // be read half-applied; cleared by the consumer when it applies the request.
+    bool m_requestedPassDocumentRebuild = false;
+
+    // Loaded channel textures, by file path, and the cubemaps built from a cross image. Loaded once and kept
+    // until the document changes, because re-uploading an image every frame - or on every dropdown change -
+    // is the kind of cost nobody sees until the picture stutters.
+    QHash<QString, std::shared_ptr<QOpenGLTexture>> m_channelTextures;
+    QHash<QString, std::shared_ptr<QOpenGLTexture>> m_channelCubemaps;
+    GLuint textureForChannel(const GraphicsChannelSource& source);
+    void releaseChannelTextures();                 // the document whose passes are compiled, for the log
+    std::atomic<bool> m_passDocumentRequested{ false };
+
+    // Which pass the screen was last fed from, so the line is emitted when it CHANGES and not per frame.
+    int m_screenSource = -1;
+    // Index of the target currently published for consumers, or -1 before the first
+    // frame. Written only by this thread.
+    int m_readyIndex = -1;
+
+    // Completion fences, one per target.
+    //
+    // Placed after a target's draw and published with it, so a consumer can wait for
+    // the frame to be finished before sampling. This is the access protection the
+    // design lacked: without it a consumer reads memory whose draw has been issued
+    // but not completed, which shows up as flicker between a finished and a partial
+    // image.
+    //
+    // Owned by the producer's context and deleted by it.
+    //
+    // Deletion is deferred by one frame, which is not tidiness but correctness: a
+    // consumer reads a fence handle from the slot and then waits on it, so deleting
+    // a fence it may still hold is undefined behaviour. m_retiredFence holds the
+    // previous frame's fence so it is only freed once a consumer cannot still be
+    // holding it.
+    GLsync m_targetFence[kTargetCount] = { nullptr, nullptr };
+    GLsync m_retiredFence[kTargetCount] = { nullptr, nullptr };
+
+    // How many times waiting for the consumer to release a target hit its 500ms bound.
+    //
+    // NOT by itself a fault: a window mode change blocks the GUI thread for about
+    // 500ms on Windows, during which the consumer genuinely cannot release the target.
+    // The producer draws anyway and recovers within a frame. A count that keeps growing
+    // is the interesting case - that means a consumer is persistently not reading.
+    quint64 m_waitTimeouts = 0;
+
+    // How many times glClientWaitSync returned GL_WAIT_FAILED, which is a different
+    // thing entirely: the fence cannot be waited on from this context at all (wrong
+    // share group, or already deleted). Expected to stay at zero.
+    quint64 m_waitFailures = 0;
+
+    bool    m_verbose   = true;
+    bool    m_contextOk = false;
+    bool    m_renderVerified = false;
+
+    // The rate the loop paces to, and what it was derived from. Guarded by m_rateMutex
+    // because a menu can change them while the loop reads them, and they are read once per
+    // frame rather than once per rate change. Contention is nil - a call happens when the
+    // user picks a menu item - so a mutex is the honest tool here rather than an atomic for
+    // two ints that must be read together.
+    mutable QMutex m_rateMutex;
+    int     m_targetFps = 0;          // the user's request; 0 means "use the default"
+    int     m_displayRefreshHz = 0;   // what the display can show; 0 means unknown
+    // Set when either of the above changes, so the loop restarts its pacing instead of
+    // carrying a deadline that belongs to the previous rate.
+    std::atomic<bool> m_rateChangePending{false};
+
+    // Not owned. See setSharedFrameSlot().
+    GraphicsSharedFrameSlot* m_sharedFrame = nullptr;
+
+    // Not owned. See setUniformValues().
+    GraphicsUniformValues* m_uniformValues = nullptr;
+    // The last snapshot taken, kept alive because a frame holds a pointer to it.
+    GraphicsUniformSnapshot m_uniformSnapshot;
+    quint64 m_uniformVersion = 0;
+    // The GL_RENDERER string. Distinct from m_renderers, which are the objects
+    // that draw.
+    QString m_renderer;
+    QString m_version;
+
+    // Loop state. Written by the render thread, read by anyone.
+    std::atomic<bool>      m_reloadRequested{false};
+    std::atomic<quint64>   m_frames{0};
+    std::atomic<double>    m_fps{0.0};
+    std::atomic<double>    m_lastFrameMs{0.0};
+    std::atomic<double>    m_worstFrameMs{0.0};
+    std::atomic<bool>      m_loopRunning{false};
+    // Set when the loop stopped because a frame hit the driver-watchdog limit
+    // rather than because it was asked to. Distinct from "stopped", because the
+    // two need different reporting.
+    std::atomic<bool>      m_hung{false};
+
+    // The handoff figures, published once per reporting window rather than per frame.
+    // A per-frame store would be pointless churn: nobody can read a number that changes
+    // 60 times a second, and it would put an atomic write in the hot path for nothing.
+    std::atomic<double>    m_consumerWaitAvgUs{0.0};
+    std::atomic<double>    m_consumerWaitWorstUs{0.0};
+    std::atomic<int>       m_targetCount{0};
+    std::atomic<int>       m_frameCapHz{0};
+    // Latched, not recomputed by readers: see GraphicsFrameStats::belowTarget.
+    std::atomic<bool>      m_belowTarget{false};
+
+    // The requested and the actual render target size. Kept as plain ints in
+    // atomics rather than a QSize because QSize is not lock-free to read
+    // concurrently; -1 means "nothing requested yet".
+    std::atomic<int>       m_requestedWidth{-1};
+    std::atomic<int>       m_requestedHeight{-1};
+    std::atomic<int>       m_actualWidth{0};
+    std::atomic<int>       m_actualHeight{0};
+};
+
+} // namespace SonicPi

@@ -21,6 +21,8 @@ import { decode } from "./osc.js";
 import { createRecordReader } from "./gui-stream.js";
 import { SUPERSONIC_BASE, supersonicInfo, PROCESS_FIELDS, liveRuns, programNeeds, workerSettled, TABLES } from "./runtime.js";
 import { LiveCore, freshPerf, addPerf, countHeadroom } from "./live-core.js";
+import { createPatternUi } from "./pattern/pattern-boot.js";
+import { createSessionRun } from "./pattern/session-run.js";
 
 const STOP_FADE = 1;           // seconds a Stop fades over (Scheduler#silence)
 const TRACE_GROUP = 999;       // a trace's synths (Bridge#playTrace), by hand, clear of the runtime's own: the spec page's Stop frees them
@@ -679,6 +681,8 @@ export class WorkerSession {
   failures = 0;
   bridge;
   running = false;
+  /** SP-EXT(pattern): the last few hundred records, for a separate view of this session. Read by nothing here. */
+  recent = [];
   /** Link's tempo (the strip's, tap tempo's, or a program's set_link_bpm!). */
   linkBpm = 60;
 
@@ -696,6 +700,29 @@ export class WorkerSession {
     this.#call("live", { channel: channel.transferable, clock: this.#anchor() }, channel.transferList)
       .catch((e) => console.error(`the runtime's worker did not take the engine: ${e.message}`));
     engine.on?.("in", (msg) => { if (msg?.[0] === "/fail") { this.failures++; on.fail?.(msg); } });
+
+        // SP-EXT(pattern): one handle on this live session, so a separate editor (web/pattern/lab.html) can run code in THIS
+        // session and read what it emitted. It exposes methods that already exist and changes no behaviour; without it a second
+        // editor would be a second Sonic Pi rather than another view of this one.
+        globalThis.sonicPiSession = {
+          run: (code, group = 0) => this.run(code, { group }),
+          stop: () => this.stop(),
+          stopJob: (job) => this.stopJob(job),
+          status: () => this.status(),
+          recent: (n = 20) => this.recent.slice(-n),
+        };
+
+        // SP-EXT(pattern): load the pattern layer into this session and let the editor's own Run use it. Its state is
+        // reported through on.pattern; a Run that uses pattern verbs waits for it (run, above). Wrapped, because a layer
+        // that fails to load must never take the editor down with it.
+        try {
+          const patternSession = { run: (code, group = 0) => this.#runNow(code, { group }), recent: (n = 50) => this.recent.slice(-n) };
+          this.pattern = createPatternUi({ run: createSessionRun(patternSession), onChange: (st) => this.#on.pattern?.(st) });
+          this.pattern.boot();
+        } catch (e) {
+          this.pattern = null;
+          console.error(`the pattern layer did not load: ${e?.message ?? e}`);
+        }
   }
 
   #anchor() { return { ntp: this.#engine.clock.now(), wall: performance.timeOrigin + performance.now() }; }
@@ -762,7 +789,10 @@ export class WorkerSession {
       const view = new DataView(records.buffer, records.byteOffset, records.byteLength);
       for (let p = 0; p + 4 <= records.length;) {
         const n = view.getUint32(p);
-        deliver(this.#records.read(decode(records.subarray(p + 4, p + 4 + n))), this.perf, this.#on, () => this.clockNow(), (r) => this.at(r));
+        const record = this.#records.read(decode(records.subarray(p + 4, p + 4 + n)));
+        this.recent.push(record);
+        if (this.recent.length > 300) this.recent.splice(0, this.recent.length - 300);
+        deliver(record, this.perf, this.#on, () => this.clockNow(), (r) => this.at(r));
         p += 4 + n;
       }
     }
@@ -774,7 +804,24 @@ export class WorkerSession {
   }
 
   /** Runs a program as a new job in the worker; the job id. */
-  async run(code, { group = 0 } = {}) {
+  /** SP-EXT(pattern): a program that uses the pattern verbs waits for the layer; anything else runs at once. */
+  async run(code, opts = {}) {
+    if (this.pattern && !this.pattern.ready() && /(?<![A-Za-z0-9_])p(?:play|pattern|stop)\b/.test(String(code))) {
+      await this.pattern.whenReady();          // rejects with the layer's reason, which the editor shows
+    }
+      // "A track the buffer no longer declares stops" without adding a job: the bookkeeping rides IN the program's own job.
+      //   prefix   pdeclared :begin;   on line 1, so a track can be stamped as it is declared
+      //   suffix   pdeclared :end      on a line of its own, so it runs after the program and prunes tracks this Run did not
+      //                                declare (they leave at their next cycle line)
+      // One job, no extra runs, nothing for Stop or the next Run to race with -- which is what the separate jobs did wrong.
+      const program = String(code);
+      const wrapped = /(?<![A-Za-z0-9_])p(?:play|pattern|stop)\b/.test(program)
+        ? `pdeclared :begin; ${program}\npdeclared :end`
+        : program;
+      return this.#runNow(wrapped, opts);
+  }
+
+  async #runNow(code, { group = 0 } = {}) {
     await this.#stopping;   // its sounds follow the Stop's; the fade plays on beside them, as native's does
     const { job, t0 } = await this.#call("run", { code, group });
     this.#t0 ??= t0;

@@ -5,7 +5,12 @@ if /I "%CONFIG%" == "" (set CONFIG=Release)
 
 call "%~dp0win-prebuild.bat"
 if errorlevel 1 goto :build_failed
-call "%~dp0win-config.bat" %CONFIG%
+REM State the mode rather than relying on its default: SONIC_PI_GUI_ONLY is a
+REM cache entry, so a tree last configured by win-build-gui-only.bat would keep
+REM it ON and this "full" build would quietly skip the audio engine and the Qt
+REM deploy step. One extra configure argument is what stops that. It must be
+REM quoted - `=` is an argument delimiter to cmd (see win-config.bat).
+call "%~dp0win-config.bat" %CONFIG% "-DSONIC_PI_GUI_ONLY=OFF"
 if errorlevel 1 goto :build_failed
 call "%~dp0win-build-gui.bat" %CONFIG%
 if errorlevel 1 goto :build_failed
@@ -14,7 +19,14 @@ cd %WORKING_DIR%
 exit /b 0
 
 :build_failed
-echo.
-echo *** Build FAILED with errorlevel %errorlevel% ***
+REM Capture the failing code BEFORE anything else runs.
+REM
+REM Both `echo` and `cd` reset ERRORLEVEL to 0, so the original
+REM   echo ... %errorlevel% ... / cd %WORKING_DIR% / exit /b %errorlevel%
+REM reported the failure and then returned 0. Any caller relying on the exit code
+REM - CI, a wrapper script - saw success after a failed build, which is worse than
+REM no reporting at all: the failure resurfaces much later as a mystery.
+set "RC=%errorlevel%"
+echo *** Build FAILED with errorlevel %RC% ***
 cd %WORKING_DIR%
-exit /b %errorlevel%
+exit /b %RC%

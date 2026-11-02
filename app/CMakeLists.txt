@@ -64,6 +64,36 @@ list(APPEND CMAKE_MODULE_PATH ${APP_ROOT}/cmake)
 include(cmake/utils.cmake)
 include(cmake/common.cmake)
 
+# GUI-only iteration (a developer switch, not a way to build Sonic Pi).
+#
+# Two things here have nothing to do with the GUI and between them dominate a
+# no-change rebuild:
+#
+#   * SuperSonic, the audio engine. external/CMakeLists.txt adds it with
+#     BUILD_ALWAYS ON, so that an edit under app/external/... is picked up
+#     without deleting stamp files - which means the nested CMake + cargo
+#     build is re-entered on every single build.
+#   * windeployqt (gui/CMakeLists.txt), which re-copies the Qt runtime and
+#     every .qm translation into the output directory after every link.
+#
+# With this ON both are dropped: the engine binary is taken as the last engine
+# build left it, and the deployed Qt runtime is left alone. What remains is
+# compiling and linking the GUI, which is all that changes while working on
+# app/gui (the graphics subsystem among it).
+#
+# It is a cache entry, so it STICKS until something sets it again. Every entry
+# point in this tree therefore states the mode it configures rather than
+# relying on the default: win-build-all.bat passes OFF, win-build-gui-only.bat
+# passes ON. Otherwise a full build would silently inherit a leftover ON and
+# produce a binary with a stale engine and no deployed Qt.
+#
+# OFF by default, and not a supported way to build or package Sonic Pi: a tree
+# built this way is only guaranteed complete for GUI work.
+option(SONIC_PI_GUI_ONLY "Developer: skip rebuilding the audio engine and the Qt deploy step (GUI-only iteration)" OFF)
+if(SONIC_PI_GUI_ONLY)
+    message(STATUS "SONIC_PI_GUI_ONLY=ON: the audio engine will not be rebuilt and windeployqt will not run.")
+endif()
+
 configure_file(${APP_ROOT}/cmake/config.h.cmake ${CMAKE_BINARY_DIR}/config.h)
 
 add_subdirectory(external)

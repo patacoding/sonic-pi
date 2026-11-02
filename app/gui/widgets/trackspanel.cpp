@@ -13,6 +13,8 @@
 
 #include "trackspanel.h"
 
+#include "chevronbutton.h"
+
 #include <QButtonGroup>
 #include <QComboBox>
 #include <QDialog>
@@ -51,6 +53,7 @@
 #include "widgets/cardscope.h"      // the quickstart cards' ring scope
 #include "widgets/thinsplitter.h"
 #include "utils/tutorialdocs.h"        // highlightCode — the editor's colours
+#include "utils/code_colours.h"
 #include "widgets/tutorialwidgets.h"   // TutDial — the synth docs' own rotary
 
 #ifdef Q_OS_WIN
@@ -328,8 +331,9 @@ void TracksPanel::fitDeviceTitle(Device* dev)
     // "ValhallaSupermassive", and macOS's San Francisco for "Vital".
     const int need = qCeil(QFontMetricsF(f).horizontalAdvance(name));
     int chrome = ScaleWidthForDPI(10) + ScaleWidthForDPI(6);
-    for (QPushButton* b : { dev->bypassBtn, dev->editorBtn, dev->configureBtn, dev->leftBtn,
-                            dev->rightBtn, dev->removeBtn })
+    for (QAbstractButton* b : std::initializer_list<QAbstractButton*>{
+             dev->bypassBtn, dev->editorBtn, dev->configureBtn, dev->leftBtn, dev->rightBtn,
+             dev->removeBtn })
         // A glyph button is fixed; Configure is as wide as its word.
         if (b) chrome += (b->minimumWidth() == b->maximumWidth()) ? b->minimumWidth()
                                                                    : b->sizeHint().width();
@@ -1249,13 +1253,7 @@ void TracksPanel::setCodeLine(QLabel* label, const QString& code)
         label->setText(code.toHtmlEscaped());
         return;
     }
-    SonicPi::CodeColours colours;
-    colours.keyword = m_theme->color("KeywordForeground").name();
-    colours.symbol  = m_theme->color("SymbolForeground").name();
-    colours.number  = m_theme->color("NumberForeground").name();
-    colours.string  = m_theme->color("DoubleQuotedStringForeground").name();
-    colours.comment = m_theme->color("CommentForeground").name();
-    label->setText(SonicPi::TutorialDocs::highlightCode(code, colours));
+    label->setText(SonicPi::TutorialDocs::highlightCode(code, SonicPi::codeColours(m_theme)));
 }
 
 void TracksPanel::onTrackSelectionChanged()
@@ -1547,8 +1545,22 @@ QWidget* TracksPanel::buildDeviceFrame(Device* dev)
     dev->configureBtn->setProperty("armed", false);
     connect(dev->configureBtn, &QPushButton::clicked, this, [this, dev]() { toggleConfigure(dev); });
 
-    dev->leftBtn = glyphBtn(TablerIcons::Glyph::ChevronLeft, tr("Move earlier in the chain."), false);
-    connect(dev->leftBtn, &QPushButton::clicked, this, [this, dev]() {
+    // The chain chevrons are the one chevron control (ChevronButton), as
+    // every chevron here is; on the bar they take its chip colours
+    // (tintDeviceChevron), not a knob of their own.
+    auto chevronBtn = [&](ChevronButton::Dir d, const QString& tip) {
+        auto* b = new ChevronButton(header);
+        b->setObjectName(QStringLiteral("qsCardChevron"));
+        b->setDir(d);
+        b->setFixedSize(btnW, btnH);
+        b->setToolTip(tip);
+        b->setAccessibleName(tip);
+        tintDeviceChevron(b);
+        hh->addWidget(b);
+        return b;
+    };
+    dev->leftBtn = chevronBtn(ChevronButton::Left, tr("Move earlier in the chain."));
+    connect(dev->leftBtn, &QAbstractButton::clicked, this, [this, dev]() {
         const int i = m_devices.indexOf(dev);
         if (i <= 0 || !m_spAPI) return;
         oscpkt::Message m("/clockwork/track/plugin/move");
@@ -1556,8 +1568,8 @@ QWidget* TracksPanel::buildDeviceFrame(Device* dev)
         m.pushInt32(i - 1);
         m_spAPI->SupersonicSendOSC(m);
     });
-    dev->rightBtn = glyphBtn(TablerIcons::Glyph::ChevronRight, tr("Move later in the chain."), false);
-    connect(dev->rightBtn, &QPushButton::clicked, this, [this, dev]() {
+    dev->rightBtn = chevronBtn(ChevronButton::Right, tr("Move later in the chain."));
+    connect(dev->rightBtn, &QAbstractButton::clicked, this, [this, dev]() {
         const int i = m_devices.indexOf(dev);
         if (i < 0 || i >= m_devices.size() - 1 || !m_spAPI) return;
         oscpkt::Message m("/clockwork/track/plugin/move");
@@ -1671,6 +1683,17 @@ void TracksPanel::tintDeviceGlyph(QPushButton* b, bool hover)
         ink.setAlphaF(0.38);
     b->setIcon(TablerIcons::icon(static_cast<TablerIcons::Glyph>(g.toInt()), ink,
                                  ScaleWidthForDPI(16), devicePixelRatioF()));
+}
+
+// The chain chevrons on the accent bar: no knob at rest, the bar's hover chip
+// under the pointer (app.qss's focusWash on a device glyph), the bar's
+// contrast ink for the chevron.
+void TracksPanel::tintDeviceChevron(ChevronButton* b)
+{
+    const QColor ink = m_theme ? m_theme->accentContrastText() : QColor(Qt::white);
+    QColor wash = ink;
+    wash.setAlphaF(0.28);   // focusWashColor (sonicpitheme.cpp)
+    b->setColors(Qt::transparent, wash, ink, ink);
 }
 
 bool TracksPanel::eventFilter(QObject* watched, QEvent* event)
@@ -2241,6 +2264,8 @@ void TracksPanel::applyTheme(SonicPiTheme* theme)
         if (!dev->frame) continue;
         for (QPushButton* b : dev->frame->findChildren<QPushButton*>())
             tintDeviceGlyph(b, b->underMouse());
+        for (ChevronButton* b : { dev->leftBtn, dev->rightBtn })
+            if (b) tintDeviceChevron(b);
         for (ParamRow& r : dev->rows)
             if (r.dial)
                 r.dial->setColours(fg, SonicPiTheme::blend(fg, bgc, 0.38), accent,

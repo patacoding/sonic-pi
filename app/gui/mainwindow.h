@@ -22,6 +22,9 @@
 #include <QIcon>
 #include <QJsonObject>
 #include <QMainWindow>
+
+#include "model/helppanelmodel.h"
+#include "model/sidecolumnmodel.h"
 #include <QSet>
 #include <QSettings>
 
@@ -42,6 +45,19 @@ class QActionGroup;
 class QMenu;
 class QToolBar;
 class QLineEdit;
+class QTimer;
+
+namespace SonicPi
+{
+// Defined in graphics/ui/GraphicsWindow.h, graphics/ui/GraphicsPreviewWindow.h and
+// graphics/rendering/GraphicsRenderThread.h, all included by the .cpp. Only pointers are
+// held here, so forward declarations keep the OpenGL headers out of this one.
+class GraphicsWindow;
+class GraphicsPreviewWindow;
+class ShaderBufferWindow;
+class GraphicsRenderThread;
+class GraphicsSharedFrameSlot;
+} // namespace SonicPi
 class QsciScintilla;
 class QProcess;
 class QTextEdit;
@@ -50,9 +66,12 @@ class QString;
 class QSlider;
 class QSplitter;
 class QPushButton;
+class ChevronButton;
+class DividerOverlay;
 class QStackedWidget;
 class ThinSplitter;
 class TutorialPane;
+class IconTabWidget;
 
 namespace SonicPi
 {
@@ -127,12 +146,12 @@ class MainWindow;
 // prefs editor.
 struct ShortcutDef
 {
-    const char* id;
-    const char* desc;
-    const char* mac;
-    const char* win;
-    const char* emacs;
-    const char* group;
+    const char* id = nullptr;
+    const char* desc = nullptr;
+    const char* mac = nullptr;
+    const char* win = nullptr;
+    const char* emacs = nullptr;
+    const char* group = nullptr;
     QAction* MainWindow::* act;
     const char* secondary = nullptr;  // optional extra shortcut(s), comma separated (undocumented fallback), all keymaps
 };
@@ -153,6 +172,16 @@ public:
     SonicPiLog* GetOutputPane() const;
     SonicPiLog* GetIncomingPane() const;
     SonicPiTheme* GetTheme() const;
+
+    // The Graphics render thread, handed over by main() once it has been started.
+    // Held so the output window, which is created lazily on first use, can be given
+    // the handle. Not owned.
+    void setGraphicsRenderThread(SonicPi::GraphicsRenderThread* thread);
+
+    // The slot the render thread publishes frames into and the output window
+    // displays them from. Both must be given the SAME object, so it is owned here
+    // between them. Called by main() alongside setGraphicsRenderThread().
+    void setGraphicsSharedFrame(SonicPi::GraphicsSharedFrameSlot* slot);
 
     void addCuePath(QString path, QString val);
     // True when the job ran from an editor buffer (workspace_*), not the help
@@ -227,6 +256,7 @@ public slots:
     void onMixerSettings(double drive, double outputVolume);
     void onAudioSwitchDone(const SonicPi::AudioSwitchOutcome& outcome);
     void onAudioDeviceReopenReply(bool accepted, QString reason);
+    void onAudioStateChanged(const QString& state, const QString& reason);   // the engine's own fallback: say where the sound went
     void changeBufferSize(int size);
     void resetAudioDevice();
 
@@ -247,6 +277,7 @@ private:
     // startup never finished (see audioBootDecision); say so once we are up.
     bool m_audioPrefsSkippedAtBoot = false;
     bool m_audioDevicesSeen = false;
+    bool m_announceDeviceAfterRollback = false;   // the next device list names where the engine's fallback went
     bool m_audioInputDevicesSeen = false;
     bool m_audioDeviceConfigSeen = false;
     SonicPi::AudioDevicesInfo      m_lastAudioDevices;
@@ -267,6 +298,7 @@ private:
         QString input;
         int sampleRate = 0;
         int bufferSize = 0;
+        bool outputFollowsDefault = false;   // the default-follow row was picked
     };
     PendingAudioPrefs m_pendingAudioPrefs;
 
@@ -383,6 +415,18 @@ private slots:
     void about();
     void scope();
     void toggleScope();
+    // Graphics output feature. The rendering itself lives in app/gui/graphics/
+    // and is deliberately independent of the GUI; these are only the controls
+    // that surface it.
+    void showGraphicsOutput(bool on);
+    // Show or hide the graphics debug preview. Not a pane in this window: see the
+    // definition for why that distinction is load-bearing rather than cosmetic.
+    void showGraphicsPreview(bool on);
+    void graphicsVisibilityChanged();
+
+    // Mirrors one Graphics log entry into the log pane. Invoked on the GUI
+    // thread even when the entry was written from the render thread.
+    void appendGraphicsLog(int level, const QString& message);
     void showScopeLabelsMenuChanged();
     void toggleIcons();
     void help();
@@ -494,6 +538,12 @@ private slots:
     // Status-bar message that is also spoken — for state changes whose only
     // other feedback is visual.
     void showStatusAndAnnounce(const QString& message, int timeoutMs = 2000);
+    // A code card's code (the Cards tab's, the docs'): into the editor at the
+    // cursor, previewed there while its Add is hovered, onto the clipboard.
+    void insertCardCode(const QString& title, const QString& code);
+    void previewCardCode(const QString& title, const QString& code);
+    void cancelCardPreview();
+    void copyCardCode(const QString& title, const QString& code);
     void updateRecordingUI();
     void addMenuBarMnemonics();
     // Reveal the Help dock and bring its tab strip to the Docs tab.
@@ -560,9 +610,11 @@ private slots:
     void setMidiPortEnabled(QString direction, QString name, bool enabled);
     void setGamepadDeviceEnabled(QString name, bool enabled);
     void honourPrefs();
+    // An engine is ready: on first boot, and after every restart. The panels
+    // that talk to it catch up with it here.
+    void onEngineReady();
 
     // Toggle the bottom Help/Debug dock (double-clicking the divider bar).
-    void toggleDocPane();
 
     void showBufferCapacityError();
     void checkForStudioMode();
@@ -628,6 +680,7 @@ private:
     // file; rename or delete it once the user picks a save location.
     void startSessionRecordingFlow();
     void stopSessionRecordingFlow();
+    void recordingFailed(const QString& reason);   // the recorder could not start or died: Record goes back
 #endif
 
     void clearOutputPanels();
@@ -685,12 +738,36 @@ private:
     void addUniversalCopyShortcuts(QTextEdit* te);
     void updateTranslatedUIText();
 
-    QMenu *shortcutMenu, *liveMenu, *codeMenu, *examplesMenu, *audioMenu, *displayMenu, *viewMenu, *focusMenu, *tabMenu, *ioMenu, *ioMidiInMenu, *ioMidiOutMenu, *ioMidiOutChannelMenu, *ioGamepadMenu, *localIpAddressesMenu, *themeMenu, *scopeKindVisibilityMenu, *languageMenu, *accessibilityMenu, *recentSetsMenu;
-    QAction* examplesPlayOnOpenAct;
+    QMenu* shortcutMenu = nullptr;
+    QMenu* liveMenu = nullptr;
+    QMenu* codeMenu = nullptr;
+    QMenu* examplesMenu = nullptr;
+    QMenu* audioMenu = nullptr;
+    QMenu* displayMenu = nullptr;
+    // The Graphics menu is ours (the Shadertoy-style multi-pass feature); upstream has no such menu.
+    // Kept in upstream's per-line nullptr form rather than the old single packed declaration, so a future
+    // upstream change to this block merges as a one-line addition instead of a conflict.
+    QMenu* graphicsMenu = nullptr;
+    QMenu* viewMenu = nullptr;
+    QMenu* focusMenu = nullptr;
+    QMenu* tabMenu = nullptr;
+    QMenu* ioMenu = nullptr;
+    QMenu* ioMidiInMenu = nullptr;
+    QMenu* ioMidiOutMenu = nullptr;
+    QMenu* ioMidiOutChannelMenu = nullptr;
+    QMenu* ioGamepadMenu = nullptr;
+    QMenu* localIpAddressesMenu = nullptr;
+    QMenu* themeMenu = nullptr;
+    QMenu* scopeKindVisibilityMenu = nullptr;
+    QMenu* languageMenu = nullptr;
+    QMenu* accessibilityMenu = nullptr;
+    QMenu* recentSetsMenu = nullptr;
+    QAction* examplesPlayOnOpenAct = nullptr;
     QHash<int, QString> m_jobWorkspaces; // live jobs -> source workspace (error routing)
     QStringList tutorialJsonPaths; // sorted generated chapter JSON, row-aligned with the Tutorial help list
     QStringList examplePaths;      // qt-doc glob order, row-aligned with the Examples help list
     QStringList exampleTitles;
+    QStringList exampleBlurbs;     // each card's line, as the web's Examples page has it
     // Generated reference docs (loaded lazily from etc/doc/generated/native)
     QVector<SonicPi::InstrumentPage> synthDocPages;
     QVector<SonicPi::InstrumentPage> fxDocPages;
@@ -705,9 +782,9 @@ private:
     int lastTutorialDocRow = -1;
     QMap<QString, QKeySequence> shortcutMap;
 
-    QSettings* gui_settings;
-    SonicPiSettings* piSettings;
-    SonicPii18n* sonicPii18n;
+    QSettings* gui_settings = nullptr;
+    SonicPiSettings* piSettings = nullptr;
+    SonicPii18n* sonicPii18n = nullptr;
 
     bool fullScreenMode = false;
     bool focusMode;
@@ -735,12 +812,12 @@ private:
     bool lastMixerForceMono = false;
     bool mixerStateKnown = false;
 
-    QCheckBox* startup_error_reported;
+    QCheckBox* startup_error_reported = nullptr;
     bool is_recording;
     bool show_rec_icon_a;
-    QTimer* rec_flash_timer;
+    QTimer* rec_flash_timer = nullptr;
 
-    SplashWidget* splash;
+    SplashWidget* splash = nullptr;
     QTimer* boot_poll_timer = nullptr;
     int boot_poll_tries = 0;
     // Extra poll ticks granted after HasServerErrored() flips, so the daemon's
@@ -751,38 +828,67 @@ private:
     bool i18n;
     static const int workspace_max = 10;
     SonicPiScintilla* workspaces[workspace_max];
-    QTabWidget* docsNavTabs;
+    QTabWidget* docsNavTabs = nullptr;
     // The section selector lives outside the splitter's nav column so it can run
     // the full width of the pane, like the Cards deck bar. docsNavTabs keeps the
     // pages and its own tab bar is hidden; these pills drive its current index.
     QWidget* docsPane = nullptr;      // the southTabs page: pill row + docsplit
     QWidget* docsPillRow = nullptr;
     QVector<QPushButton*> docsPills;
-    QTabWidget* southTabs;
+    IconTabWidget* southTabs = nullptr;
 
-    SonicPiLog* outputPane;
-    SonicPiLog* incomingPane;
-    SonicPiMetro* metroPane;
-    QTextBrowser* errorPane;
-    SonicPiErrorCard* errorCard;
+    SonicPiLog* outputPane = nullptr;
+    SonicPiLog* incomingPane = nullptr;
+    SonicPiMetro* metroPane = nullptr;
+    QTextBrowser* errorPane = nullptr;
+    SonicPiErrorCard* errorCard = nullptr;
     void onErrorAnchorClicked(const QUrl& link);
     // "Jump to error" target: the buffer tab, line and column the marker was set on.
     int m_errorJumpTab = -1;
     int m_errorJumpLine = -1;
     int m_errorJumpCol = 0;
-    QDockWidget* outputWidget;
-    QDockWidget* incomingWidget;
-    QWidget* prefsWidget;
+    QDockWidget* outputWidget = nullptr;
+    QDockWidget* incomingWidget = nullptr;
+    QWidget* prefsWidget = nullptr;
 
-    QDockWidget* hudWidget;
-    QDockWidget* docWidget;
-    QPushButton* helpCloseButton = nullptr;  // ✕ = persistent close, top-right of the help pane
+    QDockWidget* hudWidget = nullptr;
+    QDockWidget* docWidget = nullptr;
+    // The help pane's chevrons, top right, as the web's on its divider: up makes
+    // the pane full size over the editor's room; down hides it, and from full
+    // size first steps back beside the editor.
+    ChevronButton* helpFullButton = nullptr;
+    ChevronButton* helpHideButton = nullptr;
+    QWidget*     helpChevrons = nullptr;      // the two grips, laid over the dock separator (positionHelpChevrons)
+    QDockWidget* helpAwayDock = nullptr;
+    DividerOverlay* helpAwayDivider = nullptr; // the divider painted over the separator Qt reserves beside it     // a 1px placeholder in the bottom area while the help is away: its separator is the divider, the way back
+    // The help panel's one state (model/helppanelmodel.h): the Help icon, the
+    // grips, the menu items and focus mode all move it, and applyHelpPanel
+    // puts it on screen. Nothing else shows or hides the dock.
+    SonicPi::HelpPanelModel m_helpPanel;
+    bool m_helpFullApplied = false;           // the room is the panel's right now
+    bool m_applyingHelpPanel = false;         // applyHelpPanel re-entered by the dock's own signals
+    bool m_restoringLayout = false;           // restoreState() is moving docks: no setting follows them
+    QList<QDockWidget*> m_hiddenForHelpFull;  // the panes the full-size help took the room from
+    void helpToggle();                        // the Help icon, the down grip, the shortcut, a double-click on the divider
+    void helpFull();                          // the up grip
+    void helpShow();                          // a pane asked for: beside the code if it was away
+    void applyHelpPanel();                    // the dock, the editor's room, the icon, the grips and the bar, from the state
+    // The column beside the code (scope, log, cues, metronome): one state
+    // (model/sidecolumnmodel.h) moved by the grip on its divider; the panes'
+    // own settings stay the View menu's.
+    SonicPi::SideColumnModel m_sideColumn;
+    ChevronButton* sideGrip = nullptr;        // on the editor | column divider, at its top
+    QDockWidget*   sideAwayDock = nullptr;
+    DividerOverlay* sideAwayDivider = nullptr;    // a 1px placeholder in the right area while the column is away: its separator is the divider
+    void sideToggle();
+    void applySideColumn();                   // the panes, the grip and the bar, from the state and the settings
+    void positionSideGrip();                  // over the divider at its top, or over the bar
+
     ZoomBar* logsZoom = nullptr;             // Logs/Debug tab text-size controls in the title row
     ZoomBar* debugZoom = nullptr;
     ZoomBar* tracksZoom = nullptr;
-    QIcon m_helpCloseIcon;                    // tabler-x, theme-tinted (rest / hover)
-    QIcon m_helpCloseIconHover;
-    void updateHelpCloseIcon();               // (re)renders the ✕ for the current theme
+    void updateHelpChevronIcons();            // (re)renders the chevrons for the current theme
+    void positionHelpChevrons();              // over the separator above the help pane, at its right
     QList<QAction*> docsFilterSearchActions;  // leading magnifier glyph in each docs filter field
     void updateDocsFilterIcons();             // (re)tints the magnifiers for the current theme
     void applyDocsNavZoom();                  // scales the topic lists/filters to the docs A-/A+ step
@@ -803,16 +909,16 @@ private:
     QSize installInfoLogo(QTextBrowser* pane);
     // Logical width (dx) of that mark on the About page.
     static constexpr int kInfoLogoWidthDx = 230;
-    QDockWidget* metroWidget;
+    QDockWidget* metroWidget = nullptr;
     LogPanel* debugLogPanel = nullptr;
     MetricsPanel* metricsPanel = nullptr;
     TracksPanel*  tracksPanel = nullptr;
     int m_savedDockH = 0;                    // dock height to restore when re-opening via double-click
     int m_dockHBeforeSteal = -1;             // help-dock height before an error stole from it (-1: nothing stolen)
 
-    QWidget* blankWidgetOutput;
-    QWidget* blankWidgetIncoming;
-    QWidget* blankWidgetMetro;
+    QWidget* blankWidgetOutput = nullptr;
+    QWidget* blankWidgetIncoming = nullptr;
+    QWidget* blankWidgetMetro = nullptr;
     // Custom dock title bars: QLabel#paneTitle (small/muted/left, matching the
     // SuperSonic debug pane). QDockWidget::title's QSS colour isn't honoured for
     // the title text, so we supply our own label widgets.
@@ -825,17 +931,17 @@ private:
     QuickstartPane* quickstartPane = nullptr;
 
     //  QTextBrowser *hudPane;
-    QWidget* mainWidget;
-    QDockWidget* scopeWidget;
-    QDockWidget* visualizerWidget;
+    QWidget* mainWidget = nullptr;
+    QDockWidget* scopeWidget = nullptr;
+    QDockWidget* visualizerWidget = nullptr;
     bool hidingDocPane;
     bool restoreDocPane;
 
-    QTabWidget* editorTabWidget;
-    QProcess* serverProcess;
+    QTabWidget* editorTabWidget = nullptr;
+    QProcess* serverProcess = nullptr;
 
-    SonicPiLexer* lexer;
-    SonicPiTheme* theme;
+    SonicPiLexer* lexer = nullptr;
+    SonicPiTheme* theme = nullptr;
     // The scheme + icon-set actually applied by updateColourTheme(); lets the
     // prefs themeChanged handler distinguish a real change from a re-click of
     // the active option. themeEverApplied is false until the first application.
@@ -852,46 +958,248 @@ private:
     // applyOSContrastPreference() or noteExplicitThemeChoice().
     QAccessibilityHints* accessibilityHints = nullptr;
 #endif
-    SonicPiToolTipManager* toolTipManager;
+    SonicPiToolTipManager* toolTipManager = nullptr;
 
-    QToolBar* toolBar;
-    QAction *textUpcaseWordAct, *textDowncaseWordAct, *textDeleteWordRightAct, *textDeleteWordLeftAct, *textSelectAllAct, *textRedoAct, *textUndoAct, *textCenterCaretAct, *textWordLeftAct, *textWordRightAct, *textSelectLineStartAct, *textSelectLineEndAct, *textSelectWordLeftAct, *textSelectWordRightAct, *textSelectDocStartAct, *textSelectDocEndAct, *textDocEndAct, *textDocStartAct, *textLineEndAct, *textLineStartAct, *textDeleteBackAct, *textDeleteForwardAct, *textRightAct, *textLeftAct, *textCopyAct, *textCutAct, *textPasteAct, *textCutToEndOfLineAct, *textDownAct, *textUpAct, *textDownTenAct, *textUpTenAct, *logZoomInAct, *logZoomOutAct, *textSetMarkAct, *triggerAutocompleteAct, *readCompletionDetailsAct, *winShortcutModeAct, *emacsShortcutModeAct, *macShortcutModeAct, *userShortcutModeAct, *tabPrevAct, *tabNextAct, *tab1Act, *tab2Act, *tab3Act, *tab4Act, *tab5Act, *tab6Act, *tab7Act, *tab8Act, *tab9Act, *tab0Act, *cycleThemesAct, *exitAct, *runAct, *stopAct, *saveAsAct, *loadFileAct, *loadSetAct, *saveSetAct, *saveSetAsAct, *clearAllBuffersAct, *recAct, *textAlignAct, *textCommentAct, *textTransposeAct, *textShiftLineUpAct, *textShiftLineDownAct, *contextHelpAct, *textIncAct, *textDecAct, *scopeAct, *infoAct, *helpAct, *prefsAct, *focusEditorAct, *focusLogsAct, *focusContextAct, *focusCuesAct, *focusPreferencesAct, *focusHelpListingAct, *focusHelpDetailsAct, *focusErrorsAct, *focusHelpCardsAct, *focusHelpLogsAct, *focusHelpDebugAct, *focusBPMScrubberAct, *focusTimeWarpScrubberAct, *cycleFocusForwardAct, *cycleFocusBackAct, *showLineNumbersAct, *showAutoCompletionAct, *showCompletionHelpAct, *showContextAct, *flashCodeAct, *flashGutterAct, *showLoopScopesAct, *loopScopeScrollAct, *speakTransportAct, *reduceMotionAct, *audioSafeAct, *audioTimingGuaranteesAct, *enableExternalSynthsAct, *mixerInvertStereoAct, *mixerForceMonoAct, *enableScsynthInputsAct, *midiEnabledAct, *gamepadEnabledAct, *enableOSCServerAct, *allowRemoteOSCAct, *showLogAct, *showCuesAct, *logAutoScrollAct, *logCuesAct, *logSynthsAct, *clearOutputOnRunAct, *autoIndentOnRunAct, *showButtonsAct, *showTabsAct, *fullScreenAct, *lightThemeAct, *darkThemeAct, *highContrastThemeAct, *mildThemeAct, *phosphorThemeAct, *signalThemeAct, *proIconsAct, *showScopeLabelsAct, *showTitlesAct, *hideMenuBarInFullscreenAct, *showMetroAct, *enableLinkAct, *linkTapTempoAct, *scopePausedAct, *focusModeAct, *checkUpdatesAct, *checkUpdatesNowAct, *findAct, *findNextAct, *findPrevAct, *showEditorToolbarAct;
+    QToolBar* toolBar = nullptr;
+    QAction* textUpcaseWordAct = nullptr;
+    QAction* textDowncaseWordAct = nullptr;
+    QAction* textDeleteWordRightAct = nullptr;
+    QAction* textDeleteWordLeftAct = nullptr;
+    QAction* textSelectAllAct = nullptr;
+    QAction* textRedoAct = nullptr;
+    QAction* textUndoAct = nullptr;
+    QAction* textCenterCaretAct = nullptr;
+    QAction* textWordLeftAct = nullptr;
+    QAction* textWordRightAct = nullptr;
+    QAction* textSelectLineStartAct = nullptr;
+    QAction* textSelectLineEndAct = nullptr;
+    QAction* textSelectWordLeftAct = nullptr;
+    QAction* textSelectWordRightAct = nullptr;
+    QAction* textSelectDocStartAct = nullptr;
+    QAction* textSelectDocEndAct = nullptr;
+    QAction* textDocEndAct = nullptr;
+    QAction* textDocStartAct = nullptr;
+    QAction* textLineEndAct = nullptr;
+    QAction* textLineStartAct = nullptr;
+    QAction* textDeleteBackAct = nullptr;
+    QAction* textDeleteForwardAct = nullptr;
+    QAction* textRightAct = nullptr;
+    QAction* textLeftAct = nullptr;
+    QAction* textCopyAct = nullptr;
+    QAction* textCutAct = nullptr;
+    QAction* textPasteAct = nullptr;
+    QAction* textCutToEndOfLineAct = nullptr;
+    QAction* textDownAct = nullptr;
+    QAction* textUpAct = nullptr;
+    QAction* textDownTenAct = nullptr;
+    QAction* textUpTenAct = nullptr;
+    QAction* logZoomInAct = nullptr;
+    QAction* logZoomOutAct = nullptr;
+    QAction* textSetMarkAct = nullptr;
+    QAction* triggerAutocompleteAct = nullptr;
+    QAction* readCompletionDetailsAct = nullptr;
+    QAction* winShortcutModeAct = nullptr;
+    QAction* emacsShortcutModeAct = nullptr;
+    QAction* macShortcutModeAct = nullptr;
+    QAction* userShortcutModeAct = nullptr;
+    QAction* tabPrevAct = nullptr;
+    QAction* tabNextAct = nullptr;
+    QAction* tab1Act = nullptr;
+    QAction* tab2Act = nullptr;
+    QAction* tab3Act = nullptr;
+    QAction* tab4Act = nullptr;
+    QAction* tab5Act = nullptr;
+    QAction* tab6Act = nullptr;
+    QAction* tab7Act = nullptr;
+    QAction* tab8Act = nullptr;
+    QAction* tab9Act = nullptr;
+    QAction* tab0Act = nullptr;
+    QAction* cycleThemesAct = nullptr;
+    QAction* exitAct = nullptr;
+    QAction* runAct = nullptr;
+    QAction* stopAct = nullptr;
+    QAction* saveAsAct = nullptr;
+    QAction* loadFileAct = nullptr;
+    QAction* loadSetAct = nullptr;
+    QAction* saveSetAct = nullptr;
+    QAction* saveSetAsAct = nullptr;
+    QAction* clearAllBuffersAct = nullptr;
+    QAction* recAct = nullptr;
+    QAction* textAlignAct = nullptr;
+    QAction* textCommentAct = nullptr;
+    QAction* textTransposeAct = nullptr;
+    QAction* textShiftLineUpAct = nullptr;
+    QAction* textShiftLineDownAct = nullptr;
+    QAction* contextHelpAct = nullptr;
+    QAction* textIncAct = nullptr;
+    QAction* textDecAct = nullptr;
+    QAction* scopeAct = nullptr;
+    QAction* infoAct = nullptr;
+    QAction* helpAct = nullptr;
+    QAction* prefsAct = nullptr;
+    QAction* focusEditorAct = nullptr;
+    QAction* focusLogsAct = nullptr;
+    QAction* focusContextAct = nullptr;
+    QAction* focusCuesAct = nullptr;
+    QAction* focusPreferencesAct = nullptr;
+    QAction* focusHelpListingAct = nullptr;
+    QAction* focusHelpDetailsAct = nullptr;
+    QAction* focusErrorsAct = nullptr;
+    QAction* focusHelpCardsAct = nullptr;
+    QAction* focusHelpLogsAct = nullptr;
+    QAction* focusHelpDebugAct = nullptr;
+    QAction* focusBPMScrubberAct = nullptr;
+    QAction* focusTimeWarpScrubberAct = nullptr;
+    QAction* cycleFocusForwardAct = nullptr;
+    QAction* cycleFocusBackAct = nullptr;
+    QAction* showLineNumbersAct = nullptr;
+    QAction* showAutoCompletionAct = nullptr;
+    QAction* showCompletionHelpAct = nullptr;
+    QAction* showContextAct = nullptr;
+    QAction* flashCodeAct = nullptr;
+    QAction* flashGutterAct = nullptr;
+    QAction* showLoopScopesAct = nullptr;
+    QAction* loopScopeScrollAct = nullptr;
+    QAction* speakTransportAct = nullptr;
+    QAction* reduceMotionAct = nullptr;
+    QAction* audioSafeAct = nullptr;
+    QAction* audioTimingGuaranteesAct = nullptr;
+    QAction* enableExternalSynthsAct = nullptr;
+    QAction* mixerInvertStereoAct = nullptr;
+    QAction* mixerForceMonoAct = nullptr;
+    QAction* enableScsynthInputsAct = nullptr;
+    QAction* midiEnabledAct = nullptr;
+    QAction* gamepadEnabledAct = nullptr;
+    QAction* enableOSCServerAct = nullptr;
+    QAction* allowRemoteOSCAct = nullptr;
+    QAction* showLogAct = nullptr;
+    QAction* showCuesAct = nullptr;
+    QAction* logAutoScrollAct = nullptr;
+    QAction* logCuesAct = nullptr;
+    QAction* logSynthsAct = nullptr;
+    QAction* clearOutputOnRunAct = nullptr;
+    QAction* autoIndentOnRunAct = nullptr;
+    QAction* showButtonsAct = nullptr;
+    QAction* showTabsAct = nullptr;
+    QAction* fullScreenAct = nullptr;
+    QAction* lightThemeAct = nullptr;
+    QAction* darkThemeAct = nullptr;
+    QAction* highContrastThemeAct = nullptr;
+    QAction* mildThemeAct = nullptr;
+    QAction* phosphorThemeAct = nullptr;
+    QAction* signalThemeAct = nullptr;
+    QAction* proIconsAct = nullptr;
+    QAction* showScopeLabelsAct = nullptr;
+    QAction* showTitlesAct = nullptr;
+    QAction* hideMenuBarInFullscreenAct = nullptr;
+    QAction* showMetroAct = nullptr;
+    QAction* enableLinkAct = nullptr;
+    QAction* linkTapTempoAct = nullptr;
+    QAction* scopePausedAct = nullptr;
+    QAction* focusModeAct = nullptr;
+    QAction* checkUpdatesAct = nullptr;
+    QAction* checkUpdatesNowAct = nullptr;
+    QAction* findAct = nullptr;
+    QAction* findNextAct = nullptr;
+    QAction* findPrevAct = nullptr;
+    QAction* showEditorToolbarAct = nullptr;
 #ifdef Q_OS_MAC
-    QAction *syphonPublishAct;
-    QAction *syphonShowCursorAct;
+    QAction *syphonPublishAct = nullptr;
+    QAction *syphonShowCursorAct = nullptr;
 #endif
 #ifdef Q_OS_WIN
-    QAction *spoutPublishAct;
-    QAction *spoutShowCursorAct;
+    QAction *spoutPublishAct = nullptr;
+    QAction *spoutShowCursorAct = nullptr;
 #endif
+
+    // Graphics output controls. The feature itself lives in app/gui/graphics/,
+    // independent of the GUI; these are its menu and toolbar entry points.
+    QAction *graphicsOutAct;
+    QAction *graphicsFullscreenAct;
+#ifdef Q_OS_WIN
+    // Publishes the graphics OUTPUT (the picture) as a Spout sender - not the same as spoutPublishAct
+    // above, which publishes the application window.
+    QAction *graphicsSpoutAct;
+#endif
+    // Re-reads the shader files from disk. They live outside the binary so they
+    // can be edited and reloaded without a rebuild.
+    QAction *graphicsReloadShaderAct;
+    // The graphics debug preview: the same picture smaller, with the render thread's
+    // numbers over it. A separate window rather than a pane here, so that nothing about
+    // rendering lives in this class - see showGraphicsPreview().
+    QAction *graphicsPreviewAct;
+    // Open the shader editor. Not a checkable show/hide toggle like the output windows: it is a
+    // development tool opened when the shader is to be changed, and a tick mark on it would be one more
+    // piece of state to keep in step with reality for no benefit.
+    QAction *graphicsShaderAct = nullptr;
+    // The shader editor, created lazily and owned here. Null until first opened.
+    SonicPi::ShaderBufferWindow* graphicsShaderWindow = nullptr;
+    // Open, or bring forward, the shader editor.
+    void showShaderBuffer();
+    // Output resolution and frame rate, as submenus of the Graphics menu.
+    //
+    // A submenu in the menu that already exists, rather than a settings pane or a
+    // preferences page: these are two values with a short list of sensible choices each, and
+    // the point of the feature is to change them while watching the picture and the frame
+    // rate. Opening a dialog to do that would hide the thing being judged.
+    //
+    // Owned by the menu; the check state is rebuilt from GraphicsSettings when the menu is
+    // about to be shown, so a hand-edited graphics.ini is reflected rather than contradicted.
+    QMenu *graphicsResolutionMenu = nullptr;
+    QMenu *graphicsFrameRateMenu = nullptr;
+    // Applies the resolution and frame rate the menu, or a hand-edited file, now asks for.
+    // Called when the menu opens, so a change made outside the running app is adopted.
+    void applyGraphicsConfig();
+    // Rebuild the tick marks from what is actually configured.
+    void syncGraphicsConfigMenu();
+    // Ask for an output resolution in WxH form. Presets cover the common cases; this is for
+    // the exact native resolution of a projector, LED processor or display, which is the
+    // number that actually matters when the output is mapped onto hardware.
+    void askForCustomResolution();
+    // Ask for a frame rate in Hz. Same rule: a positive integer, with a safety ceiling.
+    void askForCustomFrameRate();
+
+    // The output window, created lazily on first show and owned here.
+    SonicPi::GraphicsWindow* graphicsWindow = nullptr;
+    // The debug preview window, likewise. It is a real consumer of the same handoff, not
+    // a viewer of the output window.
+    SonicPi::GraphicsPreviewWindow* graphicsPreviewWindow = nullptr;
+    // Not owned. Set by main() once the render thread is started; see
+    // setGraphicsRenderThread().
+    SonicPi::GraphicsRenderThread* graphicsRenderThread = nullptr;
+    // Not owned either. The shared handover point between the render thread and the
+    // output window; see setGraphicsSharedFrame().
+    SonicPi::GraphicsSharedFrameSlot* graphicsSharedFrame = nullptr;
 #if defined(Q_OS_MAC) || defined(Q_OS_WIN)
-    QAction *recordShowCursorAct;
-    QAction *recordFlashIconAct;
+    QAction *recordShowCursorAct = nullptr;
+    QAction *recordFlashIconAct = nullptr;
     // Shared by the IO menubar submenu, the rec-button right-click
     // menu, and (via setRecordingMode) the Preferences radios.
-    QAction *recAudioModeAct;
-    QAction *recAudioVideoModeAct;
+    QAction *recAudioModeAct = nullptr;
+    QAction *recAudioVideoModeAct = nullptr;
     // Per-recording temp file; renamed or removed on stop.
     QString m_videoTempPath;
 #endif
-    QShortcut *textLeftSc, *escapeSc, *escape2Sc;
-    QActionGroup* langActionGroup;
+    QShortcut* textLeftSc = nullptr;
+    QShortcut* escapeSc = nullptr;
+    QShortcut* escape2Sc = nullptr;
+    QActionGroup* langActionGroup = nullptr;
 
-    SettingsWidget* settingsWidget;
+    SettingsWidget* settingsWidget = nullptr;
 
-    QCheckBox* studio_mode;
-    QLineEdit* user_token;
+    QCheckBox* studio_mode = nullptr;
+    QLineEdit* user_token = nullptr;
 
-    InfoWidget* infoWidg;
+    InfoWidget* infoWidg = nullptr;
     QList<QTextBrowser*> infoPanes;
-    QVBoxLayout* mainWidgetLayout;
+    QVBoxLayout* mainWidgetLayout = nullptr;
 
     QList<QListWidget*> helpLists;
     QHash<QString, help_entry> helpKeywords;
-    std::streambuf* coutbuf;
+    std::streambuf* coutbuf = nullptr;
     std::ofstream stdlog;
 
-    ScintillaAPI* autocomplete;
+    ScintillaAPI* autocomplete = nullptr;
 #ifdef QT_OLD_API
     QString fetch_url_path, sample_path, log_path, sp_user_path, sp_user_tmp_path, ruby_server_path, ruby_path, server_error_log_path, server_output_log_path, gui_log_path, init_script_path, exit_script_path, tmp_file_store, process_log_path, port_discovery_path;
 #endif
@@ -904,14 +1212,14 @@ private:
     QString latest_version;
     int latest_version_num;
 
-    ThinSplitter* docsplit;
+    ThinSplitter* docsplit = nullptr;
 
-    QLabel* versionLabel;
+    QLabel* versionLabel = nullptr;
     bool tmpFileStoreAvailable;
     bool updated_dark_mode_for_help, updated_dark_mode_for_prefs;
     int guiID;
 
-    SonicPi::ScopeWindow* scopeWindow;
+    SonicPi::ScopeWindow* scopeWindow = nullptr;
     // Levels-only duplicate embedded in the audio preferences Level box.
     SonicPi::ScopeWindow* levelPrefsScope = nullptr;
     std::shared_ptr<SonicPi::QtAPIClient> m_spClient;

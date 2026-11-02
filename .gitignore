@@ -177,3 +177,6 @@ install/windows/vcredist_*.exe
 # prefix so we control the macOS deployment target. Build output and
 # source tarball cache live here; not tracked.
 app/external/openssl-build/
+
+# The dev build's own Sonic Pi home, created by run-dev.cmd
+sp-dev-home/
