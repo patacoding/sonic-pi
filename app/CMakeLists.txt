@@ -103,6 +103,7 @@ if(WIN32)
 endif()
 add_subdirectory(api)
 add_subdirectory(api-tests)
+add_subdirectory(sharelink)
 add_subdirectory(gui)
 add_subdirectory(gui-tests)
 

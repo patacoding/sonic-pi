@@ -339,16 +339,12 @@ QMenuBar::item:selected {
     color: menuSelectedTextColor;
 }
 
-/* Dock separators: geometry only. DividerProxyStyle (dividerproxystyle.h) paints
-   them — a thin centre line at rest, full thickness on hover — to match the
-   custom QSplitter handles (thinsplitter.h). Declare no background, border or
-   image here: any drawable property makes Qt's stylesheet style claim the
-   separator and paint it flat, and the base style is then never reached. */
-QMainWindow::separator
-{
-    width: 7dx;    /* vertical separators */
-    height: 7dx;   /* horizontal separators */
-}
+/* Dock separators: no rule here. DividerProxyStyle (dividerproxystyle.h) gives
+   them their thickness, Divider::kExtent as every divider's, and paints them —
+   a thin centre line at rest, full thickness on hover — as the custom QSplitter
+   handles (thinsplitter.h). A width here would be a second thickness (a dx one
+   came out a pixel wider than the splitters'), and any drawable property makes
+   Qt's stylesheet style claim the separator and paint it flat. */
 
 QMainWindow
 {
@@ -1700,6 +1696,97 @@ QPushButton#confirmPrimary
 QPushButton#confirmPrimary:hover
 {
     background: accentHoverColor;
+}
+
+/* ── Share (widgets/sharepanel.cpp): the web's Share panel (app/web/app/src/style.css .sm-*) in the theme's own
+   roles. The panel, its tabs, its card and the four ways are painted there; their words and fields are here, their
+   sizes there (the house's Base and Small, ApplyFontRole: a stylesheet size would stop the zoom). ── */
+
+#sharePanel QLabel
+{
+    background: transparent;
+    color: windowForegroundColor;
+}
+
+QLabel#shareStep
+{
+    color: mutedForegroundColor;
+    font-weight: bold;
+    letter-spacing: 1px;
+}
+
+QLabel#shareAbout
+{
+    color: softForegroundColor;
+}
+
+QLabel#shareAbout[said="true"]
+{
+    color: windowForegroundColor;
+    font-weight: 600;
+}
+
+QLabel#shareFieldLabel
+{
+    color: mutedForegroundColor;
+    font-weight: bold;
+    letter-spacing: 1px;
+}
+
+QLabel#shareFieldHint, QLabel#shareQrNote, QLabel#shareLinkNote
+{
+    color: mutedForegroundColor;
+}
+
+QLineEdit#shareName, QPlainTextEdit#shareDescription
+{
+    padding: 4px 6px;
+    border: 1px solid windowBorderColor;
+    border-radius: 4px;
+    background: editorBackgroundColor;
+    color: windowForegroundColor;
+}
+
+QLineEdit#shareName
+{
+    font-weight: 600;
+}
+
+QLineEdit#shareName:focus, QPlainTextEdit#shareDescription:focus
+{
+    border: 1px solid highlightedBackgroundColor;
+}
+
+QPlainTextEdit#shareLinkText
+{
+    padding: 4px 6px;
+    border: 1px solid windowBorderColor;
+    border-radius: 8px;
+    background: subtleFillColor;
+    color: windowForegroundColor;
+    font-family: 'Hack';
+}
+
+QPushButton#shareLarger, QPushButton#shareSaveImage
+{
+    padding: 5px 12px;
+    border: 1px solid windowBorderColor;
+    border-radius: 8px;
+    background: transparent;
+    color: windowForegroundColor;
+}
+
+QPushButton#shareLarger:hover, QPushButton#shareSaveImage:hover
+{
+    border-color: highlightedBackgroundColor;
+    color: highlightedBackgroundColor;
+}
+
+QPushButton#shareLarger[primary="true"], QPushButton#shareLarger[primary="true"]:hover
+{
+    border-color: highlightedBackgroundColor;
+    background: highlightedBackgroundColor;
+    color: accentContrastTextColor;
 }
 
 

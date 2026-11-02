@@ -17,10 +17,14 @@
 #include <QColor>
 #include <QCursor>
 #include <QEvent>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPaintEvent>
 #include <QRect>
+#include <QSize>
 #include <QWidget>
+
+#include <functional>
 
 // THE divider: one painter for every divider in the GUI. A wide grab band
 // (kExtent, so a pointer finds it) that paints only a thin centred line at
@@ -38,6 +42,21 @@ namespace Divider
 // line on macOS's sub-1.0 display scale.
 constexpr int kExtent = 7;   // the grab band
 constexpr int kLine = 2;     // the resting line
+
+// The grip on a divider: the web's 36x16 pill, in the band's own fixed px,
+// lying along its divider. Display-scaled, its thickness came out different
+// across a vertical divider from a horizontal one (the two axes scale apart)
+// and barely thicker than the band, so lit in the band's colour its shape was
+// lost; at 16 it stands clear of the 7px band either side, as the web's of its
+// 6px one.
+constexpr int kGripLength = 36;
+constexpr int kGripThickness = 16;
+
+// bar is the way the divider runs (Horizontal between stacked panes).
+inline QSize gripSize(Qt::Orientation bar)
+{
+    return bar == Qt::Horizontal ? QSize(kGripLength, kGripThickness) : QSize(kGripThickness, kGripLength);
+}
 
 // bg blends the band with the panes beside it; line is the resting centre
 // line; hover fills the whole band when pointed at.
@@ -81,9 +100,16 @@ inline void paint(QPainter& p, const QRect& r, Qt::Orientation bar, bool hover, 
 // the paint, QDockAreaLayoutInfo::paintSeparators' `!item.hasFixedSize(o)`.
 // Laid over that very rect, it is the one divider to the pixel, hover
 // included; setForcedHover lets the grip on it reveal it as one control.
+// And a control it is, as the web's drawer divider is: a left-button drag
+// goes to the owner's handler, phase by phase with the pointer's global
+// position, and the owner says what it means (MainWindow::helpDividerDragged:
+// the panel back from away, or beside the code from full size).
 class DividerOverlay : public QWidget
 {
 public:
+    enum class Drag { Press, Move, Release };
+    using DragHandler = std::function<void(Drag, const QPoint& global)>;
+
     explicit DividerOverlay(Qt::Orientation bar, QWidget* parent = nullptr)
         : QWidget(parent), m_bar(bar)
     {
@@ -93,8 +119,30 @@ public:
     void setColours(const Divider::Colours& c) { m_colours = c; update(); }
     void setForcedHover(bool v) { if (m_forcedHover != v) { m_forcedHover = v; update(); } }
     Qt::Orientation bar() const { return m_bar; }
+    void setDragHandler(DragHandler handler)
+    {
+        m_onDrag = std::move(handler);
+        setCursor(m_onDrag ? (m_bar == Qt::Horizontal ? Qt::SplitVCursor : Qt::SplitHCursor) : Qt::ArrowCursor);
+    }
 
 protected:
+    void mousePressEvent(QMouseEvent* e) override
+    {
+        if (!m_onDrag || e->button() != Qt::LeftButton) { QWidget::mousePressEvent(e); return; }
+        m_dragging = true;
+        m_onDrag(Drag::Press, e->globalPosition().toPoint());
+    }
+    void mouseMoveEvent(QMouseEvent* e) override
+    {
+        if (!m_dragging) { QWidget::mouseMoveEvent(e); return; }
+        m_onDrag(Drag::Move, e->globalPosition().toPoint());
+    }
+    void mouseReleaseEvent(QMouseEvent* e) override
+    {
+        if (!m_dragging || e->button() != Qt::LeftButton) { QWidget::mouseReleaseEvent(e); return; }
+        m_dragging = false;
+        m_onDrag(Drag::Release, e->globalPosition().toPoint());
+    }
     bool event(QEvent* e) override
     {
         switch (e->type())
@@ -121,6 +169,8 @@ protected:
 private:
     Qt::Orientation m_bar;
     Divider::Colours m_colours;
+    DragHandler m_onDrag;
+    bool m_dragging = false;
     bool m_hover = false;
     bool m_forcedHover = false;
 };

@@ -83,6 +83,7 @@ set(SUPERSONIC_FORWARD_ARGS "")
 foreach(opt
     CLOCKWORK_SYSTEM_ZLIB
     CLOCKWORK_SYSTEM_STB
+    CLOCKWORK_SYSTEM_SAMPLERATE
     CLOCKWORK_CARGO_OFFLINE
     CLOCKWORK_PLUGIN_BRIDGE_DIR
     FETCHCONTENT_FULLY_DISCONNECTED
@@ -93,8 +94,7 @@ foreach(opt
 endforeach()
 
 # SuperSonic — BUILD_ALWAYS ensures source changes are picked up
-# without needing to manually delete stamp files. (SONIC_PI_GUI_ONLY clears
-# it; see the block above.)
+# without needing to manually delete stamp files.
 # SOURCE_DIR is the supersonic submodule (see cmake/supersonic.cmake, which
 # also names the engine and its bridge). It is scsynth hosted on clockwork
 # (AGPL-3.0-or-later, or a commercial licence — see clockwork/LICENSE), which
@@ -105,22 +105,29 @@ endforeach()
 # and plugin hosting is CLOCKWORK_PLUGINS.
 include(${CMAKE_CURRENT_LIST_DIR}/../cmake/supersonic.cmake)
 
-# BUILD_ALWAYS is what makes an edit under app/external/... visible without
-# deleting stamp files, and it is the reason a no-change build still re-enters
-# the nested CMake + cargo build. SONIC_PI_GUI_ONLY (see app/CMakeLists.txt)
-# turns it off for GUI-only iterations, where nothing the engine is built from
-# can have changed: the stamps then make this project a no-op. A tree that has
-# never built the engine still builds it here, because the stamps are missing -
-# so this cannot produce a half-built tree, only a stale engine, and only after
-# an engine edit that a GUI-only build is explicitly not promising to see.
-#
-# OURS, and upstream has nothing equivalent: it is what makes win-build-gui-only.bat
-# a GUI-only build in the first place rather than a full engine rebuild. See
-# docs/dev-discipline.md 4.2.
-if(SONIC_PI_GUI_ONLY)
-    set(SUPERSONIC_BUILD_ALWAYS OFF)
+# libsamplerate for the GUI's session recorder (gui/platform/recorder_audio_rate),
+# which brings a fast device's audio down to a rate the AAC encoders take: the
+# copy clockwork vendors (clockwork/src/vendor/libsamplerate, CLOCKWORK.md
+# there), compiled as clockwork compiles it, or the system's under
+# CLOCKWORK_SYSTEM_SAMPLERATE, which the engine's build takes too (forwarded
+# above).
+option(CLOCKWORK_SYSTEM_SAMPLERATE "Use the system libsamplerate (pkg-config: samplerate) instead of clockwork's vendored copy" OFF)
+if(CLOCKWORK_SYSTEM_SAMPLERATE)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SAMPLERATE REQUIRED IMPORTED_TARGET GLOBAL samplerate)
+    add_library(sp_samplerate INTERFACE)
+    target_link_libraries(sp_samplerate INTERFACE PkgConfig::SAMPLERATE)
 else()
-    set(SUPERSONIC_BUILD_ALWAYS ON)
+    set(SP_SAMPLERATE_DIR ${SUPERSONIC_SOURCE_DIR}/clockwork/src/vendor/libsamplerate)
+    add_library(sp_samplerate STATIC
+        ${SP_SAMPLERATE_DIR}/src/samplerate.c
+        ${SP_SAMPLERATE_DIR}/src/src_sinc.c
+        ${SP_SAMPLERATE_DIR}/src/src_linear.c
+        ${SP_SAMPLERATE_DIR}/src/src_zoh.c)
+    target_compile_definitions(sp_samplerate PRIVATE
+        ENABLE_SINC_MEDIUM_CONVERTER HAVE_STDBOOL_H PACKAGE="libsamplerate" VERSION="0.2.2")
+    target_include_directories(sp_samplerate PUBLIC ${SP_SAMPLERATE_DIR}/include)
+    set_target_properties(sp_samplerate PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
 # VST3 + CLAP hosting, on plugin tracks: off until Sonic Pi ships it, so a
@@ -130,11 +137,6 @@ endif()
 # reads it from this build's cache to know whether the bridge must ship. The
 # SDKs are fetched at configure time, and Debian ships neither: the package
 # build (packaging/debian/rules) says off too.
-#
-# NOTE FOR THIS FORK: our Windows tree asks for it explicitly - build-dev.cmd
-# passes -DCLOCKWORK_PLUGINS=ON - because plugins on plugin tracks are a feature
-# we use. Relying on this default would silently drop the plugin bridge, the
-# Tracks tab and the track functions from the next clean build.
 option(CLOCKWORK_PLUGINS "Host VST3 and CLAP plugins in the engine (fetches the SDKs at configure time)" OFF)
 #
 # PREFIX and BINARY_DIR are deliberately SHORT, and on Windows that is not
@@ -155,7 +157,7 @@ ExternalProject_Add(supersonic
     SOURCE_DIR ${SUPERSONIC_SOURCE_DIR}
     BINARY_DIR ${CMAKE_BINARY_DIR}/ss/b
     DOWNLOAD_COMMAND ""
-    BUILD_ALWAYS ${SUPERSONIC_BUILD_ALWAYS}
+    BUILD_ALWAYS ON
     CMAKE_ARGS
         -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
         -DBUILD_TESTS=OFF

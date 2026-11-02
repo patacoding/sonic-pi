@@ -1,31 +1,31 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// The Share button's panel: what to share, then how. What: the buffer showing, or the whole set (sets.js), the
-// buffer by default. How: its link (share.js) copied to the clipboard, as a QR code to scan or save, or shown to
-// copy by hand where the clipboard is out of reach; or saved as a file, a buffer as .txt and a set as .sonicpi,
+// Save and Share, the panel of its button: what to share, then how. What: the buffer showing, or the whole set
+// (sets.js), the buffer by default. How: its link (share.js) copied to the clipboard, or shown to copy by hand where
+// the clipboard is out of reach, as a QR code to scan or save; or saved as a file, a buffer as .txt and a set as .sonicpi,
 // which native Sonic Pi opens too. A buffer's link is in the address bar as well. The panel stays open: what was
 // done is said in place (the button a tick, and a line under it), and what each kind of thing is, under the choice.
 //
 // A QR code carries the link's digits form (share.js encodeDigits) in the code's numeric mode, a third more than
-// the text link would hold, and stops at a size a phone reads off a screen (QR_MAX): past it, it says so and points
-// at the link or the file, rather than show a code too dense to scan.
+// the text link would hold, and stops at a size a phone reads off a screen (share.js qrCode, native's own: past it,
+// it says so and points at the link or the file, rather than show a code too dense to scan.
 import { icon } from "./icons.js";
-import { renderCode } from "./highlight.js";
+import { qrCode } from "./share.js";
 
-const QR_MAX = 25;   // the largest QR version offered: 117×117 modules, still read off a laptop's screen at arm's length, full screen
 const SCAN_MIN = 3;  // CSS px a module needs to be read off a screen by a phone's camera: finer, the panel says to make it larger
 
 /**
  * scopes: { buffer: {...}, set: {...} }, each { icon, kind (its tile's words, e.g. "This buffer"), summary (its name
- * and what it holds, e.g. "drums · 12 lines"), preview (a buffer's first lines), title (the words for it, e.g. "buffer 3"), link() (its text link), qrLink() (its link for
+ * and what it holds, e.g. "drums · 12 lines"), title (the words for it, e.g. "buffer 3"), link() (its text link), qrLink() (its link for
  * a QR code), save() (saves it as a file: its name, or null when put off), fileKind (".txt", ".sonicpi"), about (what
  * it is and what its file opens in), fields ({ name, nameMax, set(name,
  * description) }, and a set's description and descriptionMax: given in the panel above the actions; the name is its
  * file's) }.
  */
+// the link's two ways side by side, then its QR code, then its file
 const ACTS = [
   ["copy", "copy", "Copy link", "Copy its link to the clipboard, ready to paste"],
-  ["qr", "qrcode", "QR code", "Show a QR code, for a phone to scan or to save as an image"],
   ["show", "link", "Show link", "Show the link, to copy by hand"],
+  ["qr", "qrcode", "QR code", "Show a QR code, for a phone to scan or to save as an image"],
   ["file", "download", "Save file", (s) => `Save it as a ${s.fileKind} file`],
 ];
 
@@ -64,7 +64,7 @@ export function createShareMenu({ button, menu, scopes, clipboard, ready = null 
     shut.type = "button"; shut.title = "Close"; shut.setAttribute("aria-label", "Close");
     shut.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M10 10l4 4m0 -4l-4 4"/></svg>';
     shut.addEventListener("click", close);
-    top.append(el("div", "sm-step", "Share"), shut);
+    top.append(el("div", "sm-step", "Save and Share"), shut);
     menu.append(top);
     const what = el("div", "sm-what");
     what.setAttribute("role", "radiogroup");
@@ -122,9 +122,8 @@ export function createShareMenu({ button, menu, scopes, clipboard, ready = null 
     }
     card.append(how);
   }
-  // what it's called, and a set's description or a buffer's first lines, in a box of their own: each labelled, with
-  // what it's for beside the label. Saved as they are typed, the tile's line following the name. The second slot
-  // is the same height either way, so the actions under it stay put.
+  // what it's called, and a set's description, in a box of their own: each labelled, with what it's for beside the
+  // label. Saved as they are typed, the tile's line following the name.
   function fields(f, tileSum, s) {
     const box = el("div", "sm-fields");
     const row = (label, hint, id) => { const r = el("div", "sm-field-head"), l = el("label", "sm-field-label", label); l.htmlFor = id; r.append(l); if (hint) r.append(el("span", "sm-field-hint", hint)); return r; };
@@ -138,16 +137,6 @@ export function createShareMenu({ button, menu, scopes, clipboard, ready = null 
       about.value = f.description; about.maxLength = f.descriptionMax;
       about.placeholder = "Describe this set...";
       box.append(row("Description", "optional", about.id), about);
-    } else {
-      // a buffer: its code, highlighted as the editor has it, from its first line of code (the comments heading it
-      // skipped), scrolling for the rest: what is being shared, at a glance
-      const pre = renderCode(s.preview, el("pre", "sm-field sm-preview"));
-      pre.tabIndex = 0;
-      pre.setAttribute("role", "region");
-      pre.setAttribute("aria-label", "Preview of the buffer's code");
-      const head = el("div", "sm-field-head");
-      head.append(el("span", "sm-field-label", "Preview"));
-      box.append(head, pre);
     }
     let timer = 0;
     const keep = () => { clearTimeout(timer); timer = setTimeout(() => { f.set(name.value, about?.value); tileSum.textContent = s.summary; }, 300); };
@@ -175,10 +164,11 @@ export function createShareMenu({ button, menu, scopes, clipboard, ready = null 
   function close() {
     unlarge();
     if (menu.hidden) return;
+    const focused = menu.contains(document.activeElement);
     menu.hidden = true;
     backdrop.hidden = true;
     button.setAttribute("aria-expanded", "false");
-    button.focus();
+    if (focused) button.focus();   // back where it was; focus that has moved on (another buffer shown, its editor) stays
   }
   async function copy() {
     const s = scopes[scope], url = s.link();
@@ -191,7 +181,6 @@ export function createShareMenu({ button, menu, scopes, clipboard, ready = null 
   }
   // a QR code or the link, shown in the panel in place of its body; the same one pressed again puts the body back
   function show(act) {
-    qrTurn++;   // a QR on its way is for the view it was asked in only
     unlarge();
     const s = scopes[scope];
     const again = menu.querySelector(`.sm-act[data-act=${act}]`)?.getAttribute("aria-pressed") === "true";
@@ -210,21 +199,16 @@ export function createShareMenu({ button, menu, scopes, clipboard, ready = null 
       field.value = url;
       field.rows = 3;
       field.setAttribute("aria-label", "The link");
-      field.addEventListener("focus", () => field.select());
       detailOf.append(field, el("div", "sm-note", `${url.length} characters${scope === "buffer" ? " · the address bar has it too" : ""}`));
       field.focus();
       return;
     }
     view.style.height = "";   // a code takes the panel's width, and the card grows under it
-    const url = s.qrLink();
-    // the QR library, fetched the first time a code is asked for; a view changed before it arrives is left alone
-    const turn = ++qrTurn;
-    loadQR().then(() => { if (turn === qrTurn && !view.hidden) showQR(url, s, room); });
+    showQR(s.qrLink(), s);
   }
-  let qrTurn = 0;
-  function showQR(url, s, room) {
+  function showQR(url, s) {
     const detailOf = view;
-    const qr = makeQR(url);
+    const qr = qrCode(url);
     if (!qr) {
       detailOf.append(el("div", "sm-note", `${scope === "set" ? "this set is" : "this program is"} too big for a QR code a phone can read: copy the link or save it as a file instead`));
       return;
@@ -232,7 +216,7 @@ export function createShareMenu({ button, menu, scopes, clipboard, ready = null 
     // As wide as the panel, or larger: the whole panel, over the dimmed page, as much of the screen as it can have
     // (a big program's code is too fine to scan at the panel's width, and Larger is lit). A click on it, or
     // Larger, makes it so; Smaller, or a click again, puts it back.
-    const n = qr.getModuleCount();
+    const n = qr.size;
     const draw = () => {
       detailOf.replaceChildren();
       menu.classList.toggle("sm-large", large);
@@ -280,28 +264,9 @@ export function createShareMenu({ button, menu, scopes, clipboard, ready = null 
   return { open, close };
 }
 
-let qrcode = null;
-const loadQR = () => (qrcode ? Promise.resolve() : import("qrcode-generator").then((m) => { qrcode = m.default ?? m; }));
-
-// A QR of a link: the address up to the program in the byte mode, the program's digits (share.js encodeDigits,
-// after "#code=N<format>") in the numeric mode. Medium error correction while it fits (a phone reads a marked
-// screen or a creased page), low when only that will hold it; none past QR_MAX.
-export function makeQR(url) {
-  const m = /^(.*#code=N.)(\d+)$/.exec(url);
-  for (const level of ["M", "L"]) {
-    try {
-      const qr = qrcode(0, level);
-      if (m) { qr.addData(m[1], "Byte"); qr.addData(m[2], "Numeric"); } else qr.addData(url, "Byte");
-      qr.make();
-      qr.typeNumber ??= Math.round((qr.getModuleCount() - 17) / 4);
-      if (qr.typeNumber <= QR_MAX) return qr;
-    } catch { /* too long at this level */ }
-  }
-  return null;
-}
-// A code drawn modulePx pixels a module, in white with its quiet zone of 4 modules.
+// A code (share.js qrCode) drawn modulePx pixels a module, in white with its quiet zone of 4 modules.
 function drawQR(qr, modulePx) {
-  const n = qr.getModuleCount(), quiet = 4, px = modulePx * (n + quiet * 2);
+  const n = qr.size, quiet = 4, px = modulePx * (n + quiet * 2);
   const canvas = document.createElement("canvas");
   canvas.className = "sm-qr";
   canvas.width = canvas.height = px;
@@ -318,7 +283,7 @@ function drawQR(qr, modulePx) {
 // Drawn at one size and shown at another, the browser scales it, and a module comes out a pixel wider or narrower
 // here and there: an uneven grid, which a camera reads badly.
 function fitQR(qr, cssSize) {
-  const dpr = window.devicePixelRatio || 1, n = qr.getModuleCount();
+  const dpr = window.devicePixelRatio || 1, n = qr.size;
   const canvas = drawQR(qr, Math.max(1, Math.floor((cssSize * dpr) / (n + 8))));
   canvas.style.width = canvas.style.height = `${canvas.width / dpr}px`;
   return canvas;

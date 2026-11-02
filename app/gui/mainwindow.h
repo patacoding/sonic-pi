@@ -17,13 +17,17 @@
 #include <memory>
 #include <vector>
 
+#include <QPointer>
 #include <QDate>
 #include <QFuture>
 #include <QIcon>
 #include <QJsonObject>
+
+#include "utils/setbundle.h"
 #include <QMainWindow>
 
 #include "model/helppanelmodel.h"
+#include "widgets/divider.h"
 #include "model/sidecolumnmodel.h"
 #include <QSet>
 #include <QSettings>
@@ -45,19 +49,6 @@ class QActionGroup;
 class QMenu;
 class QToolBar;
 class QLineEdit;
-class QTimer;
-
-namespace SonicPi
-{
-// Defined in graphics/ui/GraphicsWindow.h, graphics/ui/GraphicsPreviewWindow.h and
-// graphics/rendering/GraphicsRenderThread.h, all included by the .cpp. Only pointers are
-// held here, so forward declarations keep the OpenGL headers out of this one.
-class GraphicsWindow;
-class GraphicsPreviewWindow;
-class ShaderBufferWindow;
-class GraphicsRenderThread;
-class GraphicsSharedFrameSlot;
-} // namespace SonicPi
 class QsciScintilla;
 class QProcess;
 class QTextEdit;
@@ -67,17 +58,19 @@ class QSlider;
 class QSplitter;
 class QPushButton;
 class ChevronButton;
-class DividerOverlay;
+class DividerLink;
 class QStackedWidget;
 class ThinSplitter;
 class TutorialPane;
 class IconTabWidget;
+class SharePanel;
 
 namespace SonicPi
 {
 class QtAPIClient;
 class SonicPiAPI;
 class ScopeWindow;
+class OverlayPane;
 } // namespace SonicPi
 
 class QShortcut;
@@ -173,16 +166,6 @@ public:
     SonicPiLog* GetIncomingPane() const;
     SonicPiTheme* GetTheme() const;
 
-    // The Graphics render thread, handed over by main() once it has been started.
-    // Held so the output window, which is created lazily on first use, can be given
-    // the handle. Not owned.
-    void setGraphicsRenderThread(SonicPi::GraphicsRenderThread* thread);
-
-    // The slot the render thread publishes frames into and the output window
-    // displays them from. Both must be given the SAME object, so it is owned here
-    // between them. Called by main() alongside setGraphicsRenderThread().
-    void setGraphicsSharedFrame(SonicPi::GraphicsSharedFrameSlot* slot);
-
     void addCuePath(QString path, QString val);
     // True when the job ran from an editor buffer (workspace_*), not the help
     // system's playground/example/card workspaces. Jobs with no recorded
@@ -237,7 +220,10 @@ public:
     void replaceLines(QString id, QString content, int first_line, int finish_line, int point_line, int point_index);
     void runBufferIdx(int idx);
 
-    bool loaded_workspaces;
+    // every buffer's boot load has landed (replaceBuffer): the workspaces may be
+    // saved, and a set opened. Set before the constructor's first event, which
+    // can be a desktop's request to open a set.
+    bool loaded_workspaces = false;
     QSet<QString> initialWorkspaceLoads;
     QString pendingSetPath;
     QString currentSetPath;
@@ -331,6 +317,7 @@ private slots:
     QString shortcutsConfigPath();
     void updateLogAutoScroll();
     bool eventFilter(QObject* obj, QEvent* evt) override;
+    bool event(QEvent* evt) override;         // the release of Qt's own separator drag (helpDragEnded)
     QString asciiArtLogo();
     void printAsciiArtLogo();
     void runCode();
@@ -406,27 +393,27 @@ private slots:
     bool saveSetToPath(const QString& path);
     void clearAllBuffers();
     void loadSetFromFile(const QString& path);
+    bool replaceAllBuffers(const SonicPi::SetBundle::Load& set, const QString& name);
+    void openLink(const QString& link);
+    void askForLink();
+    void share();
+    QString currentSetName() const;
+    // Buffers' names, as the web's: a buffer's own (the file it was loaded from, the set it came in, or the one given
+    // it in Share), else buffer_<i>. Kept with the settings; a set carries them in its file (SetBundle names).
+    QString bufferName(int i) const;
+    QVector<QString> bufferNames() const;   // ten, "" where a buffer has none of its own
+    void setBufferName(int i, const QString& name);
+    void setBufferNames(const QVector<QString>& names);
+    QJsonObject setMeta() const;            // the set's meta as it is written: its buffers' names in it
     void rememberRecentSet(const QString& path);
     void updateRecentSetsMenu();
     // OS open-file requests (Finder double-click, argv); deferred until the
     // workspaces have loaded so the replace confirm can still fire.
     void openSetPath(const QString& path);
-    bool confirmAction(const QString& text, const QString& informativeText, const QString& confirmLabel);
+    bool confirmAction(const QString& text, const QString& informativeText, const QString& confirmLabel, QWidget* field = nullptr);
     void about();
     void scope();
     void toggleScope();
-    // Graphics output feature. The rendering itself lives in app/gui/graphics/
-    // and is deliberately independent of the GUI; these are only the controls
-    // that surface it.
-    void showGraphicsOutput(bool on);
-    // Show or hide the graphics debug preview. Not a pane in this window: see the
-    // definition for why that distinction is load-bearing rather than cosmetic.
-    void showGraphicsPreview(bool on);
-    void graphicsVisibilityChanged();
-
-    // Mirrors one Graphics log entry into the log pane. Invoked on the GUI
-    // thread even when the entry was written from the render thread.
-    void appendGraphicsLog(int level, const QString& message);
     void showScopeLabelsMenuChanged();
     void toggleIcons();
     void help();
@@ -744,10 +731,6 @@ private:
     QMenu* examplesMenu = nullptr;
     QMenu* audioMenu = nullptr;
     QMenu* displayMenu = nullptr;
-    // The Graphics menu is ours (the Shadertoy-style multi-pass feature); upstream has no such menu.
-    // Kept in upstream's per-line nullptr form rather than the old single packed declaration, so a future
-    // upstream change to this block merges as a one-line addition instead of a conflict.
-    QMenu* graphicsMenu = nullptr;
     QMenu* viewMenu = nullptr;
     QMenu* focusMenu = nullptr;
     QMenu* tabMenu = nullptr;
@@ -835,6 +818,7 @@ private:
     QWidget* docsPane = nullptr;      // the southTabs page: pill row + docsplit
     QWidget* docsPillRow = nullptr;
     QVector<QPushButton*> docsPills;
+    QWidget* helpPaneHolder = nullptr;
     IconTabWidget* southTabs = nullptr;
 
     SonicPiLog* outputPane = nullptr;
@@ -849,7 +833,8 @@ private:
     int m_errorJumpCol = 0;
     QDockWidget* outputWidget = nullptr;
     QDockWidget* incomingWidget = nullptr;
-    QWidget* prefsWidget = nullptr;
+    SonicPi::OverlayPane* prefsWidget = nullptr;
+    QPointer<SharePanel> sharePanel;   // while it is open
 
     QDockWidget* hudWidget = nullptr;
     QDockWidget* docWidget = nullptr;
@@ -859,8 +844,16 @@ private:
     ChevronButton* helpFullButton = nullptr;
     ChevronButton* helpHideButton = nullptr;
     QWidget*     helpChevrons = nullptr;      // the two grips, laid over the dock separator (positionHelpChevrons)
-    QDockWidget* helpAwayDock = nullptr;
-    DividerOverlay* helpAwayDivider = nullptr; // the divider painted over the separator Qt reserves beside it     // a 1px placeholder in the bottom area while the help is away: its separator is the divider, the way back
+    QDockWidget* helpAwayDock = nullptr;      // a 1px placeholder in the bottom area while the help is away: its separator is the divider, the way back
+    // The divider painted where Qt lays none out: over the separator it
+    // reserves beside the placeholder while the panel is away, and along the
+    // top of a full-size panel, which has no separator at all. A drag on it
+    // moves the panel (helpDividerDragged); while that drag runs it stays
+    // over the separator so the pointer is never let go of.
+    DividerOverlay* helpDividerOverlay = nullptr;
+    bool m_helpDividerDrag = false;           // a drag on the overlay has the panel beside the code and is sizing it
+    bool m_helpSeparatorDrag = false;         // Qt's own separator above the panel is being dragged
+    int  m_helpDragFromY = 0;                 // where a drag on the overlay began (global)
     // The help panel's one state (model/helppanelmodel.h): the Help icon, the
     // grips, the menu items and focus mode all move it, and applyHelpPanel
     // puts it on screen. Nothing else shows or hides the dock.
@@ -873,6 +866,11 @@ private:
     void helpFull();                          // the up grip
     void helpShow();                          // a pane asked for: beside the code if it was away
     void applyHelpPanel();                    // the dock, the editor's room, the icon, the grips and the bar, from the state
+    void updateHelpGripLabels();              // the hide grip's tooltip and accessible name, from the state (HelpPanelModel::hideGripAction)
+    void helpDividerDragged(DividerOverlay::Drag phase, const QPoint& global);   // the overlay's drag: reveal, or back beside the code, then size
+    void helpDragEnded();                     // any drag on the divider let go: to the foot puts the panel away
+    int  helpSnapHeight() const;              // the height at or under which a drag let go puts the panel away
+    int  helpHeightFor(const QPoint& global) const;   // the panel height a pointer at `global` asks for
     // The column beside the code (scope, log, cues, metronome): one state
     // (model/sidecolumnmodel.h) moved by the grip on its divider; the panes'
     // own settings stay the View menu's.
@@ -883,6 +881,15 @@ private:
     void sideToggle();
     void applySideColumn();                   // the panes, the grip and the bar, from the state and the settings
     void positionSideGrip();                  // over the divider at its top, or over the bar
+    // Each divider with grips lights with them as one control: the overlay
+    // standing in for it, or Qt's own separator, at m_helpBar / m_sideBar
+    // (empty while it has none), which the window watches for the pointer.
+    DividerLink* m_helpLink = nullptr;
+    DividerLink* m_sideLink = nullptr;
+    QRect m_helpBar;
+    QRect m_sideBar;
+    void lightDivider(const DividerLink* link, DividerOverlay* overlay, const QRect& bar, bool on);
+    void placeDividerBar(DividerLink* link, DividerOverlay* overlay, QRect& bar, const QRect& now);
 
     ZoomBar* logsZoom = nullptr;             // Logs/Debug tab text-size controls in the title row
     ZoomBar* debugZoom = nullptr;
@@ -1024,6 +1031,8 @@ private:
     QAction* saveSetAct = nullptr;
     QAction* saveSetAsAct = nullptr;
     QAction* clearAllBuffersAct = nullptr;
+    QAction* shareAct = nullptr;
+    QAction* openLinkAct = nullptr;
     QAction* recAct = nullptr;
     QAction* textAlignAct = nullptr;
     QAction* textCommentAct = nullptr;
@@ -1111,65 +1120,6 @@ private:
     QAction *spoutPublishAct = nullptr;
     QAction *spoutShowCursorAct = nullptr;
 #endif
-
-    // Graphics output controls. The feature itself lives in app/gui/graphics/,
-    // independent of the GUI; these are its menu and toolbar entry points.
-    QAction *graphicsOutAct;
-    QAction *graphicsFullscreenAct;
-#ifdef Q_OS_WIN
-    // Publishes the graphics OUTPUT (the picture) as a Spout sender - not the same as spoutPublishAct
-    // above, which publishes the application window.
-    QAction *graphicsSpoutAct;
-#endif
-    // Re-reads the shader files from disk. They live outside the binary so they
-    // can be edited and reloaded without a rebuild.
-    QAction *graphicsReloadShaderAct;
-    // The graphics debug preview: the same picture smaller, with the render thread's
-    // numbers over it. A separate window rather than a pane here, so that nothing about
-    // rendering lives in this class - see showGraphicsPreview().
-    QAction *graphicsPreviewAct;
-    // Open the shader editor. Not a checkable show/hide toggle like the output windows: it is a
-    // development tool opened when the shader is to be changed, and a tick mark on it would be one more
-    // piece of state to keep in step with reality for no benefit.
-    QAction *graphicsShaderAct = nullptr;
-    // The shader editor, created lazily and owned here. Null until first opened.
-    SonicPi::ShaderBufferWindow* graphicsShaderWindow = nullptr;
-    // Open, or bring forward, the shader editor.
-    void showShaderBuffer();
-    // Output resolution and frame rate, as submenus of the Graphics menu.
-    //
-    // A submenu in the menu that already exists, rather than a settings pane or a
-    // preferences page: these are two values with a short list of sensible choices each, and
-    // the point of the feature is to change them while watching the picture and the frame
-    // rate. Opening a dialog to do that would hide the thing being judged.
-    //
-    // Owned by the menu; the check state is rebuilt from GraphicsSettings when the menu is
-    // about to be shown, so a hand-edited graphics.ini is reflected rather than contradicted.
-    QMenu *graphicsResolutionMenu = nullptr;
-    QMenu *graphicsFrameRateMenu = nullptr;
-    // Applies the resolution and frame rate the menu, or a hand-edited file, now asks for.
-    // Called when the menu opens, so a change made outside the running app is adopted.
-    void applyGraphicsConfig();
-    // Rebuild the tick marks from what is actually configured.
-    void syncGraphicsConfigMenu();
-    // Ask for an output resolution in WxH form. Presets cover the common cases; this is for
-    // the exact native resolution of a projector, LED processor or display, which is the
-    // number that actually matters when the output is mapped onto hardware.
-    void askForCustomResolution();
-    // Ask for a frame rate in Hz. Same rule: a positive integer, with a safety ceiling.
-    void askForCustomFrameRate();
-
-    // The output window, created lazily on first show and owned here.
-    SonicPi::GraphicsWindow* graphicsWindow = nullptr;
-    // The debug preview window, likewise. It is a real consumer of the same handoff, not
-    // a viewer of the output window.
-    SonicPi::GraphicsPreviewWindow* graphicsPreviewWindow = nullptr;
-    // Not owned. Set by main() once the render thread is started; see
-    // setGraphicsRenderThread().
-    SonicPi::GraphicsRenderThread* graphicsRenderThread = nullptr;
-    // Not owned either. The shared handover point between the render thread and the
-    // output window; see setGraphicsSharedFrame().
-    SonicPi::GraphicsSharedFrameSlot* graphicsSharedFrame = nullptr;
 #if defined(Q_OS_MAC) || defined(Q_OS_WIN)
     QAction *recordShowCursorAct = nullptr;
     QAction *recordFlashIconAct = nullptr;

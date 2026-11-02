@@ -16,21 +16,11 @@
 // (pulled from supersonic's shm_audio_buffer) into a fragmented .mp4
 // (H.264 + AAC) via Media Foundation's IMFSinkWriter.
 
-// windows.h's min/max macros collide with std::min in recorder_audio_mix.h - same reason and same fix as
-// app/gui/widgets/settingswidget.cpp:36 and app/gui/graphics/rendering/GraphicsPacer.cpp:22.
-//
-// STILL OURS, and still needed: upstream added the include below (0784e6248) but not this. That header is
-// the only place upstream calls std::min, and on Windows it arrives after windows.h, so without this the
-// build stops at "error C2589: '(': illegal token on right side of '::'". If upstream ever sets NOMINMAX
-// somewhere that covers this file, this goes.
-#ifndef NOMINMAX
-#  define NOMINMAX
-#endif
-
 #include "windows.h"
 #include "wgc_d3d_interop.h"
 #include "mp4_soft_remux.h"
 #include "recorder_audio_mix.h"
+#include "recorder_audio_rate.h"
 
 #include <d3d11_4.h>
 #include <windows.graphics.capture.interop.h>
@@ -62,6 +52,9 @@
 
 namespace {
 
+using SonicPi::wgc::AllocCropTexture;
+using SonicPi::wgc::ClientBoxOf;
+using SonicPi::wgc::CopyCrop;
 using SonicPi::wgc::CreateDirect3DDevice;
 using SonicPi::wgc::GetFrameTexture;
 
@@ -110,6 +103,10 @@ public:
         m_audioReader     = std::move(audio);
         // The stereo mix, however wide the device (recorder_audio_mix.h).
         m_audioChannels   = SonicPi::recordedChannels(m_audioReader.channels());
+        // At the recording's rate, and on its clock: the tap runs at the
+        // device's rate, which may not be the file's (recorder_audio_rate.h).
+        if (m_audioReader.valid() && m_audioChannels > 0)
+            m_audio = std::make_unique<SonicPi::RecordedAudio>(m_audioReader.sample_rate(), m_audioChannels);
 
         // MFStartup is refcounted; balanced by MFShutdown in Stop().
         HRESULT hr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
@@ -163,6 +160,7 @@ public:
 
         RECORDER_LOG("recording HWND " << hwnd << " to "
                      << WideToUtf8(m_filePath) << " ("
+                     << m_box.width << "x" << m_box.height << " of the window's "
                      << m_size.Width << "x" << m_size.Height << ")");
         return true;
     }
@@ -333,6 +331,19 @@ private:
             RECORDER_LOG("window has zero size — minimised? aborting");
             return false;
         }
+        // The file shows the app, not the window chrome: the client area's
+        // box of the captured frame (capture_crop.h), at even dimensions as
+        // H.264 wants. The whole frame when there is no client area.
+        m_box = ClientBoxOf(hwnd, m_size);
+        if (m_box.empty()) {
+            m_box = { 0, 0, (unsigned)m_size.Width, (unsigned)m_size.Height };
+        }
+        m_box.width &= ~1u;
+        m_box.height &= ~1u;
+        if (m_box.empty()) {
+            RECORDER_LOG("window has no area to record; aborting");
+            return false;
+        }
 
         m_framePool = winrt::Direct3D11CaptureFramePool::CreateFreeThreaded(
             m_winrtDevice,
@@ -349,8 +360,8 @@ private:
 
     bool BuildVideoOutputType(winrt::com_ptr<IMFMediaType>& out)
     {
-        const UINT32 w = (UINT32)m_size.Width;
-        const UINT32 h = (UINT32)m_size.Height;
+        const UINT32 w = m_box.width;
+        const UINT32 h = m_box.height;
         // Bitrate model copied from recorder.mm: width*height*60*4 / 100
         // — ~4% of raw BGRA bandwidth, which lands around 8 Mbps at
         // 1080p60 and 32 Mbps at 4K60. Good quality without bloating
@@ -372,14 +383,14 @@ private:
     {
         if (FAILED(MFCreateMediaType(out.put()))) return false;
         // 192 kbps — highest the MS AAC encoder MFT supports for
-        // 2-channel @ 48000 Hz (the documented set is 96/128/160/192).
+        // 2-channel at 44.1 or 48 kHz (the documented set is 96/128/160/192).
         // recorder.mm uses 256 kbps because the macOS AAC encoder
         // accepts a broader range; we can't match that on Windows.
         constexpr UINT32 kAacBytesPerSec = 24000;
         out->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
         out->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC);
         out->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
-        out->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, SHM_AUDIO_SAMPLE_RATE);
+        out->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, m_audio->rate());
         out->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, m_audioChannels);
         out->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, kAacBytesPerSec);
         out->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 1);
@@ -402,7 +413,7 @@ private:
         if (!BuildVideoOutputType(videoOut)) return false;
 
         winrt::com_ptr<IMFMediaType> audioOut;
-        if (m_audioReader.valid()) {
+        if (m_audio) {
             if (!BuildAudioOutputType(audioOut)) {
                 RECORDER_LOG("audio output type build failed — video-only");
                 audioOut = nullptr;
@@ -455,8 +466,8 @@ private:
 
     bool ConfigureVideoInput()
     {
-        const UINT32 w = (UINT32)m_size.Width;
-        const UINT32 h = (UINT32)m_size.Height;
+        const UINT32 w = m_box.width;
+        const UINT32 h = m_box.height;
         winrt::com_ptr<IMFMediaType> in;
         if (FAILED(MFCreateMediaType(in.put()))) return false;
         in->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
@@ -485,12 +496,12 @@ private:
         in->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
         in->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
         in->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
-        in->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, SHM_AUDIO_SAMPLE_RATE);
+        in->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, m_audio->rate());
         in->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, m_audioChannels);
         in->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT,
                       m_audioChannels * sizeof(int16_t));
         in->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
-                      SHM_AUDIO_SAMPLE_RATE * m_audioChannels * sizeof(int16_t));
+                      m_audio->rate() * m_audioChannels * sizeof(int16_t));
         const HRESULT setAudioInHr = m_writer->SetInputMediaType(
             m_audioStreamIdx, in.get(), nullptr);
         if (FAILED(setAudioInHr)) {
@@ -553,11 +564,12 @@ private:
         if (!wgcTex) return;
 
         // WGC recycles its pool texture when `frame` goes out of scope,
-        // but the encoder MFT may hold the sample for several frames.
-        // CopyResource into our own texture so it survives recycling.
+        // but the encoder MFT may hold the sample for several frames: the
+        // crop is copied into a texture of our own, which survives
+        // recycling.
         winrt::com_ptr<ID3D11Texture2D> ownedTex;
-        if (!AllocFrameTexture(size, ownedTex)) return;
-        m_d3dContext->CopyResource(ownedTex.get(), wgcTex.get());
+        if (!AllocCropTexture(m_d3dDevice.get(), m_box, ownedTex)) return;
+        CopyCrop(m_d3dContext.get(), ownedTex.get(), wgcTex.get(), m_box);
 
         // QPC delivery time. We deliberately avoid frame.SystemRelativeTime
         // here — measured empirically it's ~27ms *ahead* of QPC at the
@@ -610,25 +622,6 @@ private:
             // shouldn't kill the whole recording — log and keep going.
             RECORDER_LOG("WriteSample(video) failed: 0x" << std::hex << hr);
         }
-    }
-
-    bool AllocFrameTexture(const winrt::SizeInt32& size,
-                           winrt::com_ptr<ID3D11Texture2D>& out)
-    {
-        D3D11_TEXTURE2D_DESC desc = {};
-        desc.Width            = (UINT)size.Width;
-        desc.Height           = (UINT)size.Height;
-        desc.MipLevels        = 1;
-        desc.ArraySize        = 1;
-        desc.Format           = DXGI_FORMAT_B8G8R8A8_UNORM;
-        desc.SampleDesc.Count = 1;
-        desc.Usage            = D3D11_USAGE_DEFAULT;
-        desc.BindFlags        = D3D11_BIND_RENDER_TARGET
-                              | D3D11_BIND_SHADER_RESOURCE;
-        // MISC_SHARED would let other processes consume the texture; not
-        // needed here — only MF on our own device sees it.
-        return SUCCEEDED(m_d3dDevice->CreateTexture2D(&desc, nullptr,
-                                                       out.put()));
     }
 
     void OnItemClosed(const winrt::GraphicsCaptureItem&,
@@ -690,15 +683,26 @@ private:
                              << " frames dropped");
             }
             if (got == 0) break;
+            // The tap runs at the device's rate, and a device switched to
+            // another mid-recording would be recorded at the wrong speed from
+            // then on: the rest of the recording goes without its audio.
+            if (m_audioReader.sample_rate() != 0
+                && m_audioReader.sample_rate() != m_audio->feedRate()) {
+                if (!m_audioRateChanged) {
+                    RECORDER_LOG("audio device rate changed from " << m_audio->feedRate()
+                                 << " to " << m_audioReader.sample_rate()
+                                 << " Hz: no more audio in this recording");
+                    m_audioRateChanged = true;
+                }
+                return;
+            }
             // The tap is as wide as the device; the recording is its stereo mix.
             SonicPi::pickRecordedChannels(m_audioTapBuf.data(), got, m_audioReader.channels(),
                                           m_audioPullBuf.data());
 
             const uint64_t readerPos = m_audioReader.last_read_position();
-            if (m_audioAnchor100ns == LLONG_MIN) {
+            if (m_audioAnchor100ns == LLONG_MIN)
                 m_audioAnchor100ns = NowIn100ns();
-                m_audioAnchorFrame = readerPos - got;
-            }
             if (!MaybeStartSessionAt(m_audioAnchor100ns)) return;
 
             const uint64_t startFrame = readerPos - got;
@@ -724,9 +728,9 @@ private:
                 if (anchorRel > 0) {
                     std::vector<float> silence(
                         kAudioPullFrames * m_audioChannels, 0.0f);
-                    constexpr LONGLONG kChunk100ns =
+                    const LONGLONG kChunk100ns =
                         (LONGLONG)kAudioPullFrames * 10000000LL
-                        / SHM_AUDIO_SAMPLE_RATE;
+                        / m_audio->rate();
                     LONGLONG silencePts = 0;
                     while (silencePts + kChunk100ns <= anchorRel) {
                         WriteAudioSample(silence.data(), kAudioPullFrames,
@@ -736,7 +740,7 @@ private:
                     const LONGLONG remaining = anchorRel - silencePts;
                     if (remaining > 0) {
                         const uint32_t framesLast = (uint32_t)(
-                            remaining * SHM_AUDIO_SAMPLE_RATE / 10000000LL);
+                            remaining * m_audio->rate() / 10000000LL);
                         if (framesLast > 0) {
                             WriteAudioSample(silence.data(), framesLast,
                                               silencePts, remaining);
@@ -745,13 +749,17 @@ private:
                 }
             }
 
-            const LONGLONG frameOffset = (LONGLONG)(startFrame - m_audioAnchorFrame);
-            const LONGLONG pts = anchorRel
-                + (frameOffset * 10000000LL) / SHM_AUDIO_SAMPLE_RATE;
+            m_audioOutBuf.clear();
+            const double seconds = m_audio->take(m_audioPullBuf.data(), got,
+                                                 startFrame, m_audioOutBuf);
+            const uint32_t outFrames =
+                (uint32_t)(m_audioOutBuf.size() / m_audioChannels);
+            if (outFrames == 0) continue;
+            const LONGLONG pts = anchorRel + (LONGLONG)std::llround(seconds * 1e7);
             const LONGLONG duration =
-                ((LONGLONG)got * 10000000LL) / SHM_AUDIO_SAMPLE_RATE;
+                ((LONGLONG)outFrames * 10000000LL) / m_audio->rate();
 
-            WriteAudioSample(m_audioPullBuf.data(), got, pts, duration);
+            WriteAudioSample(m_audioOutBuf.data(), outFrames, pts, duration);
         }
     }
 
@@ -800,7 +808,8 @@ private:
     winrt::GraphicsCaptureSession          m_session{ nullptr };
     winrt::event_token                     m_frameArrivedToken{};
     winrt::event_token                     m_itemClosedToken{};
-    winrt::SizeInt32                       m_size{};
+    winrt::SizeInt32                       m_size{};   // the captured frame: the whole window
+    SonicPi::CaptureBox                    m_box{};    // the client area in it: the file's frame
 
     // Media Foundation
     winrt::com_ptr<IMFSinkWriter>          m_writer;
@@ -817,7 +826,10 @@ private:
     std::thread                            m_audioThread;
     std::atomic<bool>                      m_audioThreadStop{ false };
     LONGLONG                               m_audioAnchor100ns{ LLONG_MIN };
-    uint64_t                               m_audioAnchorFrame{ 0 };
+    // The feed at the recording's rate, and on its clock (recorder_audio_rate.h).
+    std::unique_ptr<SonicPi::RecordedAudio> m_audio;
+    std::vector<float>                     m_audioOutBuf;    // what m_audio gives of a pull, to encode
+    bool                                   m_audioRateChanged{ false };   // the device's rate changed: no more audio
     // Allocated once in Start so DrainAudio's 5ms tick doesn't churn.
     static constexpr uint32_t              kAudioPullFrames = 1024;
     std::vector<float>                     m_audioTapBuf;    // the tap's frames, every device channel

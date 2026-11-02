@@ -58,6 +58,10 @@ add_executable(${PROJECT_NAME}
     ${GUI_TESTS_ROOT}/chevron_look.test.cpp
     ${GUI_TESTS_ROOT}/recorder_limits.test.cpp
     ${GUI_TESTS_ROOT}/recorder_audio_mix.test.cpp
+    ${GUI_TESTS_ROOT}/recorder_audio_rate.test.cpp
+    ${GUI_ROOT}/platform/recorder_audio_rate.cpp
+    ${GUI_TESTS_ROOT}/capture_crop.test.cpp
+    ${GUI_TESTS_ROOT}/divider_drag.test.cpp
     ${GUI_TESTS_ROOT}/helppanelmodel.test.cpp
     ${GUI_TESTS_ROOT}/sidecolumnmodel.test.cpp
     ${GUI_TESTS_ROOT}/nodetreemotion.test.cpp
@@ -69,10 +73,13 @@ add_executable(${PROJECT_NAME}
     ${GUI_TESTS_ROOT}/opaque_widgets.test.cpp
     ${GUI_TESTS_ROOT}/window_layout.test.cpp
     ${GUI_TESTS_ROOT}/repaint_pacing.test.cpp
+    ${GUI_TESTS_ROOT}/scope_pause.test.cpp
+    ${GUI_ROOT}/visualizer/scope_window.cpp
     ${GUI_TESTS_ROOT}/linkaudio_engine_ready.test.cpp
     ${GUI_TESTS_ROOT}/plugins.test.cpp
     ${GUI_TESTS_ROOT}/card_deck.test.cpp
     ${GUI_TESTS_ROOT}/quickstart_card.test.cpp
+    ${GUI_TESTS_ROOT}/code_flash.test.cpp
     ${GUI_TESTS_ROOT}/tutorial_cards.test.cpp
     ${GUI_ROOT}/widgets/nodetreegraph.cpp
     ${GUI_ROOT}/widgets/metricslog.cpp
@@ -95,6 +102,13 @@ add_executable(${PROJECT_NAME}
     ${GUI_ROOT}/widgets/chevronbutton.cpp
     ${GUI_TESTS_ROOT}/sampleheaderinfo.test.cpp
     ${GUI_TESTS_ROOT}/setbundle.test.cpp
+    ${GUI_TESTS_ROOT}/editor_files.test.cpp
+    ${GUI_TESTS_ROOT}/editor_undo.test.cpp
+    ${GUI_TESTS_ROOT}/overlaypane.test.cpp
+    ${GUI_TESTS_ROOT}/divider_unity.test.cpp
+    ${GUI_TESTS_ROOT}/sharelink.test.cpp
+    ${GUI_TESTS_ROOT}/sharepanel.test.cpp
+    ${GUI_ROOT}/widgets/sharepanel.cpp
     ${GUI_TESTS_ROOT}/splash_quit_policy.test.cpp
     ${GUI_ROOT}/widgets/splashwidget.cpp
     ${GUI_TESTS_ROOT}/stylesheet_invariants.test.cpp
@@ -103,6 +117,7 @@ add_executable(${PROJECT_NAME}
     ${GUI_ROOT}/utils/completion_context.cpp
     ${GUI_ROOT}/utils/reducedmotion.cpp
     ${GUI_ROOT}/utils/framepacer.cpp
+    ${GUI_ROOT}/utils/lineflashes.cpp
     ${GUI_ROOT}/utils/tutorialdocs.cpp
     ${GUI_ROOT}/widgets/tutorialwidgets.cpp
     ${GUI_ROOT}/utils/setbundle.cpp
@@ -123,19 +138,6 @@ if(APPLE)
 endif()
 
 target_include_directories(${PROJECT_NAME} PRIVATE
-# The Objective-C++ guard every system callback block goes through, and the
-# lint that keeps it so: macOS only, with the frameworks the guard test
-# provokes a real exception from. As in gui/, the .mm files go to the C++
-# compiler, which reads Objective-C++ from the extension.
-if(APPLE)
-  target_sources(${PROJECT_NAME} PRIVATE
-      ${GUI_TESTS_ROOT}/objc_guard.test.mm
-      ${GUI_ROOT}/platform/objc_guard.mm)
-  set_source_files_properties(${GUI_TESTS_ROOT}/objc_guard.test.mm ${GUI_ROOT}/platform/objc_guard.mm
-      PROPERTIES COMPILE_FLAGS "-fobjc-arc")
-  target_link_libraries(${PROJECT_NAME} PRIVATE "-framework Foundation" "-framework AVFoundation")
-endif()
-
     ${GUI_ROOT}
     ${GUI_ROOT}/widgets
     ${GUI_ROOT}/QScintilla_src-2.14.1/src   # <Qsci/...> headers (declarations only)
@@ -149,6 +151,7 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
     sonic-pi-api
+    sp_samplerate
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets
@@ -156,6 +159,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     Qt6::Test
     Catch2::Catch2
     QScintilla
+    sharelink
 )
 
 enable_testing()

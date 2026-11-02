@@ -16,10 +16,12 @@
 #include "completionpopup.h"
 #include "editortoolbar.h"
 #include "findpopup.h"
+#include "sonicpilexer.h"
 #include <QVariantAnimation>
 #include "utils/scintilla_api.h"
 #include "utils/completion_context.h"
 #include "utils/flash_style.h"
+#include "utils/setbundle.h"
 #include "dpi.h"
 #include "kiss_fftr.h"
 #include <algorithm>
@@ -32,6 +34,8 @@
 #include <QKeyEvent>
 #include <QTimer>
 #include "utils/framepacer.h"
+#include "utils/lineflashes.h"
+#include "utils/reducedmotion.h"
 #include "utils/opaque.h"
 #include <QElapsedTimer>
 #include <QFocusEvent>
@@ -41,6 +45,7 @@
 #include <QDrag>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QFile>
 #include <QRegularExpression>
 #include <QSet>
 #include <QMenu>
@@ -68,7 +73,6 @@ static const int kErrorIndicator = 20;
 // Transient trigger flash (distinct from the error markers/indicator so the
 // two can coexist): indicator 21 washes the line's code text, marker 12 is a
 // small dot in the gutter gap between the line numbers and the code.
-static const int kFlashIndicator = 21;
 static const int kFlashGutterMarker = 12;
 
 // Find-bar match highlights: every match gets a quiet accent tint (23); the
@@ -85,10 +89,6 @@ static const int kFindMatchOutlineAlpha = 170;
 static const int kFindCurrentAlpha = 235;
 // Runaway guard for degenerate queries (e.g. a single space in a big buffer).
 static const int kMaxFindMatches = 10000;
-
-// How long a line stays lit after a flash — shared with every other flash
-// renderer (see utils/flash_style.h).
-static const int kFlashHoldMs = SonicPi::kFlashHoldMs;
 
 // Inline oscilloscope + spectrum pinned to a live_loop's header line, fed
 // by the loop's scope-stream tap (with_fx :scope_out). The display window
@@ -212,7 +212,7 @@ public:
         // it used (sizing from a separate channels() read would race a slot
         // re-activation).
         const int window = m_scroll ? kScrollWindow : kSweepWindow;
-        m_scratch.resize((size_t)window * SHM_TAP_STREAM_CHANNELS);
+        m_scratch.resize((size_t)window * TAP_STREAM_CHANNELS);
         uint32_t ch = 1;
         if (m_scroll)
         {
@@ -601,6 +601,13 @@ SonicPiScintilla::SonicPiScintilla(SonicPiLexer* lexer, SonicPiTheme* theme, QSt
     SendScintilla(SCI_INDICSETSTYLE, (unsigned long)kFlashIndicator, (long)INDIC_STRAIGHTBOX);
     SendScintilla(SCI_INDICSETUNDER, (unsigned long)kFlashIndicator, (long)1);
     applyFlashMarkerColours();
+    m_flashes = new SonicPi::LineFlashes(this);
+    connect(m_flashes, &SonicPi::LineFlashes::changed, this, [this](int line, bool lit) {
+        if (lit)
+            showFlash(line);
+        else
+            hideFlash(line);
+    });
 
     // Follow insert/delete edits so run-time flash anchors track live edits.
     SendScintilla(SCI_SETMODEVENTMASK,
@@ -1125,6 +1132,20 @@ void SonicPiScintilla::unhighlightCurrentLine()
     mutex->unlock();
 }
 
+void SonicPiScintilla::flashRun()
+{
+    // Reduce animations keeps the code still, as its line flashes do.
+    if (SonicPi::userPrefersReducedMotion())
+        return;
+    highlightCurrentLine();
+    if (auto* code = qobject_cast<SonicPiLexer*>(lexer()))
+    {
+        code->highlightAll();
+        QTimer::singleShot(500, code, &SonicPiLexer::unhighlightAll);
+    }
+    QTimer::singleShot(500, this, &SonicPiScintilla::unhighlightCurrentLine);
+}
+
 void SonicPiScintilla::snapshotRunLines()
 {
     // Anchor each run-time line to its start position; trackEditForFlash nudges
@@ -1214,6 +1235,24 @@ void SonicPiScintilla::setLiveLoopScopeScroll(bool scroll)
     }
 }
 
+// Off, the loops' scopes stay, hidden and unpolled as in a hidden buffer, so
+// on again they show at once for the loops still running, as the web's do
+// (#3585), and one whose loop went meanwhile finds out on its first poll.
+void SonicPiScintilla::setLiveLoopScopesShown(bool shown)
+{
+    m_loopScopesShown = shown;
+    if (!shown)
+    {
+        for (LiveLoopScopeWidget* w : m_loopScopes)
+            w->hide();
+        unpaceLiveLoopScopes();
+        return;
+    }
+    if (!m_loopScopes.isEmpty())
+        paceLiveLoopScopes();
+    positionLiveLoopScopes();
+}
+
 void SonicPiScintilla::setLiveLoopScope(const QString& name, int runLine, int scopeNum,
                                         const shm_tap_stream_reader& reader)
 {
@@ -1240,30 +1279,37 @@ void SonicPiScintilla::setLiveLoopScope(const QString& name, int runLine, int sc
     m_loopScopeLines[name] = runLine;
     m_loopScopeSlots[name] = scopeNum;
     applyLoopScopeColours();
-
-    // The scopes tick off the one frame pacer every animated thing shares,
-    // held while any scope lives. The stream is lossless at any poll rate,
-    // so the rate is the display's; a tick reads the streams only, and the
-    // scopes are placed when something moves a line (SCN_UPDATEUI), not on
-    // every tick.
-    if (!m_loopScopesPaced)
+    if (!m_loopScopesShown)
     {
-        m_loopScopesPaced = true;
-        SonicPi::FramePacer::instance()->retain();
-        m_loopScopeTick = connect(SonicPi::FramePacer::instance(), &SonicPi::FramePacer::tick, this, [this]() {
-            // Hidden tab / minimized window: skip the stream reads. The ring
-            // overwrites itself, so nothing backs up while polling is skipped.
-            if (!isVisible())
-                return;
-            QStringList gone;
-            for (auto it = m_loopScopes.constBegin(); it != m_loopScopes.constEnd(); ++it)
-                if (it.value()->poll())
-                    gone << it.key();
-            for (const QString& name : gone)
-                endLiveLoopScope(name);
-        });
+        w->hide();
+        return;
     }
+    paceLiveLoopScopes();
     positionLiveLoopScopes();
+}
+
+// The scopes tick off the one frame pacer every animated thing shares, held
+// while any scope is shown. The stream is lossless at any poll rate, so the
+// rate is the display's; a tick reads the streams only, and the scopes are
+// placed when something moves a line (SCN_UPDATEUI), not on every tick.
+void SonicPiScintilla::paceLiveLoopScopes()
+{
+    if (m_loopScopesPaced)
+        return;
+    m_loopScopesPaced = true;
+    SonicPi::FramePacer::instance()->retain();
+    m_loopScopeTick = connect(SonicPi::FramePacer::instance(), &SonicPi::FramePacer::tick, this, [this]() {
+        // Hidden tab / minimized window: skip the stream reads. The ring
+        // overwrites itself, so nothing backs up while polling is skipped.
+        if (!isVisible())
+            return;
+        QStringList gone;
+        for (auto it = m_loopScopes.constBegin(); it != m_loopScopes.constEnd(); ++it)
+            if (it.value()->poll())
+                gone << it.key();
+        for (const QString& name : gone)
+            endLiveLoopScope(name);
+    });
 }
 
 void SonicPiScintilla::setAudioApi(SonicPi::SonicPiAPI* api)
@@ -1283,6 +1329,14 @@ void SonicPiScintilla::dropLiveLoopScopesFor(int scopeNum, const QString& name)
         endLiveLoopScope(n);
 }
 
+void SonicPiScintilla::releaseLiveLoopScopeElsewhere(const QList<SonicPiScintilla*>& buffers, const SonicPiScintilla* home,
+                                                     int scopeNum, const QString& name)
+{
+    for (SonicPiScintilla* other : buffers)
+        if (other != home)
+            other->dropLiveLoopScopesFor(scopeNum, name);
+}
+
 void SonicPiScintilla::endLiveLoopScope(const QString& name)
 {
     if (LiveLoopScopeWidget* w = m_loopScopes.take(name))
@@ -1291,16 +1345,6 @@ void SonicPiScintilla::endLiveLoopScope(const QString& name)
     m_loopScopeSlots.remove(name);
     if (m_loopScopes.isEmpty())
         unpaceLiveLoopScopes();
-}
-
-void SonicPiScintilla::clearLiveLoopScopes()
-{
-    for (LiveLoopScopeWidget* w : m_loopScopes)
-        w->deleteLater();
-    m_loopScopes.clear();
-    m_loopScopeLines.clear();
-    m_loopScopeSlots.clear();
-    unpaceLiveLoopScopes();
 }
 
 // The last scope gone: the pacer is let go, so it stops when nothing else is
@@ -1360,7 +1404,7 @@ void SonicPiScintilla::placeLiveLoopScopesSoon()
 
 void SonicPiScintilla::positionLiveLoopScopes()
 {
-    if (m_loopScopes.isEmpty())
+    if (m_loopScopes.isEmpty() || !m_loopScopesShown)
         return;
     int lineH = SendScintilla(SCI_TEXTHEIGHT, (unsigned long)0);
     int extraDescent = SendScintilla(SCI_GETEXTRADESCENT);
@@ -1445,57 +1489,55 @@ void SonicPiScintilla::flashLine(int line, bool codeWash, bool gutterDot)
 {
     if (line < 0 || !(codeWash || gutterDot))
         return;
-    // The pulse is drawn on the frame pacer's tick, and cleared on one, so a
-    // run that flashes many lines costs one repaint per tick, shared with the
-    // scopes', not one per line.
-    SonicPi::FramePacer::instance()->defer(this, [this, line, codeWash, gutterDot] { flashLineNow(line, codeWash, gutterDot); });
+    m_flashWash = codeWash;
+    m_flashDot = gutterDot;
+    m_flashes->flash(line);
 }
 
-void SonicPiScintilla::flashLineNow(int line, bool codeWash, bool gutterDot)
+bool SonicPiScintilla::isFlashing(int line) const { return m_flashes->isLit(line); }
+
+void SonicPiScintilla::showFlash(int line)
 {
     if (line >= lines())
         return;
-    // Re-flashing within the hold window extends the pulse: bump this line's
-    // generation and only clear when the matching timer is still the latest.
-    int gen = ++m_flashGen[line];
-    if (gutterDot)
+    if (m_flashDot)
     {
         markerDelete(line, kFlashGutterMarker);
         markerAdd(line, kFlashGutterMarker);
     }
-    if (codeWash)
+    if (m_flashWash)
     {
-        // Wash just the code: first non-blank character to end of text.
+        // Wash just the code: its first non-blank character to its last, as
+        // every renderer does (LineFlashes::codeSpan).
         long start = SendScintilla(SCI_GETLINEINDENTPOSITION, (unsigned long)line);
         long end = SendScintilla(SCI_GETLINEENDPOSITION, (unsigned long)line);
+        while (end > start && (SendScintilla(SCI_GETCHARAT, (unsigned long)(end - 1)) == ' '
+                               || SendScintilla(SCI_GETCHARAT, (unsigned long)(end - 1)) == '\t'))
+            --end;
         if (end > start)
         {
             SendScintilla(SCI_SETINDICATORCURRENT, (unsigned long)kFlashIndicator);
             SendScintilla(SCI_INDICATORFILLRANGE, (unsigned long)start, end - start);
         }
     }
-    QTimer::singleShot(kFlashHoldMs, this, [this, line, gen]() {
-        SonicPi::FramePacer::instance()->defer(this, [this, line, gen] {
-            if (m_flashGen.value(line) == gen)
-            {
-                m_flashGen.remove(line);
-                markerDelete(line, kFlashGutterMarker);
-                clearFlashWash(line);
-            }
-        });
-    });
+}
+
+void SonicPiScintilla::hideFlash(int line)
+{
+    markerDelete(line, kFlashGutterMarker);
+    clearFlashWash(line);
 }
 
 void SonicPiScintilla::setFlashBrightness(int percent)
 {
-    m_flashAlpha = qBound(0, percent * 255 / 100, 255);
+    m_flashAlpha = SonicPi::flashAlpha(percent);
     applyFlashMarkerColours();
 }
 
 void SonicPiScintilla::clearFlashWash(int line)
 {
     SendScintilla(SCI_SETINDICATORCURRENT, (unsigned long)kFlashIndicator);
-    if (m_flashGen.isEmpty())
+    if (m_flashes->isEmpty())
     {
         // No pulse pending anywhere: sweep the whole document, so a wash whose
         // text was moved to another line mid-pulse can't linger.
@@ -2642,15 +2684,23 @@ bool SonicPiScintilla::event(QEvent* evt)
             return true;
         }
 
-        // Coalesce preview-restore + the edit + re-preview into one undo step, so
-        // a single Cmd-Z removes the whole keystroke (not each preview edit).
+        // A key over a live preview is one undo step with the preview it drops, so
+        // a single Cmd-Z takes the whole keystroke back. Any other key is left to
+        // Scintilla, which runs typing (or deleting) into one step until the caret
+        // moves: a step per key would split it. Decided once, before clearPreview()
+        // takes the preview down, so the step that opens here also closes.
+        const bool overPreview = m_pvLive;
         // The backstop below would otherwise run the full completion pipeline a
         // second time off this edit's textChanged, before the caret settles.
         m_keyEditGuard = true;
-        SendScintilla(SCI_BEGINUNDOACTION);
-        // Drop the preview first so the keystroke edits the user's typed text (or,
-        // for a slider, leaves its committed value), then let the editor process it.
-        if (m_pvStart >= 0) clearPreview();
+        if (overPreview)
+        {
+            SendScintilla(SCI_BEGINUNDOACTION);
+            // Drop the preview first so the keystroke edits the user's typed text
+            // (or, for a slider, leaves its committed value), then let the editor
+            // process it.
+            clearPreview();
+        }
 
         // Let the editor insert/delete the character, then refresh the popup. This
         // path runs after the edit fully settles (cursor advanced), so the context
@@ -2690,7 +2740,8 @@ bool SonicPiScintilla::event(QEvent* evt)
                 break;
             }
         }
-        SendScintilla(SCI_ENDUNDOACTION);
+        if (overPreview)
+            SendScintilla(SCI_ENDUNDOACTION);
         m_keyEditGuard = false;
         return res;
     }
@@ -3193,19 +3244,51 @@ void SonicPiScintilla::mouseReleaseEvent(QMouseEvent* e)
         popCompletionOnClick();
 }
 
+// Files dropped on the code, as the web's editor takes them (app/web/app/src/editor.js): a set among them opens as a
+// set (SetBundle::isSet: by its header or its name), nothing put in; so does a Sonic Pi link (#code=) from a browser or
+// a chat, as Open Link opens it; else each file of code (.rb, .txt) goes in as its text and anything else (a sample)
+// as its path in quotes, ready for sample, where they are dropped, as one undoable change, selected.
 void SonicPiScintilla::dropEvent(QDropEvent* dropEvent)
 {
     mutex->lock();
     if (dropEvent->mimeData()->hasFormat("text/uri-list"))
     {
         dropEvent->acceptProposedAction();
-        QList<QUrl> urlList = dropEvent->mimeData()->urls();
+        static const QRegularExpression codeFile(QStringLiteral("\\.(rb|txt|sonicpi)$"), QRegularExpression::CaseInsensitiveOption);
         QString text;
-        for (int i = 0; i < urlList.size(); ++i)
+        for (const QUrl& url : dropEvent->mimeData()->urls())
         {
-            text += "\"" + urlList.at(i).toLocalFile() + "\"" + QLatin1Char('\n');
+            const QString path = url.isLocalFile() ? url.toLocalFile() : url.toString();
+            if (!url.isLocalFile() && path.contains(QStringLiteral("#code=")))
+            {
+                mutex->unlock();
+                emit linkDropped(path);
+                return;
+            }
+            QString code;
+            const bool isCode = url.isLocalFile() && codeFile.match(path).hasMatch();
+            if (isCode)
+            {
+                QFile f(path);
+                if (f.open(QFile::ReadOnly))
+                    code = QString::fromUtf8(f.readAll());
+            }
+            if (SonicPi::SetBundle::isSet(code, isCode ? path : QString()))
+            {
+                mutex->unlock();
+                emit setDropped(path);
+                return;
+            }
+            if (!text.isEmpty() && !text.endsWith(QLatin1Char('\n')))
+                text += QLatin1Char('\n');
+            text += isCode ? code : "\"" + path + "\"\n";
         }
-        insert(text);
+        const QPoint at = dropEvent->position().toPoint();
+        const long pos = SendScintilla(SCI_POSITIONFROMPOINT, (unsigned long)at.x(), (long)at.y());
+        const QByteArray bytes = text.toUtf8();
+        SendScintilla(SCI_INSERTTEXT, pos, bytes.constData());
+        SendScintilla(SCI_SETSEL, pos, pos + (long)bytes.size());
+        setFocus();
     }
     else if (dropEvent->mimeData()->hasFormat(kCardMime))
     {

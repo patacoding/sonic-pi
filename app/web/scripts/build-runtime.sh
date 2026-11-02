@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Builds the runtime: mruby for the host and for wasm, the runtime's Ruby
-# compiled to bytecode, the wasm module the page and Node load, and sp-trace,
-# the same runtime as a native command.
+# compiled to bytecode, the wasm module the page and Node load, the share
+# link's codec as a wasm module of its own, and sp-trace, the same runtime as a
+# native command.
 #
 #   scripts/build-runtime.sh            # everything
 #   scripts/build-runtime.sh --wasm     # relink the wasm
@@ -15,7 +16,9 @@
 # method mruby lacks would otherwise only show up in the browser.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-MR="$ROOT/runtime/mruby"
+MR="$ROOT/runtime/mruby"                 # mruby as upstream has it: the submodule, never changed in place
+SRC="$ROOT/build/mruby-src"             # the copy the build patches and builds
+PATCHES="$ROOT/runtime/mruby-patches"   # ours, over the pin
 export MRUBY_CONFIG="$ROOT/runtime/build_config.rb"
 export MRUBY_BUILD_DIR="$ROOT/build/mruby"
 OUT="$ROOT/build/runtime"
@@ -25,24 +28,44 @@ mkdir -p "$OUT"
 MODE="${1:-}"
 case "$MODE" in ""|--wasm|--native) ;; *) echo "usage: $(basename "$0") [--wasm|--native]" >&2; exit 1;; esac
 
-# mruby itself. The whole build always rebuilds it; --wasm and --native build whatever is missing, so a fresh
-# checkout can go straight to either, and a checkout that has one can ask for the other. --native needs the host
-# interpreter alone and asks for no Emscripten; --wasm needs the emscripten target too, which a --native build
-# leaves out.
+# mruby itself, from the pin with our patches over it (runtime/mruby-patches), in a copy the build owns: the
+# submodule stays as upstream has it, and nothing that updates submodules can take a patch back out. The whole build
+# always rebuilds it; --wasm and --native build whatever is missing, or was built from another pin or other patches,
+# so a fresh checkout can go straight to either, and a checkout that has one can ask for the other. --native needs
+# the host interpreter alone and asks for no Emscripten; --wasm needs the emscripten target too, which a --native
+# build leaves out.
+FROM="$(git -C "$MR" rev-parse HEAD) $(cat "$PATCHES"/*.patch | { sha256sum 2>/dev/null || shasum -a 256; } | cut -d' ' -f1)"
 HOST_MRBC="$MRUBY_BUILD_DIR/host/bin/mrbc"
 EM_CONFIG="$MRUBY_BUILD_DIR/emscripten/host-bin/mruby-config"
+built() { [ "$(cat "$MRUBY_BUILD_DIR/$1/built-from" 2>/dev/null)" = "$FROM" ]; }   # a target, built from FROM
 NEED_MRUBY=""
 if [ -z "$MODE" ]; then
   NEED_MRUBY="host + emscripten"
-elif [ "$MODE" = "--native" ] && [ ! -x "$HOST_MRBC" ]; then
+elif [ "$MODE" = "--native" ] && { ! built host || [ ! -x "$HOST_MRBC" ]; }; then
   NEED_MRUBY="host"
-elif [ "$MODE" = "--wasm" ] && { [ ! -x "$HOST_MRBC" ] || [ ! -x "$EM_CONFIG" ]; }; then
+elif [ "$MODE" = "--wasm" ] && { ! built host || ! built emscripten || [ ! -x "$HOST_MRBC" ] || [ ! -x "$EM_CONFIG" ]; }; then
   NEED_MRUBY="host + emscripten"
 fi
 if [ -n "$NEED_MRUBY" ]; then
+  if [ "$(cat "$SRC/.patched-from" 2>/dev/null)" != "$FROM" ]; then
+    echo "mruby: the pin, patched…"
+    rm -rf "$SRC" && mkdir -p "$SRC"
+    # The pin's files, its own submodule's (Prism's) too, times kept: what the patches leave alone is not rebuilt.
+    # Only what git tracks, so nothing an earlier build left in the submodule; and no symbolic link, which Windows'
+    # bash makes by copying what it points to and so cannot make before that is there (Prism's fuzz corpus, a link to
+    # its fixtures, copied first, failed the build there). The build needs none.
+    git -C "$MR" -c core.quotePath=false ls-files -s --recurse-submodules | awk -F'\t' '$1 !~ /^120000 / { print $2 }' \
+      | tar -C "$MR" -cf - -T - | tar -C "$SRC" -xf -
+    for p in "$PATCHES"/*.patch; do
+      patch -s -p1 -N -d "$SRC" < "$p" || { echo "$(basename "$p") does not apply to mruby $(git -C "$MR" rev-parse --short HEAD)" >&2; exit 1; }
+    done
+    echo "$FROM" > "$SRC/.patched-from"
+  fi
   echo "mruby ($NEED_MRUBY)…"
   [ "$NEED_MRUBY" = "host" ] && export SP_HOST_ONLY=1
-  (cd "$MR" && rake -j"$(sysctl -n hw.ncpu 2>/dev/null || nproc)" > "$OUT/mruby-build.log" 2>&1) || { tail -40 "$OUT/mruby-build.log"; exit 1; }
+  (cd "$SRC" && rake -j"$(sysctl -n hw.ncpu 2>/dev/null || nproc)" > "$OUT/mruby-build.log" 2>&1) || { tail -40 "$OUT/mruby-build.log"; exit 1; }
+  echo "$FROM" > "$MRUBY_BUILD_DIR/host/built-from"
+  if [ "$NEED_MRUBY" != "host" ]; then echo "$FROM" > "$MRUBY_BUILD_DIR/emscripten/built-from"; fi
 fi
 
 # The runtime's Ruby, in load order, as one bytecode blob.
@@ -61,6 +84,17 @@ if [ "$MODE" != "--native" ]; then
     -sEXPORTED_FUNCTIONS=_sp_init,_sp_install_table,_sp_install_synth,_sp_set_samples_dir,_sp_install_sample,_sp_trace,_sp_version,_sp_live_boot,_sp_run,_sp_tick,_sp_stop_all,_sp_silence,_sp_engine_lost,_sp_stop_job,_sp_run_group,_sp_stop_group,_sp_group_under,_sp_stop_subtree,_sp_stop_run,_sp_process_table,_sp_process_table_len,_sp_live_stop_after,_sp_set_link_bpm,_sp_set_time_warp,_sp_hold,_sp_sched_ahead,_sp_cue,_sp_out_ptr,_sp_out_len,_sp_buffer_for,_sp_synthdef_for,_malloc,_free \
     -sEXPORTED_RUNTIME_METHODS=ccall,cwrap,UTF8ToString,HEAPU8,HEAPF64
   ls -la "$OUT/sp_runtime.mjs" "$OUT/sp_runtime.wasm"
+
+  # The share link's codec (app/sharelink): the native app's own, so a link either writes the other reads, and both
+  # write the same link. A module of its own, loaded the first time a link is made or read (app/src/share.js).
+  SL="$(cd "$ROOT/../sharelink" && pwd)"
+  emcc -Oz -g0 -c "$SL/zstd/zstd.c" -o "$OUT/sp_share_zstd.o"   # C, so apart from the C++ below
+  emcc -std=c++17 -Oz -g0 -sUSE_ZLIB=1 \
+    "$SL/sharelink.cpp" "$SL/sharelink_table1.cpp" "$SL/sharelink_table2.cpp" "$SL/sharelink_qr.cpp" "$SL/qrcodegen/qrcodegen.cpp" "$SL/sharelink_wasm.cpp" "$OUT/sp_share_zstd.o" -o "$OUT/sp_share.mjs" \
+    -sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=node,web,worker -sALLOW_MEMORY_GROWTH=1 \
+    -sEXPORTED_FUNCTIONS=_sl_out_ptr,_sl_out_len,_sl_encode,_sl_decode,_sl_qr,_sl_to_digits,_sl_from_digits,_sl_table_json,_sl_codec_new,_sl_codec_free,_sl_codec_pack,_sl_codec_encode,_sl_codec_unpack,_sl_codec_decode,_malloc,_free \
+    -sEXPORTED_RUNTIME_METHODS=HEAPU8
+  ls -la "$OUT/sp_share.mjs" "$OUT/sp_share.wasm"
 fi
 
 # The native command: the same host seam and the same bytecode, linked

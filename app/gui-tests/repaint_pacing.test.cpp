@@ -19,6 +19,8 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include "pacer_by_hand.h"
+#include "reduced_motion_on.h"
 #include "model/sonicpitheme.h"
 #include "utils/flash_style.h"
 #include "utils/framepacer.h"
@@ -39,32 +41,6 @@ struct FrameCounter : QObject
         if (e->type() == QEvent::UpdateRequest)
             frames++;
         return false;
-    }
-};
-
-// The pacer under the test's hand for the test's duration, and back on its
-// timer afterwards, with nothing left holding it.
-struct HandDriven
-{
-    SonicPi::FramePacer* pacer = SonicPi::FramePacer::instance();
-    HandDriven()
-    {
-        // Work an earlier test deferred holds the pacer until its tick has
-        // run; taken by hand first, that tick would never come.
-        REQUIRE(QTest::qWaitFor([this] { return pacer->clients() == 0; }, 1000));
-        pacer->driveByHand(true);
-    }
-    ~HandDriven()
-    {
-        CHECK(pacer->clients() == 0);
-        pacer->driveByHand(false);
-    }
-    // One tick, and the repaints it asked for.
-    void tick()
-    {
-        pacer->pulse();
-        QApplication::processEvents();
-        QApplication::processEvents();
     }
 };
 
@@ -215,6 +191,51 @@ TEST_CASE("log pane: a clear takes what had not been shown yet with it", "[pacin
     const QString text = log.toPlainText();
     CHECK(!text.contains("line 1"));
     CHECK(text.contains("line 2"));
+}
+
+TEST_CASE("editor: a flash washes just a line's code, its indent and the space after it left out", "[flash]")
+{
+    HandDriven hand;
+    Editor e(QStringLiteral("live_loop :t do\n  play 60  \nend\n"));
+    e.ed->flashRunLine(1, true, false);
+    hand.tick();
+    const int line = e.ed->positionFromLineIndex(1, 0);
+    auto washed = [&](int index) {
+        return e.ed->SendScintilla(QsciScintillaBase::SCI_INDICATORVALUEAT, (unsigned long)SonicPiScintilla::kFlashIndicator,
+                                   (long)(line + index)) != 0;
+    };
+    CHECK_FALSE(washed(1));   // the indent
+    CHECK(washed(2));         // p
+    CHECK(washed(8));         // 0
+    CHECK_FALSE(washed(9));   // the space after
+    CHECK(QTest::qWaitFor([&] {
+        hand.tick();
+        return !e.ed->isFlashing(1);
+    }, SonicPi::kFlashHoldMs * 20));
+}
+
+TEST_CASE("editor: a run lights the whole code a moment", "[flash]")
+{
+    Editor e(QStringLiteral("play 60\n"));
+    const QColor lit = e.theme->color("SelectionBackground");
+    auto paper = [&] { return e.lexer->paper(QsciLexerRuby::Default); };
+    REQUIRE(paper() != lit);
+    e.ed->flashRun();
+    CHECK(paper() == lit);
+    CHECK(QTest::qWaitFor([&] { return paper() != lit; }, 2000));
+}
+
+TEST_CASE("editor: with Reduce animations on, nothing flashes, a run nor a sound", "[flash][motion]")
+{
+    HandDriven hand;
+    ReducedMotionOn still;
+    Editor e(QStringLiteral("live_loop :t do\n  play 60\nend\n"));
+    const QColor before = e.lexer->paper(QsciLexerRuby::Default);
+    e.ed->flashRun();
+    CHECK(e.lexer->paper(QsciLexerRuby::Default) == before);
+    e.ed->flashRunLine(1, true, true);
+    hand.tick();
+    CHECK_FALSE(e.ed->isFlashing(1));
 }
 
 TEST_CASE("editor: run-line flashes and their clears land on the tick", "[pacing]")

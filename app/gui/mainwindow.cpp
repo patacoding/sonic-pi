@@ -31,7 +31,6 @@
 #include <QDialogButtonBox>
 #include <QDockWidget>
 #include <QDateTime>
-#include <QTime>
 #include <QDir>
 #include <QRegularExpression>
 #include <QFile>
@@ -44,8 +43,6 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QPropertyAnimation>
-#include <QDialog>
-#include <QInputDialog>
 #include <QMessageBox>
 #include <QNetworkInterface>
 #include <QPainter>
@@ -83,23 +80,21 @@
 #include <Qsci/qsciscintilla.h>
 
 #include "model/sonicpitheme.h"
-// The output window itself, and its log. The graphics module is deliberately
-// self-contained; mainwindow only creates the window and forwards menu actions.
-#include "graphics/rendering/GraphicsLog.h"
-#include "graphics/rendering/GraphicsSettings.h"
-#include "graphics/rendering/GraphicsRenderer.h"
-#include "graphics/ui/GraphicsWindow.h"
-#include "graphics/ui/GraphicsPreviewWindow.h"
-#include "graphics/ui/ShaderBufferWindow.h"
 #include "widgets/sonicpitooltip.h"
 #include <QFileOpenEvent>
 
 #include "utils/dockshown.h"
+#include "utils/flash_style.h"
 #include "utils/audiodevicepolicy.h"
 #include "utils/reducedmotion.h"
 #include "utils/gui_settings.h"
 #include "utils/scintilla_api.h"
 #include "utils/setbundle.h"
+#include "sharelink.h"
+#include "widgets/dividerlink.h"
+#include "widgets/dividerpalette.h"
+#include "widgets/overlaypane.h"
+#include "widgets/sharepanel.h"
 #include "utils/plugins.h"
 #include "widgets/sonicpilexer.h"
 #include "widgets/sonicpiscintilla.h"
@@ -221,7 +216,6 @@ MainWindow::MainWindow(QApplication& app, SplashWidget* splash)
 
     updated_dark_mode_for_help = false;
     updated_dark_mode_for_prefs = false;
-    loaded_workspaces = false;
     is_recording = false;
     show_rec_icon_a = false;
     restoreDocPane = false;
@@ -666,8 +660,7 @@ void MainWindow::setupWindowStructure()
     // create workspaces and add them to the tabs
     // workspace shortcuts
     QVBoxLayout* prefsLayout = new QVBoxLayout;
-    prefsWidget = new QWidget;
-    prefsWidget->setParent(this);
+    prefsWidget = new SonicPi::OverlayPane(this);
     prefsWidget->hide();
 
     settingsWidget = new SettingsWidget(m_spAPI->GetPort(SonicPiPortId::tau_osc_cues), i18n, piSettings, sonicPii18n, shortcutsConfigPath(), this);
@@ -778,14 +771,16 @@ void MainWindow::setupWindowStructure()
             this, SLOT(setWindowPublishing(bool)));
 #endif
 
-    scopeWindow = new ScopeWindow(m_spClient, m_spAPI, this);
+    scopeWindow = new ScopeWindow(m_spAPI, this);
+    connect(m_spClient.get(), &QtAPIClient::ConsumeAudioData, scopeWindow, &ScopeWindow::OnConsumeAudioData);
 
     // A second ScopeWindow showing only Levels, placed beside Drive in audio
     // preferences. An actual instance rather than a lookalike, so it is the
     // same meter with the same ballistics and overdrive tip. Drive lives in
     // preferences and preferences covers the scope dock, so without this the
     // reading you set Drive by is hidden exactly when you need it.
-    levelPrefsScope = new ScopeWindow(m_spClient, m_spAPI, this);
+    levelPrefsScope = new ScopeWindow(m_spAPI, this);
+    connect(m_spClient.get(), &QtAPIClient::ConsumeAudioData, levelPrefsScope, &ScopeWindow::OnConsumeAudioData);
     levelPrefsScope->setObjectName("prefsLevelScope");
     for (const auto& cat : levelPrefsScope->GetScopeCategories())
         levelPrefsScope->EnableScope(cat, cat == QStringLiteral("Levels"));
@@ -800,48 +795,19 @@ void MainWindow::setupWindowStructure()
     settingsWidget->setLevelScope(levelPrefsScope);
 
 
-    connect(m_spClient.get(), &SonicPi::QtAPIClient::FlashReceived, this,
-            [this](const QString& workspace, int line) {
-                if (!piSettings->flash_code && !piSettings->flash_gutter)
-                    return;
-                // Only flash real editor buffers — tutorial/jukebox runs use
-                // other workspace names and filenameToWorkspace would otherwise
-                // fall back to buffer 0 and flash the wrong tab.
-                if (!workspace.startsWith("workspace_"))
-                    return;
-                // The spider sends flashes at scheduled-render time; delay by
-                // the device output latency so the pulse lands with the sound.
-                auto apply = [this, workspace, line]() {
-                    // Runtime lines are 1-based; Scintilla lines are 0-based.
-                    // flashRunLine maps the run-time line through edit-tracking
-                    // handles so it lands correctly after live edits.
-                    SonicPiScintilla* ws = filenameToWorkspace(workspace.toStdString());
-                    if (ws)
-                        ws->flashRunLine(line - 1, piSettings->flash_code, piSettings->flash_gutter);
-                };
-                if (m_visualLatencyMs > 0)
-                    QTimer::singleShot(m_visualLatencyMs, this, apply);
-                else
-                    apply();
-            });
     connect(m_spClient.get(), &SonicPi::QtAPIClient::LiveLoopScopeReceived, this,
             [this](int, const QString& name, const QString& workspace, int line, int scopeNum) {
+                if (!m_spAPI)
+                    return;
                 // Same guard as the flash: only pin scopes to real editor buffers.
-                if (!piSettings->show_loop_scopes || !workspace.startsWith("workspace_") || !m_spAPI)
-                    return;
-                SonicPiScintilla* ws = filenameToWorkspace(workspace.toStdString());
-                if (!ws)
-                    return;
-                // The loop lives in this buffer now: no other buffer keeps a
-                // scope for it, or for its slot.
+                SonicPiScintilla* home = workspace.startsWith("workspace_") ? filenameToWorkspace(workspace.toStdString()) : nullptr;
+                QList<SonicPiScintilla*> buffers;
                 for (int i = 0; i < editorTabWidget->count(); i++)
-                {
-                    SonicPiScintilla* other = ((SonicPiEditor*)editorTabWidget->widget(i))->getWorkspace();
-                    if (other != ws)
-                        other->dropLiveLoopScopesFor(scopeNum, name);
-                }
-                ws->setLiveLoopScope(name, line - 1, scopeNum,
-                                     m_spAPI->AudioProcessor_GetScopeReader((unsigned int)scopeNum));
+                    buffers << ((SonicPiEditor*)editorTabWidget->widget(i))->getWorkspace();
+                SonicPiScintilla::releaseLiveLoopScopeElsewhere(buffers, home, scopeNum, name);
+                if (home)
+                    home->setLiveLoopScope(name, line - 1, scopeNum,
+                                           m_spAPI->AudioProcessor_GetScopeReader((unsigned int)scopeNum));
             });
     connect(m_spClient.get(), &SonicPi::QtAPIClient::LiveLoopScopeEndedReceived, this,
             [this](int, const QString& name) {
@@ -868,7 +834,14 @@ void MainWindow::setupWindowStructure()
     connect(m_spClient.get(), &SonicPi::QtAPIClient::AudioDeviceReopenReplyReceived,
             this, &MainWindow::onAudioDeviceReopenReply);
 
-    scopeWindow->Pause();
+    // With "Reduce animations" on the scope starts still; the user sets it
+    // moving with F12, the Visuals menu, or the scope button. The in-app
+    // preference alone, not prefersReducedMotion(): that also folds in the
+    // OS animation setting, which is force-disabled under RDP (and by users
+    // who turned off window animations for unrelated reasons), so gating on
+    // it would freeze the scope for them with no in-app setting to explain it.
+    if (piSettings->reduce_motion)
+        scopeWindow->Pause();
     scopeWindow->setObjectName("scopes");
     // Scope chrome sits a step below body text (was `*#scopes { font-size: small }`).
     ApplyFontRole(scopeWindow, FontRole::Small);
@@ -954,6 +927,10 @@ void MainWindow::setupWindowStructure()
 
         connect(workspace, SIGNAL(cursorPositionChanged(int, int)), this, SLOT(updateContext(int, int)));
         connect(workspace, &SonicPiScintilla::zoomLevelChanged, this, &MainWindow::updateErrorCardZoom);
+        // queued: the replace confirm is a modal dialog, which must not run
+        // inside the drop
+        connect(workspace, &SonicPiScintilla::setDropped, this, &MainWindow::loadSetFromFile, Qt::QueuedConnection);
+        connect(workspace, &SonicPiScintilla::linkDropped, this, &MainWindow::openLink, Qt::QueuedConnection);
         connect(workspace, &SonicPiScintilla::docsRequested, this,
                 [this](const QString& name) { showHelpForKeyword(name); });
         connect(workspace, &SonicPiScintilla::announceRequested, this,
@@ -1130,7 +1107,7 @@ void MainWindow::setupWindowStructure()
     tutorialPane->setMinimumHeight(100);
 
     docsplit = new ThinSplitter;
-    docsplit->setHandleWidth(7);
+    docsplit->setHandleWidth(Divider::kExtent);
     docsplit->addWidget(docsNavTabs);
     docsplit->addWidget(tutorialPane);
 
@@ -1173,8 +1150,6 @@ void MainWindow::setupWindowStructure()
 
     connect(tutorialPane, &TutorialPane::runRequested, this,
             [this](const QString& code, const QString& workspace, bool silent, bool scopeTap) {
-                if (!piSettings->reduce_motion)
-                    scopeWindow->Resume();
                 // Jukebox runs are wrapped in an fx_scope_out tap (scope_num 1,
                 // matching kJukeboxScopeSlot) so the Examples scope shows only
                 // this run's audio while the main scope keeps showing the mix.
@@ -1238,8 +1213,6 @@ void MainWindow::setupWindowStructure()
     connect(quickstartPane, &QuickstartPane::runRequested, this,
             [this](const QString& title, const QString& code, const QString& workspace,
                    int scopeSlot) {
-                if (!piSettings->reduce_motion)
-                    scopeWindow->Resume();
                 // Only live_loop cards are beat-synced: `link 1` quantises their
                 // start to the next Link beat so loops drop in together and in
                 // time. One-shot cards fire immediately (no wait). The `link 1;`
@@ -1279,19 +1252,34 @@ void MainWindow::setupWindowStructure()
             quickstartPane, &QuickstartPane::runOutput);
     connect(m_spClient.get(), &SonicPi::QtAPIClient::RunErrorReceived,
             quickstartPane, &QuickstartPane::runError);
+    // A sound's line flashes where its run's code is: a buffer, or a card.
     connect(m_spClient.get(), &SonicPi::QtAPIClient::FlashReceived, this,
             [this](const QString& workspace, int line) {
-                // Same pref gate and output-latency delay as the editor flash.
-                if (!piSettings->flash_code)
+                // A buffer's runs are on workspace_ names. Others (cards,
+                // tutorial, jukebox) are not, and filenameToWorkspace would
+                // fall back to buffer 0 for them and flash the wrong tab.
+                const bool buffer = workspace.startsWith("workspace_");
+                if (!piSettings->flash_code && !(buffer && piSettings->flash_gutter))
                     return;
-                auto flash = [this, workspace, line] {
+                auto apply = [this, workspace, line, buffer] {
+                    if (buffer)
+                    {
+                        // Runtime lines are 1-based; Scintilla lines are 0-based.
+                        // flashRunLine maps the run-time line through edit-tracking
+                        // handles so it lands correctly after live edits.
+                        if (SonicPiScintilla* ws = filenameToWorkspace(workspace.toStdString()))
+                            ws->flashRunLine(line - 1, piSettings->flash_code, piSettings->flash_gutter);
+                        return;
+                    }
                     quickstartPane->flashLine(workspace, line);
                     tutorialPane->flashLine(workspace, line);
                 };
+                // The spider sends flashes at scheduled-render time; delay by
+                // the device output latency so the pulse lands with the sound.
                 if (m_visualLatencyMs > 0)
-                    QTimer::singleShot(m_visualLatencyMs, this, flash);
+                    QTimer::singleShot(m_visualLatencyMs, this, apply);
                 else
-                    flash();
+                    apply();
             });
     southTabs->setTabToolTip(southTabs->addTab(quickstartPane, tr("Cards")),
                              tr("Quickstart cards: small runnable snippets to get going."));
@@ -1323,21 +1311,24 @@ void MainWindow::setupWindowStructure()
     auto makeHelpChevron = [this, gripRow](ChevronButton::Dir dir, const QString& accessible) {
         auto* b = new ChevronButton(helpChevrons);
         b->setObjectName("helpGrip");
-        b->setFixedSize(ScaleForDPI(36, 16));
+        b->setFixedSize(Divider::gripSize(Qt::Horizontal));
         b->setDir(dir);
         b->setAccessibleName(accessible);
         gripRow->addWidget(b);
         return b;
     };
     helpFullButton = makeHelpChevron(ChevronButton::Up, tr("Make the help panel full size"));
-    helpHideButton = makeHelpChevron(ChevronButton::Down, tr("Hide the documentation and information panel"));
+    helpFullButton->setToolTip(helpFullButton->accessibleName());
+    // The hide grip's label says what it does from the panel's state, so it
+    // is set where the state is applied (updateHelpGripLabels), nowhere else.
+    helpHideButton = makeHelpChevron(ChevronButton::Down, QString());
     // The grip on the editor | column divider, at its top (every grip sits
     // at its divider's trailing end: the right of a horizontal one, the top
     // of a vertical one). Right puts the scope, log, cues and metronome
     // away together; left brings them back (SideColumnModel).
     sideGrip = new ChevronButton(this);
     sideGrip->setObjectName("sideGrip");
-    sideGrip->setFixedSize(ScaleForDPI(16, 36));
+    sideGrip->setFixedSize(Divider::gripSize(Qt::Vertical));
     sideGrip->setDir(ChevronButton::Right);
     sideGrip->setAccessibleName(tr("Hide the scope, log and cues"));
     connect(sideGrip, &QToolButton::clicked, this, [this] { sideToggle(); });
@@ -1364,7 +1355,12 @@ void MainWindow::setupWindowStructure()
     });
     docWidget->setFocusPolicy(Qt::NoFocus);
     docWidget->setAllowedAreas(Qt::BottomDockWidgetArea);
-    docWidget->setWidget(southTabs);
+    helpPaneHolder = new QWidget;
+    auto* holderLayout = new QVBoxLayout(helpPaneHolder);
+    holderLayout->setContentsMargins(0, 0, 0, 0);
+    holderLayout->setSpacing(0);
+    holderLayout->addWidget(southTabs);
+    docWidget->setWidget(helpPaneHolder);
     docWidget->setObjectName("help");
 
     // No title row: the help pane starts right under the dock separator, which
@@ -1446,14 +1442,29 @@ void MainWindow::setupWindowStructure()
     // Qt reserves the separator beside each placeholder but paints nothing
     // there (it is fixed-size): these paint it, the one divider, laid over
     // that rect by positionHelpChevrons / positionSideGrip.
-    helpAwayDivider = new DividerOverlay(Qt::Horizontal, this);
-    helpAwayDivider->setObjectName("helpAwayDivider");
-    helpAwayDivider->hide();
-    helpAwayDivider->installEventFilter(this);
+    helpDividerOverlay = new DividerOverlay(Qt::Horizontal, this);
+    helpDividerOverlay->setObjectName("helpDividerOverlay");
+    helpDividerOverlay->hide();
+    // The divider is a control in every state, as the web's: dragged up while
+    // the panel is away it brings it back; dragged down from full size it
+    // gives the editor its room back; either way it then sizes the panel.
+    helpDividerOverlay->setDragHandler([this](DividerOverlay::Drag phase, const QPoint& global) {
+        helpDividerDragged(phase, global);
+    });
     sideAwayDivider = new DividerOverlay(Qt::Vertical, this);
     sideAwayDivider->setObjectName("sideAwayDivider");
     sideAwayDivider->hide();
-    sideAwayDivider->installEventFilter(this);
+    // Each divider and the grips on it light as one control, as the web's.
+    m_helpLink = new DividerLink([this](bool on) { lightDivider(m_helpLink, helpDividerOverlay, m_helpBar, on); }, this);
+    m_helpLink->addGrip(helpFullButton);
+    m_helpLink->addGrip(helpHideButton);
+    m_helpLink->watch(helpDividerOverlay);
+    m_sideLink = new DividerLink([this](bool on) { lightDivider(m_sideLink, sideAwayDivider, m_sideBar, on); }, this);
+    m_sideLink->addGrip(sideGrip);
+    m_sideLink->watch(sideAwayDivider);
+    // The pointer gone from a separator straight onto Settings, which keeps its
+    // moves to itself: the separator is no longer pointed at.
+    prefsWidget->installEventFilter(this);
 
     // Currently causes a segfault when dragging doc pane out of main
     // window:
@@ -1619,10 +1630,12 @@ void MainWindow::positionSideGrip()
     QWidget* editorArea = centralWidget();
     if (!editorArea || !editorArea->isVisible())
     {
+        placeDividerBar(m_sideLink, sideAwayDivider, m_sideBar, QRect());
         sideGrip->hide();
         return;
     }
     const QRect room = editorArea->geometry();
+    QRect separator;   // Qt's own, while the column is beside the code
     int cx = -1;
     const int sep = style()->pixelMetric(QStyle::PM_DockWidgetSeparatorExtent, nullptr, this);
     if (sideAwayDivider && !(sideAwayDock && sideAwayDock->isVisible() && m_sideColumn.away()))
@@ -1631,6 +1644,7 @@ void MainWindow::positionSideGrip()
     {
         if (!sideAwayDock || !sideAwayDock->isVisible())
         {
+            placeDividerBar(m_sideLink, sideAwayDivider, m_sideBar, QRect());
             sideGrip->hide();
             return;
         }
@@ -1639,7 +1653,7 @@ void MainWindow::positionSideGrip()
         {
             sideAwayDivider->setGeometry(bar);
             sideAwayDivider->show();
-            sideAwayDivider->raise();
+            SonicPi::OverlayPane::raiseBeneathOpen(sideAwayDivider);
         }
         cx = bar.center().x();
     }
@@ -1651,14 +1665,41 @@ void MainWindow::positionSideGrip()
                 anyShown = true;
         if (!anyShown)
         {
+            placeDividerBar(m_sideLink, sideAwayDivider, m_sideBar, QRect());
             sideGrip->hide();
             return;
         }
-        cx = room.right() + 1 + sep / 2;
+        separator = QRect(room.right() + 1, room.top(), sep, room.height());
+        cx = separator.center().x();
     }
+    placeDividerBar(m_sideLink, sideAwayDivider, m_sideBar, separator);
     sideGrip->move(cx - sideGrip->width() / 2, room.top() + ScaleHeightForDPI(24));
     sideGrip->show();
-    sideGrip->raise();   // above the overlay
+    SonicPi::OverlayPane::raiseBeneathOpen(sideGrip);   // above the divider overlay
+}
+
+// A divider lit with its grips, or put back: the overlay standing in for it,
+// and Qt's own separator, which the proxy style paints.
+void MainWindow::lightDivider(const DividerLink* link, DividerOverlay* overlay, const QRect& bar, bool on)
+{
+    if (overlay)
+        overlay->setForcedHover(on);
+    DividerProxyStyle::setLitBar(link, on ? bar : QRect());
+    if (bar.isValid())
+        update(bar);
+}
+
+// Where Qt's separator under a link now is: empty while it has none. A lit one
+// that moves stays lit where it has gone.
+void MainWindow::placeDividerBar(DividerLink* link, DividerOverlay* overlay, QRect& bar, const QRect& now)
+{
+    if (bar == now)
+        return;
+    if (bar.isValid())
+        update(bar);
+    bar = now;
+    if (link && link->lit())
+        lightDivider(link, overlay, bar, true);
 }
 
 void MainWindow::docLinkClicked(const QUrl& url)
@@ -1940,10 +1981,6 @@ void MainWindow::toggleScopePaused()
 
 void MainWindow::allJobsCompleted()
 {
-    // Deferred: the scope keeps drawing until tails ring out and the
-    // spectrum decays, then pauses itself (no idle CPU while silent).
-    scopeWindow->PauseWhenSilent();
-
     // re-enable log text selection
     // Keyboard-selectable too, so a screen reader can move a caret through the
     // log and read it (mouse-only selection isn't navigable by keyboard).
@@ -2907,54 +2944,6 @@ void MainWindow::honourPrefs()
     toggleOSCServer(1);
     toggleIcons();
     scope();
-
-    // Restore the graphics output window, the same way the scope is restored
-    // above.
-    //
-    // Without this, "prefs/graphics/show-output" only ever ticked the menu action
-    // - nothing called showGraphicsOutput() on the boot path - so a remembered
-    // window opened only if the user toggled the item off and on again. The
-    // preference looked saved and was silently not honoured.
-    //
-    // Guarded on the action existing because honourPrefs() runs more than once
-    // (onServerReady and onSpiderReady); showGraphicsOutput() is idempotent, so
-    // repeating it is harmless, but reaching it before the menu is built is not.
-    if (graphicsOutAct && piSettings->show_graphics && !(graphicsWindow && graphicsWindow->isVisible()))
-        showGraphicsOutput(true);
-
-    // Adopt the configured resolution and frame rate on the boot path too.
-    //
-    // The render thread reads the size from settings when it starts, so this is not what makes
-    // startup work - it is what makes startup and the menu ONE path, so a value cannot be
-    // honoured differently depending on whether it was set before or after launch. It also
-    // puts the tick marks where the file says they belong before the menu is first opened.
-    //
-    // Guarded like the call above, for the same reason: honourPrefs() runs more than once, and
-    // applyGraphicsConfig() only acts when a value actually differs, so repeating it is
-    // harmless while reaching it before the render thread exists is not.
-    if (graphicsRenderThread)
-        applyGraphicsConfig();
-
-    // Make sure the editable shader exists before anything asks to open or compile it. Done once at
-    // boot rather than on first use, so the file the editor writes and the renderer reads exists
-    // before either has a chance to disagree about which one that is.
-    //
-    // The file comes from the buffer's NAME, and the name is asked of the render thread - the same
-    // place the editor asks - so "the file I am editing" and "the file being rendered" cannot end up
-    // being two different files.
-    if (graphicsRenderThread)
-    {
-        // A DOCUMENT IS NOT SEEDED. Its passes are its own files, and there is no `<name>.frag` for it - so
-        // asking for one produced "no shipped copy of <name>.frag to seed from" on every start of a document
-        // session, which reads as a fault and is not one.
-        const QString active = graphicsRenderThread->shaderName();
-        if (!SonicPi::graphicsDocumentExists(SonicPi::GraphicsSettings::shaderDirectoryPath(), active))
-        {
-            SonicPi::GraphicsSettings::ensureShaderFile(
-                SonicPi::GraphicsSettings::fragmentFileName(active));
-        }
-    }
-
     changeShowAutoCompletion();
     changeShowCompletionHelp();
     changeShowContext();
@@ -3196,14 +3185,18 @@ QString MainWindow::currentTabLabel()
     return editorTabWidget->tabText(editorTabWidget->currentIndex());
 }
 
+// Load into Buffer, as the web's Load: a buffer's code, or a set (loadFile below
+// tells them apart, SetBundle::isSet), which opens as a set.
 bool MainWindow::loadFile()
 {
-    QString selfilter = QString("%1 (*.rb *.txt)").arg(tr("Buffer files"));
+    QString selfilter = QString("%1 (*.rb *.txt *.sonicpi)").arg(tr("Sonic Pi files"));
     QString lastBufferDir = gui_settings->value("lastBufferDir", QDir::homePath() + "/Desktop").toString();
-    QString fileName = QFileDialog::getOpenFileName(this, tr("Load Sonic Pi Buffer"), lastBufferDir, QString("%1 (*.rb *.txt);;%2 (*.txt);;%3 (*.rb);;%4 (*.*)").arg(tr("Buffer files")).arg(tr("Text files")).arg(tr("Ruby files")).arg(tr("All files")), &selfilter);
+    QString fileName = QFileDialog::getOpenFileName(this, tr("Load Sonic Pi Buffer"), lastBufferDir,
+        QString("%1 (*.rb *.txt *.sonicpi);;%2 (*.rb *.txt);;%3 (*.sonicpi);;%4 (*.txt);;%5 (*.rb);;%6 (*.*)")
+            .arg(tr("Sonic Pi files"), tr("Buffer files"), tr("Sonic Pi Sets"), tr("Text files"), tr("Ruby files"), tr("All files")),
+        &selfilter);
     if (!fileName.isEmpty())
     {
-        gui_settings->setValue("lastBufferDir", QDir(fileName).absolutePath());
         SonicPiScintilla* p = getCurrentWorkspace();
         loadFile(fileName, p);
         return true;
@@ -3214,16 +3207,26 @@ bool MainWindow::loadFile()
     }
 }
 
+// Save Buffer As, as the web's Save: the file named after the buffer, beside the last one loaded or saved (that
+// one itself, the buffer's name its, to save back to it)
 bool MainWindow::saveAs()
 {
     QString selfilter = QString("%1 (*.rb *.txt)").arg(tr("Buffer files"));
-    QString lastBufferDir = gui_settings->value("lastBufferDir", QDir::homePath() + "/Desktop").toString();
+    const QFileInfo last(gui_settings->value("lastBufferDir", QDir::homePath() + "/Desktop").toString());
+    const QString folder = last.isDir() ? last.absoluteFilePath() : last.absolutePath();
+    // what no system allows in a file's name taken out, as the web's fileName()
+    QString name = bufferName(editorTabWidget->currentIndex());
+    name.replace(QRegularExpression("[/\\\\:*?\"<>|\\x00-\\x1f]+"), "-");
+    name.remove(QRegularExpression("^[.\\s]+|[.\\s]+$"));
+    if (name.isEmpty())
+        name = "sonic-pi";
+    const QString lastBufferDir = last.isFile() && last.completeBaseName() == name ? last.absoluteFilePath() : folder + "/" + name + ".txt";
     QString fileName = QFileDialog::getSaveFileName(this, tr("Save Current Buffer"), lastBufferDir, QString("%1 (*.rb *.txt);;%2 (*.txt);;%3 (*.rb);;%4 (*.*)").arg(tr("Buffer files")).arg(tr("Text files")).arg(tr("Ruby files")).arg(tr("All files")), &selfilter);
 
     if (!fileName.isEmpty())
     {
         gui_settings->setValue("lastBufferDir", QDir(fileName).absolutePath());
-        if (!fileName.contains(QRegularExpression("\\.[a-z]+$")))
+        if (!fileName.contains(QRegularExpression("\\.[a-z]+$", QRegularExpression::CaseInsensitiveOption)))
         {
             fileName = fileName + ".txt";
         }
@@ -3235,7 +3238,9 @@ bool MainWindow::saveAs()
     }
 }
 
-bool MainWindow::confirmAction(const QString& text, const QString& informativeText, const QString& confirmLabel)
+// field, if any, is the caller's (Open Link's line for the link): shown under
+// the text, focused, Return confirming, and handed back before the dialog goes.
+bool MainWindow::confirmAction(const QString& text, const QString& informativeText, const QString& confirmLabel, QWidget* field)
 {
     // QMessageBox renders half-native under the app QSS on macOS.
     QDialog dlg(this);
@@ -3269,16 +3274,34 @@ bool MainWindow::confirmAction(const QString& text, const QString& informativeTe
     layout->setSpacing(10);
     layout->addWidget(headline);
     layout->addWidget(body);
+    if (field)
+    {
+        layout->addWidget(field);
+    }
     layout->addSpacing(14);
     layout->addLayout(buttons);
 
     dlg.setMinimumWidth(420);
-    cancelBtn->setDefault(true);
-    cancelBtn->setFocus();
+    if (field)
+    {
+        confirmBtn->setDefault(true);
+        field->setFocus();
+    }
+    else
+    {
+        cancelBtn->setDefault(true);
+        cancelBtn->setFocus();
+    }
     connect(cancelBtn, &QPushButton::clicked, &dlg, &QDialog::reject);
     connect(confirmBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
 
-    return dlg.exec() == QDialog::Accepted;
+    const bool confirmed = dlg.exec() == QDialog::Accepted;
+    if (field)
+    {
+        layout->removeWidget(field);
+        field->setParent(nullptr);
+    }
+    return confirmed;
 }
 
 bool MainWindow::loadSet()
@@ -3304,7 +3327,19 @@ void MainWindow::loadSetFromFile(const QString& path)
         updateColourTheme();
         return;
     }
+    if (!replaceAllBuffers(set, QFileInfo(path).completeBaseName()))
+    {
+        return;
+    }
+    currentSetPath = QFileInfo(path).absoluteFilePath();
+    rememberRecentSet(path);
+    showStatusAndAnnounce(tr("Set %1 loaded...").arg(QFileInfo(path).completeBaseName()), 2000);
+}
 
+// Every buffer replaced by a set's, once asked (when any has code), each one
+// undoable; false when the replace was cancelled.
+bool MainWindow::replaceAllBuffers(const SonicPi::SetBundle::Load& set, const QString& name)
+{
     bool anyContent = false;
     for (int i = 0; i < workspace_max; i++)
     {
@@ -3317,17 +3352,19 @@ void MainWindow::loadSetFromFile(const QString& path)
     if (anyContent)
     {
         if (!confirmAction(
-                tr("Load the set %1?").arg(QFileInfo(path).completeBaseName()),
+                tr("Load the set %1?").arg(name),
                 tr("The current contents of all buffers will be replaced with the buffers stored in this set."),
                 tr("Replace")))
         {
-            return;
+            return false;
         }
     }
 
     for (int i = 0; i < workspace_max && i < set.buffers.size(); i++)
     {
-        workspaces[i]->setText(set.buffers[i]);
+        // one undoable change in each buffer, as Load into Buffer's
+        workspaces[i]->cancelInsertPreview();
+        workspaces[i]->replaceBuffer(set.buffers[i], 0, 0, 0);
         const int zoom = (i < set.zooms.size()) ? set.zooms[i] : SonicPiScintilla::kDefaultZoom;
         workspaces[i]->setProperty("zoom", QVariant(zoom));
         workspaces[i]->zoomTo(zoom);
@@ -3335,11 +3372,200 @@ void MainWindow::loadSetFromFile(const QString& path)
     }
     editorTabWidget->setCurrentIndex(set.currentBuffer);
     saveWorkspaces();
-
-    currentSetPath = QFileInfo(path).absoluteFilePath();
     currentSetMeta = set.meta;
-    rememberRecentSet(path);
-    showStatusAndAnnounce(tr("Set %1 loaded...").arg(QFileInfo(path).completeBaseName()), 2000);
+    setBufferNames(set.names);
+    return true;
+}
+
+// ── Links: a program or a whole set, as Share on the web writes them ──────────
+// One codec for both apps (app/sharelink), so a link either writes the other
+// opens, and both write the same link.
+
+static const char* const shareLinkBase = "https://sonic-pi.net/code.html#code=";
+
+// A link someone shared (here, or from the web's Share): a buffer's code into
+// the buffer showing, one undoable change, as Load into Buffer; a set opens as
+// a set, as Load Set, with no file until Save Set asks for one.
+void MainWindow::openLink(const QString& link)
+{
+    const SonicPi::ShareLink::Read read = SonicPi::ShareLink::decode(link.toStdString());
+    if (!read.ok)
+    {
+        const QString why = QString::fromStdString(read.error);
+        QString said = tr("This link's code could not be read: part of it is missing or changed. Ask for the link again, or for the program as a file.");
+        if (why.contains("cut short"))
+            said = tr("This link is missing part of its code: it was cut short on its way here. Ask for the link again, or for the program as a file.");
+        else if (why.contains("newer Sonic Pi"))
+            said = tr("This link was made by a newer Sonic Pi than this one. Update Sonic Pi, then open the link again.");
+        QMessageBox::warning(this, tr("Sonic Pi"), said);
+        updateColourTheme();
+        return;
+    }
+    const QString code = QString::fromStdString(read.code);
+    if (SonicPi::SetBundle::isSet(code))
+    {
+        const SonicPi::SetBundle::Load set = SonicPi::SetBundle::deserialise(code);
+        if (!set.ok)
+        {
+            QMessageBox::warning(this, tr("Sonic Pi"), tr("Cannot open the link's set:\n%1.").arg(set.error));
+            updateColourTheme();
+            return;
+        }
+        const QString name = set.meta.value("name").toString().trimmed();
+        if (!replaceAllBuffers(set, name.isEmpty() ? tr("Shared Set") : name))
+        {
+            return;
+        }
+        currentSetPath.clear();
+        showStatusAndAnnounce(tr("Set %1 opened from the link...").arg(name.isEmpty() ? tr("Shared Set") : name), 2000);
+        return;
+    }
+    SonicPiScintilla* ws = getCurrentWorkspace();
+    ws->cancelInsertPreview();
+    ws->replaceBuffer(code, 0, 0, 0);
+    setBufferName(editorTabWidget->currentIndex(), QString());
+    showStatusAndAnnounce(tr("Link opened into buffer %1...").arg(editorTabWidget->currentIndex()), 2000);
+}
+
+// Open Link: a link pasted in (the clipboard's, when it holds one)
+void MainWindow::askForLink()
+{
+    const auto field = std::make_unique<QLineEdit>();
+    field->setObjectName("linkField");
+    field->setAccessibleName(tr("Link"));
+    field->setPlaceholderText(shareLinkBase);
+    const QString held = QApplication::clipboard()->text().trimmed();
+    if (held.contains("#code="))
+    {
+        field->setText(held);
+    }
+    if (confirmAction(tr("Open a link"),
+                      tr("A link someone shared, from Sonic Pi or sonic-pi.net. A buffer's code goes into this buffer; a set opens as a set."),
+                      tr("Open"), field.get()))
+    {
+        openLink(field->text());
+    }
+}
+
+// The set's name: its file's once saved, else the one it came with, else My Set
+QString MainWindow::currentSetName() const
+{
+    if (!currentSetPath.isEmpty())
+        return QFileInfo(currentSetPath).completeBaseName();
+    const QString name = currentSetMeta.value("name").toString().trimmed();
+    return name.isEmpty() ? tr("My Set") : name;
+}
+
+QVector<QString> MainWindow::bufferNames() const
+{
+    const QStringList kept = gui_settings->value("bufferNames").toStringList();
+    QVector<QString> names(workspace_max);
+    for (int i = 0; i < workspace_max && i < kept.size(); i++)
+        names[i] = kept[i];
+    return names;
+}
+
+QString MainWindow::bufferName(int i) const
+{
+    const QString name = bufferNames().value(i);
+    return name.isEmpty() ? QString("buffer_%1").arg(i) : name;
+}
+
+void MainWindow::setBufferNames(const QVector<QString>& names)
+{
+    QStringList kept;
+    for (int i = 0; i < workspace_max; i++)
+    {
+        // as a set's file has it (SetBundle): trimmed, within bounds, and buffer_<i> no name of its own
+        QString name = names.value(i).trimmed().left(SonicPi::SetBundle::NameMax);
+        kept << (name == QString("buffer_%1").arg(i) ? QString() : name);
+    }
+    gui_settings->setValue("bufferNames", kept);
+}
+
+void MainWindow::setBufferName(int i, const QString& name)
+{
+    QVector<QString> names = bufferNames();
+    names[i] = name;
+    setBufferNames(names);
+}
+
+QJsonObject MainWindow::setMeta() const
+{
+    QJsonObject meta = currentSetMeta;
+    const QVector<QString> names = bufferNames();
+    if (std::any_of(names.begin(), names.end(), [](const QString& n) { return !n.isEmpty(); }))
+        meta["names"] = QJsonArray::fromStringList(QStringList(names.begin(), names.end()));
+    else
+        meta.remove("names");
+    return meta;
+}
+
+// Share, as the web's Share button: the buffer showing or the whole set, as a link copied, a QR code, the link
+// shown, or a file
+void MainWindow::share()
+{
+    // its button opens it and closes it, as the web's
+    if (sharePanel)
+    {
+        sharePanel->close();
+        return;
+    }
+    SonicPiScintilla* ws = getCurrentWorkspace();
+    ws->cancelInsertPreview();
+    const int index = editorTabWidget->currentIndex();
+    const QString code = ws->text();
+    const QStringList lines = code.trimmed().isEmpty() ? QStringList() : QString(code).remove(QRegularExpression("\\s+$")).split('\n');
+
+    SharePanel::Scope buffer;
+    buffer.kind = tr("This buffer");
+    buffer.summary = lines.size() == 1 ? tr("1 line") : tr("%1 lines").arg(lines.size());
+    buffer.title = tr("buffer %1").arg(index);
+    buffer.about = tr("Save the current buffer as a single plain text file.");
+    buffer.code = [code] { return code; };
+    buffer.save = [this] { return saveAs(); };
+    buffer.fileKind = ".txt";
+    buffer.name = bufferName(index);
+    buffer.setFields = [this, index](const QString& name, const QString&) { setBufferName(index, name); };
+
+    SharePanel::Scope set;
+    set.kind = tr("Whole set");
+    set.summary = tr("%1 buffers").arg(workspace_max);
+    set.title = tr("the set \"%1\"").arg(currentSetName());
+    set.about = tr("Save all buffers together as one set with an optional name and description.");
+    set.code = [this] {
+        QVector<QString> buffers(workspace_max);
+        QVector<int> zooms(workspace_max);
+        for (int i = 0; i < workspace_max; i++)
+        {
+            workspaces[i]->cancelInsertPreview();
+            buffers[i] = workspaces[i]->text();
+            zooms[i] = workspaces[i]->currentZoom();
+        }
+        return SonicPi::SetBundle::serialise(buffers, editorTabWidget->currentIndex(), zooms,
+                                             SonicPi::SetBundle::namedAfter(currentSetPath, setMeta()));
+    };
+    set.save = [this] { return saveSetAs(); };
+    set.fileKind = ".sonicpi";
+    set.described = true;
+    set.nameEditable = currentSetPath.isEmpty();
+    set.name = currentSetName();
+    set.description = currentSetMeta.value("description").toString();
+    set.setFields = [this](const QString& name, const QString& description) {
+        if (currentSetPath.isEmpty())
+            currentSetMeta["name"] = name;
+        if (description.trimmed().isEmpty())
+            currentSetMeta.remove("description");
+        else
+            currentSetMeta["description"] = description;
+    };
+
+    // a panel over the window, the window's shortcuts working while it is open; another buffer chosen closes it, as
+    // what it shows and shares is the one it opened on
+    sharePanel = new SharePanel(buffer, set, theme, this);
+    connect(editorTabWidget, &QTabWidget::currentChanged, sharePanel, &QWidget::close);
+    QWidget* button = toolBar->widgetForAction(shareAct);
+    sharePanel->openUnder(button && button->isVisible() ? button : nullptr);
 }
 
 void MainWindow::rememberRecentSet(const QString& path)
@@ -3361,7 +3587,7 @@ bool MainWindow::saveSetAs()
 {
     QString lastSetDir = gui_settings->value("lastSetDir", QDir::homePath() + "/Desktop").toString();
     QString fileName = QFileDialog::getSaveFileName(this, tr("Save Current Set"),
-        lastSetDir + "/" + tr("My Set") + ".sonicpi",
+        lastSetDir + "/" + currentSetName() + ".sonicpi",
         QString("%1 (*.sonicpi)").arg(tr("Sonic Pi Sets")));
     if (fileName.isEmpty())
     {
@@ -3389,10 +3615,12 @@ bool MainWindow::saveSetToPath(const QString& path)
     QVector<int> zooms(workspace_max);
     for (int i = 0; i < workspace_max; i++)
     {
+        // never an un-committed card hover projection
+        workspaces[i]->cancelInsertPreview();
         buffers[i] = workspaces[i]->text();
         zooms[i] = workspaces[i]->currentZoom();
     }
-    const QString err = SonicPi::SetBundle::write(path, buffers, editorTabWidget->currentIndex(), zooms, currentSetMeta);
+    const QString err = SonicPi::SetBundle::write(path, buffers, editorTabWidget->currentIndex(), zooms, setMeta());
     if (!err.isEmpty())
     {
         QMessageBox::warning(this, tr("Sonic Pi"),
@@ -3440,6 +3668,7 @@ void MainWindow::clearAllBuffers()
     // Detach so a later Save Set can't overwrite the old set with new material.
     currentSetPath.clear();
     currentSetMeta = QJsonObject();
+    setBufferNames({});
     showStatusAndAnnounce(tr("All buffers cleared..."), 2000);
 }
 
@@ -3520,20 +3749,13 @@ void MainWindow::updateHelpChevronIcons()
 {
     if (!helpFullButton || !helpHideButton)
         return;
-    // The divider grips' palette, the web's: the window border colour at rest
-    // with the muted foreground on it, the accent and its contrast text under
-    // the pointer. ChevronButton draws them; so do the metrics dividers' knobs.
-    const QColor border = theme->color("WindowBorder");
-    const QColor accent = theme->color("HighlightedBackground");
-    const QColor rest   = SonicPiTheme::blend(theme->color("LogForeground"),
-                                              theme->color("LogBackground"), 0.30);
-    const QColor hover  = theme->contrastingText(accent);
     // The hide chevron points the way it acts: down to put the panel away, up
     // to bring it back.
     const bool wayBack = m_helpPanel.hideGripPointsUp() || (docWidget && docWidget->isFloating());
     helpHideButton->setDir(wayBack ? ChevronButton::Up : ChevronButton::Down);
+    const Divider::GripColours grips = Divider::gripColours(*theme);
     for (ChevronButton* b : { helpFullButton, helpHideButton, sideGrip })
-        if (b) b->setColors(border, accent, rest, hover);
+        Divider::colourGrip(b, grips);
     if (helpChevrons)
         helpChevrons->setStyleSheet(QStringLiteral("#helpDividerGrips { background: transparent; }"));
 }
@@ -3560,7 +3782,10 @@ void MainWindow::applyHelpPanel()
     }
     else if (!m.panelVisible() && SonicPi::dockShown(docWidget))
     {
-        m_savedDockH = docWidget->height();   // for the way back
+        // For the way back — but not a height the panel was dragged away
+        // at: it comes back usable, as the web's does.
+        if (docWidget->height() > helpSnapHeight())
+            m_savedDockH = docWidget->height();
         docWidget->hide();
     }
 
@@ -3586,7 +3811,14 @@ void MainWindow::applyHelpPanel()
         m_hiddenForHelpFull.clear();
     }
     m_helpFullApplied = full;
-
+   // Full size has no Qt separator above the pane, so the divider overlay
+   // sits on the pane's top edge (positionHelpChevrons): leave it a band
+   // of its own rather than painting over the first tab.
+    if (helpPaneHolder)
+    {
+        const int sep = style()->pixelMetric(QStyle::PM_DockWidgetSeparatorExtent, nullptr, this);
+        helpPaneHolder->layout()->setContentsMargins(0, full ? sep : 0, 0, 0);
+    }
     if (helpAct && theme)   // the action and the theme come after the dock in setup
     {
         QSignalBlocker blocker(helpAct);
@@ -3595,15 +3827,11 @@ void MainWindow::applyHelpPanel()
     }
 
     const bool floating = docWidget->isFloating();
-    const bool wayBack = m.hideGripPointsUp() || floating;
     if (helpAwayDock)
         helpAwayDock->setVisible(m.awayBarVisible() || floating);
     if (helpFullButton)
         helpFullButton->setVisible(m.fullGripVisible() && !floating);
-    if (helpHideButton)
-        helpHideButton->setAccessibleName(wayBack
-            ? tr("Show the documentation and information panel")
-            : tr("Hide the documentation and information panel"));
+    updateHelpGripLabels();
     updateHelpChevronIcons();
     positionHelpChevrons();
     positionSideGrip();
@@ -3611,6 +3839,111 @@ void MainWindow::applyHelpPanel()
     // placed again after it, whatever events that pass does or does not send.
     QTimer::singleShot(0, this, [this] { positionHelpChevrons(); positionSideGrip(); });
     m_applyingHelpPanel = false;
+}
+
+// The hide grip's tooltip and accessible name: one wording, from the state
+// (HelpPanelModel::hideGripAction), with the Help shortcut once it exists.
+// A floating pane's grip brings it back docked, so it says so.
+void MainWindow::updateHelpGripLabels()
+{
+    if (!helpHideButton)
+        return;
+    using Grip = SonicPi::HelpPanelModel::GripAction;
+    const Grip action = (docWidget && docWidget->isFloating()) ? Grip::Show : m_helpPanel.hideGripAction();
+    QString label;
+    switch (action)
+    {
+    case Grip::Show:   label = tr("Show the documentation and information panel"); break;
+    case Grip::Hide:   label = tr("Hide the documentation and information panel"); break;
+    case Grip::Beside: label = tr("Back to the code, with the help panel beside it"); break;
+    }
+    helpHideButton->setAccessibleName(label);
+    const QString ks = helpAct ? helpAct->shortcut().toString(QKeySequence::NativeText) : QString();
+    helpHideButton->setToolTip(ks.isEmpty() ? label : tr("%1 (%2)").arg(label, ks));
+}
+
+// A drag on the overlay divider, as the web's drawer divider takes one: up
+// from away, or down from full size, a few pixels and the panel is beside
+// the code; from there the panel follows the pointer, and let go at the foot
+// it goes away (helpDragEnded). The overlay stays under the pointer for the
+// whole drag (positionHelpChevrons), so the pointer is never let go of.
+void MainWindow::helpDividerDragged(DividerOverlay::Drag phase, const QPoint& global)
+{
+    using Drag = DividerOverlay::Drag;
+    using State = SonicPi::HelpPanelModel::State;
+    if (!docWidget)
+        return;
+    switch (phase)
+    {
+    case Drag::Press:
+        m_helpDragFromY = global.y();
+        m_helpDividerDrag = false;
+        break;
+    case Drag::Move:
+    {
+        if (!m_helpDividerDrag)
+        {
+            const int dy = global.y() - m_helpDragFromY;
+            const int enough = ScaleHeightForDPI(6);
+            const State was = m_helpPanel.state();
+            const bool reveal = was == State::Away && dy <= -enough;   // dragged back up: what it had returns
+            const bool back   = was == State::Full && dy >= enough;    // the editor's room back
+            if (!reveal && !back)
+                return;
+            m_helpDividerDrag = true;
+            m_savedDockH = helpHeightFor(global);
+            m_helpPanel.beside();
+            applyHelpPanel();
+            showStatusAndAnnounce(was == State::Away ? tr("Showing help...") : tr("Help panel beside the code..."), 2000);
+        }
+        resizeDocks({ docWidget }, { helpHeightFor(global) }, Qt::Vertical);
+        positionHelpChevrons();
+        break;
+    }
+    case Drag::Release:
+        if (!m_helpDividerDrag)
+            return;
+        m_helpDividerDrag = false;
+        helpDragEnded();
+        positionHelpChevrons();
+        break;
+    }
+}
+
+// Any drag on the divider let go — the overlay's, or Qt's own separator
+// above the panel: at the foot, the panel goes away, as the web's does
+// within 70px of it.
+void MainWindow::helpDragEnded()
+{
+    if (!docWidget || docWidget->isFloating()
+        || m_helpPanel.state() != SonicPi::HelpPanelModel::State::Beside)
+        return;
+    if (SonicPi::HelpPanelModel::dragEndsAway(docWidget->height(), helpSnapHeight()))
+    {
+        m_helpPanel.away();
+        applyHelpPanel();
+        showStatusAndAnnounce(tr("Hiding help..."), 2000);
+    }
+}
+
+int MainWindow::helpSnapHeight() const
+{
+    return SonicPi::HelpPanelModel::snapHeight(ScaleHeightForDPI(70),
+                                               docWidget ? docWidget->minimumSizeHint().height() : 0);
+}
+
+// The panel's height with its top edge under the pointer: from the pointer
+// to the foot of the bottom area, which is the panel's own foot when it
+// shows, the placeholder's while it is away.
+int MainWindow::helpHeightFor(const QPoint& global) const
+{
+    const QWidget* foot = (docWidget && docWidget->isVisible() && !docWidget->isFloating())
+                              ? static_cast<const QWidget*>(docWidget)
+                              : static_cast<const QWidget*>(helpAwayDock);
+    if (!foot)
+        return 0;
+    const int bottom = foot->geometry().bottom();
+    return qMax(1, bottom - mapFromGlobal(global).y());
 }
 
 // The grips sit on the separator above the help pane, centred on it, 24px in
@@ -3624,38 +3957,67 @@ void MainWindow::positionHelpChevrons()
     if (!helpChevrons || !docWidget)
         return;
     helpChevrons->adjustSize();
+    const int sep = style()->pixelMetric(QStyle::PM_DockWidgetSeparatorExtent, nullptr, this);
+    // The divider the overlay paints, if any, and where the grips sit. The
+    // overlay is placed, never hidden and shown again, while a drag on it
+    // runs: a hide would let go of the pointer.
+    QRect overlay;
+    QRect separator;   // Qt's own, while the panel is beside the code
     int cy, right;
-    if (helpAwayDivider && !(helpAwayDock && helpAwayDock->isVisible()))
-        helpAwayDivider->hide();
     if (docWidget->isVisible() && !docWidget->isFloating())
     {
         const QRect pane = docWidget->geometry();
-        const int sep = style()->pixelMetric(QStyle::PM_DockWidgetSeparatorExtent, nullptr, this);
-        cy    = pane.top() - sep / 2;
+        if (!m_helpPanel.editorVisible())
+        {
+            // Full size: no separator above the pane, so the divider is
+            // painted along its top, the grip on it as always, and a drag
+            // down brings the editor back.
+            overlay = QRect(pane.left(), pane.top(), pane.width(), sep);
+            cy = overlay.center().y();
+        }
+        else
+        {
+            // Beside the code: Qt's separator. A drag that began on the
+            // overlay keeps it over the separator until the pointer lets go.
+            const QRect bar(pane.left(), pane.top() - sep, pane.width(), sep);
+            if (m_helpDividerDrag)
+                overlay = bar;
+            else
+                separator = bar;
+            cy = bar.center().y();
+        }
         right = pane.right();
     }
     else if (helpAwayDock && helpAwayDock->isVisible())
     {
-        const int sep = style()->pixelMetric(QStyle::PM_DockWidgetSeparatorExtent, nullptr, this);
-        const QRect bar = SonicPi::awaySeparatorRect(helpAwayDock, Qt::BottomDockWidgetArea, sep);
-        if (helpAwayDivider)
-        {
-            helpAwayDivider->setGeometry(bar);
-            helpAwayDivider->show();
-            helpAwayDivider->raise();
-        }
-        cy    = bar.center().y();
-        right = bar.right();
+        overlay = SonicPi::awaySeparatorRect(helpAwayDock, Qt::BottomDockWidgetArea, sep);
+        cy    = overlay.center().y();
+        right = overlay.right();
     }
     else
     {
+        placeDividerBar(m_helpLink, helpDividerOverlay, m_helpBar, QRect());
+        if (helpDividerOverlay)
+            helpDividerOverlay->hide();
         helpChevrons->hide();
         return;
+    }
+    placeDividerBar(m_helpLink, helpDividerOverlay, m_helpBar, separator);
+    if (helpDividerOverlay)
+    {
+        if (overlay.isValid())
+        {
+            helpDividerOverlay->setGeometry(overlay);
+            helpDividerOverlay->show();
+            SonicPi::OverlayPane::raiseBeneathOpen(helpDividerOverlay);
+        }
+        else
+            helpDividerOverlay->hide();
     }
     helpChevrons->move(right - ScaleWidthForDPI(24) - helpChevrons->width(),
                        cy - helpChevrons->height() / 2);
     helpChevrons->show();
-    helpChevrons->raise();
+    SonicPi::OverlayPane::raiseBeneathOpen(helpChevrons);
 }
 
 
@@ -3854,15 +4216,6 @@ void MainWindow::showBufferCapacityError()
 
 void MainWindow::runCode()
 {
-    // The scope is on screen by default, so with "Reduce animations" set it
-    // must not start moving on its own; the user resumes it deliberately via
-    // F12, the Visuals menu, or the scope button. This gates on the in-app
-    // preference alone, not prefersReducedMotion(): that also folds in the OS
-    // animation setting, which is force-disabled under RDP (and by users who
-    // turned off window animations for unrelated reasons), so gating on it
-    // would freeze the scope for them with no in-app setting to explain it.
-    if (!piSettings->reduce_motion)
-        scopeWindow->Resume();
     announce(tr("Run started"), false, SonicPi::Announcement::Transport);
 
     // move log cursors to the end of the logs. Keep them read-only but
@@ -3894,10 +4247,7 @@ void MainWindow::runCode()
         beautifyCode();
     }
 
-    ws->highlightCurrentLine();
-    lexer->highlightAll();
-    QTimer::singleShot(500, lexer, SLOT(unhighlightAll()));
-    QTimer::singleShot(500, ws, SLOT(unhighlightCurrentLine()));
+    ws->flashRun();
     ws->clearLineMarkers();
     resetErrorPane();
 
@@ -4166,8 +4516,6 @@ void MainWindow::openExample(const QString& path, const QString& title, int help
         return;
     }
 
-    if (!piSettings->reduce_motion)
-        scopeWindow->Resume();
     if (!(tutorialPane && tutorialPane->isVisible() && tutorialPane->playFirstSnippet()))
     {
         QFile file(path);
@@ -4242,11 +4590,6 @@ void MainWindow::zoomCurrentWorkspaceIn()
     statusBar()->showMessage(tr("Zooming In..."), 2000);
     SonicPiScintilla* ws = getCurrentWorkspace();
     ws->zoomFontIn();
-    // The shader editor is an editor too, and someone who has just enlarged their code is about to
-    // look at the shader they are writing. Kept in step here rather than by a second set of actions:
-    // one text-size control, both editors.
-    if (graphicsShaderWindow)
-        graphicsShaderWindow->zoomIn();
 }
 
 void MainWindow::zoomCurrentWorkspaceOut()
@@ -4254,8 +4597,6 @@ void MainWindow::zoomCurrentWorkspaceOut()
     statusBar()->showMessage(tr("Zooming Out..."), 2000);
     SonicPiScintilla* ws = getCurrentWorkspace();
     ws->zoomFontOut();
-    if (graphicsShaderWindow)
-        graphicsShaderWindow->zoomOut();
 }
 
 void MainWindow::updateErrorCardZoom()
@@ -4398,9 +4739,7 @@ void MainWindow::scopeVisibilityChanged()
     // is the user's, the dock follows both.
     if (!m_sideColumn.away() && !m_restoringLayout)
         piSettings->show_scopes = scopeWidget->isVisible();
-    // A hidden dock must suspend the audio processor: the deferred
-    // pause-when-silent cannot resolve inside OnConsumeAudioData's
-    // isVisible() gate.
+    // A hidden dock must suspend the audio processor.
     scopeWindow->SetSuspended(!scopeWidget->isVisible());
     scopeAct->setIcon(theme->getScopeIcon(piSettings->show_scopes));
     QSignalBlocker blocker(scopeAct);
@@ -4419,498 +4758,6 @@ void MainWindow::toggleScope()
     scope();
 }
 
-// Graphics output, on/off. `on` comes from the action rather than being
-// inverted here, so the action's checked state stays the single source of
-// truth. See the note where graphicsOutAct is created.
-// Called by main() once the Graphics render thread has been created and started.
-// The output window is made lazily, so the handle is parked here until then.
-void MainWindow::setGraphicsRenderThread(SonicPi::GraphicsRenderThread* thread)
-{
-    graphicsRenderThread = thread;
-}
-
-// The width the explanation text in the two Graphics value dialogs is pinned to.
-//
-// A constant rather than a per-dialog calculation, because the complaint being fixed is that these
-// dialogs were shaped by their prose: pinning the prose to a readable column and letting the dialog
-// follow the input field is the whole point, and a number written once makes that stable.
-//
-// This is not optional tidying. setWordWrap(true) alone does NOT narrow such a dialog: a wrapped
-// QLabel still reports the width of its longest line in sizeHint(), so the dialog sizes itself as if
-// the wrap were not there. The label's width has to be pinned for the wrap to have any effect on the
-// dialog's shape.
-static constexpr int kValueDialogTextWidth = 380;
-
-// Ask for a frame rate in Hz.
-//
-// The same rule as the resolution: a positive integer with a safety ceiling, nothing else. The
-// rate that matters is whatever the rest of the chain runs at, and the program does not get to
-// decide that a number is unusual.
-//
-// Note what this number does and does not control. It paces the renderer, and it is what the
-// debug window's overlay compares against, so it is also the expectation the user is shown as
-// met or missed. It is NOT the rate that reaches a display: the effective rate is capped at the
-// display's refresh rate, because this thread renders offscreen and pacing above what a screen
-// can show would produce frames nobody can see. A value above the display is therefore accepted
-// and quietly clamped, not refused - the overlay shows the clamped figure, so the user can see
-// what happened rather than being told they were wrong.
-void MainWindow::askForCustomFrameRate()
-{
-    const int current = SonicPi::GraphicsSettings::frameCapHz();
-
-    // See askForCustomResolution() for why this is an object rather than the convenience getText().
-    QInputDialog dlg(this);
-    dlg.setWindowTitle(tr("Frame Rate"));
-    dlg.setLabelText(tr("Frames per second, as a positive integer.\n\n"
-                        "This paces the renderer and is the rate the debug window's overlay "
-                        "measures against. It is capped at the display's refresh rate, so a larger "
-                        "value is accepted but the overlay will show the rate the display can "
-                        "actually be given."));
-    dlg.setInputMode(QInputDialog::TextInput);
-    dlg.setTextValue(current > 0 ? QString::number(current) : QStringLiteral("60"));
-    dlg.setOkButtonText(tr("Set"));
-    dlg.setCancelButtonText(tr("Cancel"));
-    if (QLineEdit* edit = dlg.findChild<QLineEdit*>())
-        edit->setMinimumWidth(edit->fontMetrics().horizontalAdvance(QStringLiteral("00000")) + 24);
-
-    // Pinned like the resolution dialog's, and for the same reason: a wrapped label still reports
-    // the width of its longest line in sizeHint(), so wrapping alone does not narrow the dialog.
-    if (QLabel* label = dlg.findChild<QLabel*>())
-    {
-        label->setWordWrap(true);
-        label->setMinimumWidth(kValueDialogTextWidth);
-        label->setMaximumWidth(kValueDialogTextWidth);
-        label->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
-    }
-
-    dlg.adjustSize();
-    dlg.setMinimumWidth(kValueDialogTextWidth + 48);
-
-    if (dlg.exec() != QDialog::Accepted)
-        return;
-
-    const QString text = dlg.textValue();
-
-    int hz = 0;
-    if (!SonicPi::GraphicsSettings::parseFrameRateHz(text, &hz))
-    {
-        SonicPi::GraphicsLog::warn(QStringLiteral("graphics: refusing '%1'; the frame rate must be "
-                                                  "a positive integer no larger than %2")
-                                       .arg(text.trimmed())
-                                       .arg(SonicPi::GraphicsSettings::kMaxFrameRateHz));
-        return;
-    }
-
-    if (hz == current)
-        return;
-
-    SonicPi::GraphicsLog::info(QStringLiteral("menu: frame rate -> %1Hz").arg(hz));
-    SonicPi::GraphicsSettings::setFrameCapHz(hz);
-    applyGraphicsConfig();
-}
-
-// Open the shader editor.
-//
-// Created lazily and kept: the editor holds whatever the user has typed, and rebuilding it on every
-// open would throw that away - which for a text editor is indistinguishable from losing work.
-//
-// The file is seeded before the window is constructed, so the editor always has something real to
-// open. Seeding on demand inside the window would make the first open behave differently from the
-// second, and a missing file would look like a bug in the editor rather than a first run.
-void MainWindow::showShaderBuffer()
-{
-    if (!graphicsShaderWindow)
-    {
-        // Both must exist first: the editor needs the theme and the render thread, and the render
-        // thread needs the context that produces it. Reported rather than silently doing nothing,
-        // because a menu item that does nothing is worse than a menu item that is disabled.
-        if (!theme || !graphicsRenderThread)
-        {
-            SonicPi::GraphicsLog::warn(QStringLiteral("shader buffer: cannot open yet - theme or render "
-                                                      "thread is not ready"));
-            showStatusAndAnnounce(tr("The graphics renderer is not ready yet."), 3000);
-            return;
-        }
-
-        // Seeded only for a single-pass .frag, for the same reason as at startup: a document's passes are
-        // its own files and it has no `<name>.frag` to produce.
-        const QString active = graphicsRenderThread->shaderName();
-        if (!SonicPi::graphicsDocumentExists(SonicPi::GraphicsSettings::shaderDirectoryPath(), active))
-        {
-            const QString seeded = SonicPi::GraphicsSettings::ensureShaderFile(
-                SonicPi::GraphicsSettings::fragmentFileName(active));
-            if (seeded.isEmpty())
-                SonicPi::GraphicsLog::warn(QStringLiteral("shader buffer: no shader file could be produced; "
-                                                          "the editor will show whatever it can read"));
-        }
-
-        graphicsShaderWindow = new SonicPi::ShaderBufferWindow(theme, graphicsRenderThread, gui_settings);
-        // A QWidget with no parent is a top-level window, which is what this is. Sized generously
-        // because it is an editor, not a panel.
-        graphicsShaderWindow->resize(760, 620);
-        // Open at the text size the user is already reading the buffer beside it in.
-        //
-        // currentZoom() rather than the "zoom" PROPERTY: the property is only written when a set is
-        // restored, a zoom is reset or the user zooms, so on a fresh session it is unset and would
-        // read as 0 - i.e. this editor would open two points smaller than the code buffer, which is
-        // the very complaint this fixes.
-        if (SonicPiScintilla* ws = getCurrentWorkspace())
-            graphicsShaderWindow->setEditorZoom(ws->currentZoom());
-        // As see-through as this window, so the editor can sit over the graphics output from the
-        // moment it opens - for someone who set the GUI transparent before opening the editor.
-        graphicsShaderWindow->setWindowOpacity(windowOpacity());
-        connect(graphicsShaderWindow, &SonicPi::ShaderBufferWindow::closedByUser,
-                this, [this]() {
-                    // Hidden rather than destroyed, so the text survives closing the window. The same
-                    // reasoning as above: a closed editor that loses its contents is a data loss
-                    // dressed up as window management.
-                    graphicsShaderWindow->hide();
-                });
-        SonicPi::GraphicsLog::info(QStringLiteral("menu: created shader buffer window"));
-    }
-
-    graphicsShaderWindow->show();
-    graphicsShaderWindow->raise();
-    graphicsShaderWindow->activateWindow();
-}
-
-void MainWindow::setGraphicsSharedFrame(SonicPi::GraphicsSharedFrameSlot* slot)
-{
-    graphicsSharedFrame = slot;
-}
-
-// Ask for an output resolution as WxH.
-//
-// One text field, because the value is copied from a spec sheet or a display's settings page and
-// arrives as a single string like "3840x2160".
-//
-// Built as an object rather than with the convenience getText(), which sizes the dialog from the
-// prompt text. The prompt's width is pinned and its height follows the wrapped text, so the dialog
-// is shaped by what is typed into it rather than by how much is explained above it.
-//
-// The only rule is the one the user set: a positive integer, with a safety ceiling. No list of
-// acceptable sizes, no aspect-ratio check, no "did you mean". Someone driving an LED processor
-// through Spout is specifying a number that comes from that hardware, and the program is in no
-// position to have opinions about it.
-//
-// The ceiling exists to catch a slipped digit - 38400x2160 - before it reaches the driver, not to
-// predict what a GPU will take. If the allocation genuinely fails, the render target path already
-// logs it and keeps the previous size rather than crashing.
-void MainWindow::askForCustomResolution()
-{
-    const QSize current = SonicPi::GraphicsSettings::outputSize();
-
-    QInputDialog dlg(this);
-    dlg.setWindowTitle(tr("Output Resolution"));
-    dlg.setLabelText(tr("Width x height in pixels.\n\n"
-                        "This is the resolution that is rendered and that an external consumer "
-                        "such as Spout receives. It is independent of any window: the output "
-                        "windows show the whole frame scaled to fit, and a consumer with no "
-                        "window at all still receives exactly this."));
-    dlg.setInputMode(QInputDialog::TextInput);
-    dlg.setTextValue(QStringLiteral("%1x%2").arg(current.width()).arg(current.height()));
-    dlg.setOkButtonText(tr("Set"));
-    dlg.setCancelButtonText(tr("Cancel"));
-    if (QLineEdit* edit = dlg.findChild<QLineEdit*>())
-        edit->setMinimumWidth(edit->fontMetrics().horizontalAdvance(QStringLiteral("00000x00000")) + 24);
-
-    // The prompt label is what makes the dialog wide, and setWordWrap alone does not fix it: a
-    // wrapped label still REPORTS the width of its longest line in sizeHint(), so the dialog sizes
-    // itself as if the wrap were not there. Its width is therefore pinned and its height left to
-    // follow the wrapped text.
-    if (QLabel* label = dlg.findChild<QLabel*>())
-    {
-        label->setWordWrap(true);
-        label->setMinimumWidth(kValueDialogTextWidth);
-        label->setMaximumWidth(kValueDialogTextWidth);
-        label->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
-    }
-
-    dlg.adjustSize();
-    dlg.setMinimumWidth(kValueDialogTextWidth + 48);
-
-    if (dlg.exec() != QDialog::Accepted)
-        return;
-
-    const QString text = dlg.textValue();
-
-    QSize wanted;
-    if (!SonicPi::GraphicsSettings::parseOutputSize(text, &wanted))
-    {
-        SonicPi::GraphicsLog::warn(QStringLiteral("graphics: refusing '%1'; expected a positive "
-                                                  "integer, or WxH, no larger than %2")
-                                       .arg(text.trimmed())
-                                       .arg(SonicPi::GraphicsSettings::kMaxOutputDimension));
-        return;
-    }
-
-    if (wanted == current)
-        return;
-
-    // The GPU cost, reported because it is the reason a large resolution can cost frame rate:
-    // two targets at four bytes per pixel each.
-    SonicPi::GraphicsLog::info(QStringLiteral("menu: output resolution -> %1x%2 "
-                                              "(two targets, about %3 MB of GPU memory)")
-                                   .arg(wanted.width()).arg(wanted.height())
-                                   .arg(double(wanted.width()) * double(wanted.height()) * 4.0 * 2.0
-                                            / (1024.0 * 1024.0), 0, 'f', 1));
-    SonicPi::GraphicsSettings::setOutputSize(wanted);
-    applyGraphicsConfig();
-}
-
-// Adopt the configured output resolution and frame rate.
-//
-// Called when the menu opens and after anything in the menu is chosen, so a value edited in
-// graphics.ini by hand is picked up without a restart, and the ticks always describe what is
-// actually configured rather than what was last clicked.
-//
-// This class does not decide either value and does not keep one: it reads
-// GraphicsSettings, tells the render thread, and puts the ticks where the file says they
-// belong. The render thread applies at the top of its next frame, which is why a change is
-// visible almost immediately rather than at the next restart.
-void MainWindow::applyGraphicsConfig()
-{
-    if (graphicsRenderThread)
-    {
-        const QSize size = SonicPi::GraphicsSettings::outputSize();
-        const int hz = SonicPi::GraphicsSettings::frameCapHz();
-
-        // Logged only when something changes, so opening the menu is not a log entry. This is
-        // the "fact that changed" that a log is for.
-        const QSize current = graphicsRenderThread->renderTargetSize();
-        if (size != current)
-        {
-            SonicPi::GraphicsLog::info(QStringLiteral("menu: output resolution -> %1x%2")
-                                           .arg(size.width()).arg(size.height()));
-            graphicsRenderThread->requestRenderTargetSize(size);
-        }
-
-        const int currentHz = graphicsRenderThread->frameStats().frameCapHz;
-        if (hz > 0 && hz != currentHz)
-        {
-            SonicPi::GraphicsLog::info(QStringLiteral("menu: frame rate -> %1Hz").arg(hz));
-            graphicsRenderThread->setTargetFps(hz);
-        }
-
-#ifdef Q_OS_WIN
-        // Spout publishing, from the stored preference. Applied here because this is where the graphics
-        // configuration is applied at startup - and because a preference that is remembered in the file but
-        // never acted on is a switch that lies. The request is a no-op when the state already matches.
-        const bool publishSpout = SonicPi::GraphicsSettings::spoutPublish();
-        if (publishSpout != graphicsRenderThread->isSpoutPublishing())
-        {
-            SonicPi::GraphicsLog::info(QStringLiteral("menu: graphics Spout publishing -> %1")
-                                           .arg(publishSpout ? QStringLiteral("on")
-                                                             : QStringLiteral("off")));
-            graphicsRenderThread->setSpoutPublishing(publishSpout);
-        }
-#endif
-    }
-
-    syncGraphicsConfigMenu();
-}
-
-// Put the ticks where the configured values say they belong.
-//
-// Rebuilt rather than toggled: a hand-edited file can hold a size that is not on the list at
-// all, and in that case no entry should be ticked rather than the nearest one being wrong.
-void MainWindow::syncGraphicsConfigMenu()
-{
-    const QSize size = SonicPi::GraphicsSettings::outputSize();
-    const int hz = SonicPi::GraphicsSettings::frameCapHz();
-
-    if (graphicsResolutionMenu)
-    {
-        for (QAction* a : graphicsResolutionMenu->actions())
-        {
-            QSignalBlocker blocker(a);
-            a->setChecked(a->text() == QStringLiteral("%1 x %2")
-                                             .arg(size.width()).arg(size.height()));
-        }
-    }
-
-    if (graphicsFrameRateMenu)
-    {
-        for (QAction* a : graphicsFrameRateMenu->actions())
-        {
-            QSignalBlocker blocker(a);
-            a->setChecked(a->text() == QStringLiteral("%1 Hz").arg(hz));
-        }
-    }
-}
-
-void MainWindow::showGraphicsOutput(bool on)
-{
-    piSettings->show_graphics = on;
-    emit settingsChanged();
-
-    SonicPi::GraphicsLog::info(QStringLiteral("menu: show graphics output = %1")
-                                   .arg(on ? QStringLiteral("on") : QStringLiteral("off")));
-
-    if (on)
-    {
-        // Created lazily: the window owns a GL context and a framebuffer, and
-        // there is no reason to pay for either until someone asks for output.
-        if (!graphicsWindow)
-        {
-            graphicsWindow = new SonicPi::GraphicsWindow();
-
-            // Hand over the render thread so the window knows which output it is
-            // showing a crop of. It does not dictate that output's size - see
-            // GraphicsWindow::setRenderThread.
-            graphicsWindow->setRenderThread(graphicsRenderThread);
-            // The same slot the render thread publishes into, so the window shows
-            // the renderer's picture rather than drawing its own copy of it.
-            graphicsWindow->setSharedFrameSlot(graphicsSharedFrame);
-            SonicPi::GraphicsLog::info(QStringLiteral("menu: created output window"));
-
-            // A window closed by the user must un-tick the action, or the tick
-            // and reality drift apart. The signal is emitted from closeEvent.
-            connect(graphicsWindow, &SonicPi::GraphicsWindow::closedByUser,
-                    this, [this]() {
-                        if (graphicsWindow)
-                            graphicsWindow->hide();
-                        if (piSettings->show_graphics)
-                        {
-                            piSettings->show_graphics = false;
-                            graphicsVisibilityChanged();
-                            emit settingsChanged();
-                        }
-                    });
-
-            // No repaint timer is created here, and there is nothing to create.
-            //
-            // There used to be a 16ms QTimer in this class whose only job was to call
-            // update() on the output window. It was wrong three ways at once: 16ms is
-            // 62.5Hz, which is not a rate the user chose and not a rate any display
-            // runs at; it hardcoded a graphics detail in a class that does no
-            // rendering; and it put the output window's cadence under a second owner.
-            // The window now paces itself with requestUpdate() at the end of
-            // paintGL(), so the cadence is the display's and this class does not know
-            // or care what it is.
-        }
-
-        graphicsWindow->show();
-        SonicPi::GraphicsLog::info(QStringLiteral("menu: window shown, isVisible=%1, geometry=%2x%3 at %4,%5")
-                                       .arg(graphicsWindow->isVisible() ? 1 : 0)
-                                       .arg(graphicsWindow->width())
-                                       .arg(graphicsWindow->height())
-                                       .arg(graphicsWindow->x())
-                                       .arg(graphicsWindow->y()));
-        showStatusAndAnnounce(tr("Showing graphics output on %1").arg(graphicsWindow->describeOutput()),
-                              2000);
-    }
-    else
-    {
-        // Nothing to stop: the window paces itself and stops asking for frames once it
-        // is hidden, because paintGL() is what requests them.
-        if (graphicsWindow)
-            graphicsWindow->hide();
-        showStatusAndAnnounce(tr("Hiding graphics output..."), 2000);
-    }
-}
-
-// The graphics debug window: the same picture, smaller, with the render thread's numbers
-// over it.
-//
-// Deliberately NOT part of the main window's layout, and deliberately not a pane in it.
-// The graphics feature is an addition to this application rather than part of it, and
-// every previous attempt to let a piece of it live in MainWindow has drifted from what
-// the render thread actually holds. Numbers about rendering belong beside the rendering.
-//
-// It is a real consumer, not a viewer: it waits on the same fences and leaves its own, so
-// with this window open the producer's `consumer wait` figure covers both readers.
-void MainWindow::showGraphicsPreview(bool on)
-{
-    SonicPi::GraphicsLog::info(QStringLiteral("menu: show graphics preview = %1")
-                                   .arg(on ? QStringLiteral("on") : QStringLiteral("off")));
-
-    if (on)
-    {
-        if (!graphicsPreviewWindow)
-        {
-            graphicsPreviewWindow = new SonicPi::GraphicsPreviewWindow();
-            graphicsPreviewWindow->setRenderThread(graphicsRenderThread);
-            graphicsPreviewWindow->setSharedFrameSlot(graphicsSharedFrame);
-            connect(graphicsPreviewWindow, &SonicPi::GraphicsPreviewWindow::closedByUser,
-                    this, [this]() {
-                        if (graphicsPreviewWindow)
-                            graphicsPreviewWindow->hide();
-                        if (graphicsPreviewAct)
-                        {
-                            QSignalBlocker blocker(graphicsPreviewAct);
-                            graphicsPreviewAct->setChecked(false);
-                        }
-                    });
-            SonicPi::GraphicsLog::info(QStringLiteral("menu: created graphics preview window"));
-        }
-
-        graphicsPreviewWindow->show();
-    }
-    else if (graphicsPreviewWindow)
-    {
-        graphicsPreviewWindow->hide();
-    }
-
-    if (graphicsPreviewAct)
-    {
-        QSignalBlocker blocker(graphicsPreviewAct);
-        graphicsPreviewAct->setChecked(on);
-    }
-}
-
-// Mirrors one Graphics log entry into the log pane. Runs on the GUI thread: the
-// sink that feeds it may be called from the render thread.
-void MainWindow::appendGraphicsLog(int level, const QString& message)
-{
-    if (!outputPane)
-        return;
-
-    const auto lvl = SonicPi::GraphicsLog::Level(level);
-    const QString tag = lvl == SonicPi::GraphicsLog::Level::Error ? QStringLiteral("ERROR")
-                        : lvl == SonicPi::GraphicsLog::Level::Warn ? QStringLiteral("WARN ")
-                                                                   : QStringLiteral("info ");
-    const QString stamp =
-        QTime::currentTime().toString(QStringLiteral("HH:mm:ss.zzz"));
-
-    // Colour roles are the ones already in the theme, not invented names. Errors
-    // take the same background qt_api_client gives a highlighted message so a
-    // failure is not lost in a scroll of info lines; everything else takes the
-    // plain info role.
-    SonicPiTheme* th = theme;
-    const bool emphasise = (lvl == SonicPi::GraphicsLog::Level::Error) && th;
-    if (emphasise)
-        outputPane->setTextBgFgColorKeys(th, "LogInfoBackground_1", "LogInfoForeground_1");
-    else if (th)
-        outputPane->setTextBgFgColorKeys(th, "LogInfoBackground", "LogInfoForeground");
-
-    // Indent continuation lines so a multi-line block - a shader compiler log,
-    // for instance - reads as one record, matching how graphics.log formats it.
-    const QString body =
-        QString(message).replace(QLatin1Char('\n'), QStringLiteral("\n           "));
-    outputPane->appendPlainText(
-        QStringLiteral("[%1] [Graphics] [%2] %3").arg(stamp, tag, body));
-
-    if (th)
-    {
-        outputPane->setTextColorKey(th, "LogForeground");
-        outputPane->setTextBackgroundColorKey(th, "LogBackground");
-    }
-}
-
-// Called when the output window's own visibility changes - notably when the
-// user closes it directly. ScopeWindow is a QDockWidget and gets this for free
-// from Qt; an independent top-level window does not, so the action has to be
-// re-synced here or its tick would disagree with reality.
-void MainWindow::graphicsVisibilityChanged()
-{
-    if (!graphicsOutAct)
-        return;
-
-    QSignalBlocker blocker(graphicsOutAct);
-    graphicsOutAct->setChecked(piSettings->show_graphics);
-}
-
 void MainWindow::scope()
 {
     if (scopeAct && theme)
@@ -4926,8 +4773,7 @@ void MainWindow::scope()
     positionSideGrip();
     // Explicit sync: a dock hidden before its first show emits no
     // visibilityChanged, so the boot path (honourPrefs → scope()) must set
-    // the suspend state directly or Resume() at run start re-enables the
-    // audio processor behind a closed dock.
+    // the suspend state directly.
     scopeWindow->SetSuspended(!piSettings->show_scopes);
 
     if (scopeAct)
@@ -5047,16 +4893,6 @@ void MainWindow::changeGUITransparency(int val)
 {
     // scale it linearly from 0 -> 100 to 0.3 -> 1
     setWindowOpacity((0.7 * ((100 - (float)val) / 100.0)) + 0.3);
-
-    // The shader editor follows the main window, deliberately and exactly.
-    //
-    // This is a live coding tool: the editor is meant to sit OVER the graphics output, with the
-    // code legible in front and the picture showing through. So its opacity is not an independent
-    // preference - it takes the same value, computed once, right here. Reading windowOpacity() back
-    // rather than repeating the formula above is what makes "exactly" true: there is one
-    // calculation in the program and both windows use its result.
-    if (graphicsShaderWindow)
-        graphicsShaderWindow->setWindowOpacity(windowOpacity());
 }
 
 // Volume: the fader after the limiter, as a percentage. It cannot change how
@@ -5367,6 +5203,7 @@ void MainWindow::toggleIcons()
     runAct->setIcon(theme->getRunIcon());
     stopAct->setIcon(theme->getStopIcon());
     saveAsAct->setIcon(theme->getSaveAsIcon());
+    shareAct->setIcon(theme->getSaveAsIcon());
     loadFileAct->setIcon(theme->getLoadIcon());
     textIncAct->setIcon(theme->getTextIncIcon());
     textDecAct->setIcon(theme->getTextDecIcon());
@@ -5465,12 +5302,6 @@ void MainWindow::updateColourTheme()
         tutorialPane->applyTheme();
     if (quickstartPane)
         quickstartPane->applyTheme();
-    // The shader editor is a top-level window rather than a child of this one, so it does not
-    // inherit the stylesheet set below: it gets the same string, and its syntax colours and text
-    // font, through its own applyTheme(). Transparency is deliberately not part of this - it is a
-    // property of the main window (see changeGUITransparency), not of the theme.
-    if (graphicsShaderWindow)
-        graphicsShaderWindow->applyTheme();
     if (southTabs)
         applySouthTabIcons();
 
@@ -5510,18 +5341,14 @@ void MainWindow::updateColourTheme()
 
     // The Docs nav/content divider paints itself (ThinSplitter): a thin centre
     // line at rest, revealed full-width on hover.
-    docsplit->setDividerColors(theme->color("PaneBackground"),
-                               theme->color("WindowBorder"),
-                               theme->color("ScrollBarHover"));
+    docsplit->setDividerColors(Divider::colours(*theme, theme->color("PaneBackground")));
 
     // The same divider for the QMainWindow dock separators (painted by the
     // proxy style) and the bar that stands in for the help's while it is away.
-    DividerProxyStyle::setDividerColors(theme->color("WindowBackground"),
-                                        theme->color("WindowBorder"),
-                                        theme->color("ScrollBarHover"));
-    for (DividerOverlay* d : { helpAwayDivider, sideAwayDivider })
-        if (d) d->setColours({ theme->color("WindowBackground"), theme->color("WindowBorder"),
-                               theme->color("ScrollBarHover") });
+    const Divider::Colours windowDivider = Divider::colours(*theme, theme->color("WindowBackground"));
+    DividerProxyStyle::setDividerColors(windowDivider);
+    for (DividerOverlay* d : { helpDividerOverlay, sideAwayDivider })
+        if (d) d->setColours(windowDivider);
     for (QDockWidget* d : { helpAwayDock, sideAwayDock })
         if (d) SonicPi::setAwayDockColour(d, theme->color("WindowBackground"));
     updateHelpChevronIcons();   // re-tint the help chevrons for the new theme
@@ -5721,11 +5548,10 @@ void MainWindow::changeFlashSettings()
         SonicPiScintilla* ws = ((SonicPiEditor*)editorTabWidget->widget(i))->getWorkspace();
         ws->setFlashBrightness(piSettings->flash_brightness);
         ws->setLiveLoopScopeScroll(piSettings->loop_scope_scroll);
-        // Turning loop scopes off removes the widgets right away; turning it
-        // back on shows them again from the next Run (loops re-register on run).
-        if (!piSettings->show_loop_scopes)
-            ws->clearLiveLoopScopes();
+        ws->setLiveLoopScopesShown(piSettings->show_loop_scopes);
     }
+    quickstartPane->setFlashBrightness(piSettings->flash_brightness);
+    tutorialPane->setFlashBrightness(piSettings->flash_brightness);
 }
 
 void MainWindow::speakTransportMenuChanged()
@@ -5738,9 +5564,9 @@ void MainWindow::reduceMotionMenuChanged()
 {
     piSettings->reduce_motion = reduceMotionAct->isChecked();
     SonicPi::setReduceMotionPreference(piSettings->reduce_motion);
-    // Enabling should still the scope right away, not at the next silence
-    // (it's on screen by default). Turning it off never auto-resumes —
-    // motion only restarts on a deliberate act (Run, F12, the scope button).
+    // Enabling stills the scope right away (it's on screen by default).
+    // Turning it off never auto-resumes: motion restarts only when the user
+    // resumes it (F12, the Visuals menu, the scope button).
     if (piSettings->reduce_motion)
         scopeWindow->Pause();
     emit settingsChanged();
@@ -6223,14 +6049,6 @@ const QList<ShortcutDef>& MainWindow::shortcutDefs()
     // an ambiguous shortcut that fired neither.
     { "TextZoomOut", QT_TR_NOOP("Decrease Text Size"), "Meta+-", "Ctrl+_", "Meta+-", "View", &MainWindow::textDecAct },
     { "Scope", QT_TR_NOOP("Toggle visibility of audio oscilloscope"), "Meta+O", "Meta+O", "Meta+O", "Visuals", &MainWindow::scopeAct },
-    // Meta+G / Meta+Shift+G are taken by Find Next / Find Previous, so the
-    // graphics shortcuts deliberately sit elsewhere. A shortcut is not optional
-    // here: fullscreen hides the menu bar, leaving no other way back out.
-    { "GraphicsOutput", QT_TR_NOOP("Show or hide the graphics output window"), "Ctrl+Shift+G", "Ctrl+Shift+G", "Ctrl+Shift+G", "Graphics", &MainWindow::graphicsOutAct },
-    { "GraphicsFullscreen", QT_TR_NOOP("Toggle fullscreen for the graphics output"), "Ctrl+Shift+F", "Ctrl+Shift+F", "Ctrl+Shift+F", "Graphics", &MainWindow::graphicsFullscreenAct },
-    { "GraphicsReloadShader", QT_TR_NOOP("Re-read the graphics shader from disk"), "Ctrl+Shift+R", "Ctrl+Shift+R", "Ctrl+Shift+R", "Graphics", &MainWindow::graphicsReloadShaderAct },
-    { "GraphicsPreview", QT_TR_NOOP("Show or hide the graphics debug preview"), "Ctrl+Shift+P", "Ctrl+Shift+P", "Ctrl+Shift+P", "Graphics", &MainWindow::graphicsPreviewAct },
-    { "GraphicsShaderBuffer", QT_TR_NOOP("Open the shader editor"), "Ctrl+Shift+E", "Ctrl+Shift+E", "Ctrl+Shift+E", "Graphics", &MainWindow::graphicsShaderAct },
     { "CycleThemes", QT_TR_NOOP("Cycle through the available colour themes"), "ShiftMeta+M", "ShiftMeta+M", "ShiftMeta+M", "Visuals", &MainWindow::cycleThemesAct },
     { "Info", QT_TR_NOOP("Toggle information about Sonic Pi"), "Meta+n", "Meta+1", "Meta+1", "View", &MainWindow::infoAct },
 #if defined(Q_OS_MAC)
@@ -6505,6 +6323,7 @@ void MainWindow::updateShortcuts()
         }
     }
     addMenuBarMnemonics();
+    updateHelpGripLabels();   // the hide grip's tooltip carries the Help shortcut, which may just have changed
     // show code context
     // show metronome
 }
@@ -6603,6 +6422,14 @@ void MainWindow::createToolBar()
 
     clearAllBuffersAct = new QAction(tr("Clear All Buffers..."), this);
     connect(clearAllBuffersAct, SIGNAL(triggered()), this, SLOT(clearAllBuffers()));
+
+    // Save and Share, and links, as the web's
+    shareAct = new QAction(theme->getSaveAsIcon(), tr("Save and Share..."), this);
+    shareAct->setIconText(tr("Save and Share..."));
+    shareAct->setToolTip(tr("Save or share this buffer or the whole set: a link to copy or show, a QR code, or a file"));
+    connect(shareAct, &QAction::triggered, this, &MainWindow::share);
+    openLinkAct = new QAction(tr("Open Link..."), this);
+    connect(openLinkAct, &QAction::triggered, this, &MainWindow::askForLink);
 
     // Align
     textAlignAct = new QAction(QIcon(":/images/align.png"), tr("Align Code"), this);
@@ -6791,13 +6618,7 @@ void MainWindow::createToolBar()
     helpAct->setCheckable(true);
     helpAct->setChecked(false);
     connect(helpAct, &QAction::toggled, this, [this](bool) { help(); }); // see scopeAct
-    if (helpHideButton)
-    {
-        const QString ks = helpAct->shortcut().toString(QKeySequence::NativeText);
-        helpHideButton->setToolTip(ks.isEmpty() ? tr("Hide the documentation and information panel")
-                                                : tr("Hide the documentation and information panel (%1)").arg(ks));
-        helpFullButton->setToolTip(tr("Make the help panel full size"));
-    }
+    updateHelpGripLabels();   // the grip's tooltip gains the shortcut now there is one
 
     // Preferences
     prefsAct = new QAction(theme->getPrefsIcon(false), tr("Show Preferences"), this);
@@ -6862,7 +6683,9 @@ void MainWindow::createToolBar()
     }
 #endif
     toolBar->addAction(loadFileAct);
-    toolBar->addAction(saveAsAct);
+    // as the web's toolbar: Save's place is Share's, whose Save file saves (the menu's Save Buffer As, and its key,
+    // still save at once)
+    toolBar->addAction(shareAct);
 
     toolBar->addWidget(spacer);
 
@@ -7015,84 +6838,7 @@ void MainWindow::createToolBar()
     readCompletionDetailsAct = new QAction(tr("Read Completion Details"), this);
     connect(readCompletionDetailsAct, SIGNAL(triggered()), this, SLOT(readCompletionDetailsInCurrentWorkspace()));
 
-    // Graphics output. The rendering lives in app/gui/graphics/ and has no
-    // dependency on the GUI; this action is one of the ways to ask it to show
-    // its output.
-    //
-    // Modelled on scopeAct but with one deliberate difference: the slot takes
-    // the new state from the signal rather than flipping the setting itself.
-    // scopeAct's slot inverts piSettings->show_scopes, which leaves the action's
-    // checked state and the setting as two separate sources of truth that can
-    // drift apart.
-    graphicsOutAct = new QAction(tr("Show Graphics Output"), this);
-    graphicsOutAct->setCheckable(true);
-    graphicsOutAct->setChecked(piSettings->show_graphics);
-    connect(graphicsOutAct, &QAction::toggled, this, [this](bool on) { showGraphicsOutput(on); });
-
-    graphicsFullscreenAct = new QAction(tr("Graphics Fullscreen"), this);
-    graphicsFullscreenAct->setCheckable(true);
-    graphicsFullscreenAct->setChecked(false);
-    connect(graphicsFullscreenAct, &QAction::toggled, this, [this](bool on) {
-        if (!graphicsWindow)
-        {
-            // Nothing to go fullscreen with. Reflect that back rather than
-            // leaving the tick on with no window behind it.
-            QSignalBlocker blocker(graphicsFullscreenAct);
-            graphicsFullscreenAct->setChecked(false);
-            showStatusAndAnnounce(tr("Show graphics output first"), 2000);
-            return;
-        }
-
-        if (on)
-            graphicsWindow->enterFullscreen(nullptr);
-        else
-            graphicsWindow->leaveFullscreen();
-
-        showStatusAndAnnounce(tr("Graphics output on %1").arg(graphicsWindow->describeOutput()),
-                              2000);
-    });
-
-    // Re-read the shader from disk, so it can be edited and tried out without
-    // rebuilding. A failed compile keeps the previous picture (see GraphicsRenderer).
-    //
-    // This only REQUESTS the reload. It does not perform it, and that distinction is
-    // the whole design.
-    //
-    // An earlier version compiled shaders right here on the GUI thread, including
-    // reaching into the render thread's renderer through reloadAll(). That was wrong
-    // twice over: it compiled against whichever context happened to be current on
-    // this thread - the window's - rather than the context the shader is used with,
-    // and it touched an object owned by the render thread without holding that
-    // thread's mutex, so it raced the 60Hz loop. The symptom was a reload that
-    // worked unpredictably and sometimes appeared seconds and several clicks later,
-    // which is exactly what a race plus a few hundred milliseconds of shader
-    // compilation looks like.
-    //
-    // The render thread now applies the request on its own context at the top of a
-    // frame. Compiling a shader is not a GUI job and never was.
-    graphicsReloadShaderAct = new QAction(tr("Reload Shader"), this);
-    connect(graphicsReloadShaderAct, &QAction::triggered, this, [this]() {
-        // No name: "reload" means the buffer already on screen, which is the whole point of a reload -
-        // it does not choose a buffer, it re-reads the one being rendered.
-        const bool requested = graphicsRenderThread && graphicsRenderThread->requestShaderCompile();
-        SonicPi::GraphicsLog::info(
-            QStringLiteral("menu: reload shader -> %1")
-                .arg(requested ? QStringLiteral("requested (the render thread will apply it)")
-                               : QStringLiteral("NOT requested: no running render loop")));
-    });
-
-    graphicsPreviewAct = new QAction(tr("Debug Preview"), this);
-    graphicsPreviewAct->setCheckable(true);
-    graphicsPreviewAct->setChecked(false);
-    connect(graphicsPreviewAct, &QAction::toggled, this, [this](bool on) {
-        showGraphicsPreview(on);
-    });
-
-    graphicsShaderAct = new QAction(tr("Shader Buffer..."), this);
-    connect(graphicsShaderAct, &QAction::triggered, this, [this]() { showShaderBuffer(); });
-
     toolBar->addAction(scopeAct);
-    toolBar->addAction(graphicsOutAct);
     toolBar->addAction(infoAct);
     toolBar->addAction(helpAct);
     toolBar->addAction(prefsAct);
@@ -7110,6 +6856,9 @@ void MainWindow::createToolBar()
     liveMenu->addSeparator();
     liveMenu->addAction(saveAsAct);
     liveMenu->addAction(loadFileAct);
+    liveMenu->addSeparator();
+    liveMenu->addAction(shareAct);
+    liveMenu->addAction(openLinkAct);
     liveMenu->addSeparator();
     liveMenu->addAction(loadSetAct);
     liveMenu->addAction(saveSetAct);
@@ -7293,136 +7042,13 @@ void MainWindow::createToolBar()
         scopeKindVisibilityMenu->addAction(act);
     }
 
-    // Graphics output is its own top-level menu rather than another entry under
-    // Visuals. Visuals covers how this app's own interface looks - colour theme,
-    // icon set - and the audio oscilloscope, which is a monitoring tool. The
-    // graphics feature is performance output to a screen, which is a different
-    // concern, and it needs room to grow (display selection, external output).
-    graphicsMenu = menuBar()->addMenu(tr("Graphics"));
-    graphicsMenu->addAction(graphicsOutAct);
-    graphicsMenu->addAction(graphicsPreviewAct);
-    graphicsMenu->addAction(graphicsShaderAct);
-    graphicsMenu->addAction(graphicsFullscreenAct);
-#ifdef Q_OS_WIN
-    // Beside the other output items, because that is what it is: what leaves this machine, rather than
-    // what is on screen here.
-    //
-    // CREATED HERE, immediately before it is added. An earlier version created it further down with the
-    // other Spout/Syphon items and added it to this menu from here - which handed addAction() an
-    // uninitialised member pointer and crashed the application inside Qt with an access violation
-    // (0xc0000005 in Qt6Widgets, with a dump to prove it). Create and use in the same place; the ordering
-    // is the point, not the tidiness.
-    graphicsSpoutAct = new QAction(tr("Publish Graphics Output via Spout"), this);
-    graphicsSpoutAct->setCheckable(true);
-    graphicsSpoutAct->setChecked(SonicPi::GraphicsSettings::spoutPublish());
-    graphicsSpoutAct->setToolTip(tr("Send the graphics output (not the window) to other programs as "
-                                    "\"Sonic Pi Graphics\""));
-    connect(graphicsSpoutAct, &QAction::triggered, this, [this]() {
-        const bool want = graphicsSpoutAct->isChecked();
-        const bool accepted = graphicsRenderThread && graphicsRenderThread->setSpoutPublishing(want);
-        // The recorded preference is what the user asked for; the menu shows whether the request was
-        // ACCEPTED (the work itself happens on the render thread, and the log reports its outcome), so a
-        // request that could not even be made snaps the tick back instead of lying.
-        SonicPi::GraphicsSettings::setSpoutPublish(want);
-        if (!accepted)
-            graphicsSpoutAct->setChecked(false);
-    });
-    graphicsMenu->addAction(graphicsSpoutAct);
-#endif
-    graphicsMenu->addSeparator();
-
-    // Output resolution and frame rate.
-    //
-    // Ranges of sensible values rather than free-form entry: these are performance knobs on a
-    // realtime audio machine, and the useful choices are a handful of standard sizes and
-    // refresh rates. A text field would invite 1234x567 and then need validation, clamping and
-    // an error path for a value nobody wanted.
-    //
-    // Both write through GraphicsSettings (the feature's own file) and then ask the render
-    // thread to apply, so this class never holds a copy of either value. The reason the
-    // graphics feature keeps its state out of here is that every attempt to keep a copy in
-    // this class has ended with the copy and the original disagreeing.
-    graphicsResolutionMenu = graphicsMenu->addMenu(tr("Output Resolution"));
-    {
-        static const QSize kSizes[] = {
-            QSize(640, 360), QSize(960, 540), QSize(1280, 720),
-            QSize(1920, 1080), QSize(2560, 1440),
-        };
-        for (const QSize& size : kSizes)
-        {
-            QAction* a = graphicsResolutionMenu->addAction(
-                QStringLiteral("%1 x %2").arg(size.width()).arg(size.height()));
-            a->setCheckable(true);
-            connect(a, &QAction::triggered, this, [this, size]() {
-                SonicPi::GraphicsSettings::setOutputSize(size);
-                applyGraphicsConfig();
-            });
-        }
-
-        // Presets are a convenience, not the limit. The resolution that matters is the native
-        // one of whatever the output is mapped onto - a projector, an LED processor, a capture
-        // card - and those are 1920x1200, 3840x2160, 5120x1080 for a wide LED wall, and so on.
-        // A list of five would be wrong for most real installations, so free entry has to exist.
-        graphicsResolutionMenu->addSeparator();
-        QAction* custom = graphicsResolutionMenu->addAction(tr("Custom..."));
-        connect(custom, &QAction::triggered, this, [this]() { askForCustomResolution(); });
-    }
-
-    graphicsFrameRateMenu = graphicsMenu->addMenu(tr("Frame Rate"));
-    {
-        static const int kRates[] = { 30, 60, 75, 90, 120, 144, 165, 240 };
-        for (int hz : kRates)
-        {
-            QAction* a = graphicsFrameRateMenu->addAction(QStringLiteral("%1 Hz").arg(hz));
-            a->setCheckable(true);
-            connect(a, &QAction::triggered, this, [this, hz]() {
-                SonicPi::GraphicsSettings::setFrameCapHz(hz);
-                applyGraphicsConfig();
-            });
-        }
-
-        // Same reasoning as the resolution: the useful rate is whatever the rest of the chain
-        // runs at - a capture card, a media server, a projector - and a fixed list cannot know
-        // it. The preset list is convenience, not the set of permitted values.
-        graphicsFrameRateMenu->addSeparator();
-        QAction* custom = graphicsFrameRateMenu->addAction(tr("Custom..."));
-        connect(custom, &QAction::triggered, this, [this]() { askForCustomFrameRate(); });
-    }
-
-    syncGraphicsConfigMenu();
-
-    // Adopt anything changed outside the running app - a hand-edited graphics.ini - when the
-    // menu is opened. Nothing is logged unless a value actually changed, so this is not a
-    // per-open log entry.
-    connect(graphicsMenu, &QMenu::aboutToShow, this, [this]() { applyGraphicsConfig(); });
-
-    graphicsMenu->addSeparator();
-    graphicsMenu->addAction(graphicsReloadShaderAct);
-
-    // Route Graphics log entries into the log pane.
-    //
-    // The pane is the natural place for these: it is where every other failure
-    // this app can produce already appears, it is themed, it scrolls, and the
-    // user is already looking at it when something goes wrong. Graphics keeps
-    // writing its own file as well - that record has to survive the GUI and
-    // carries more detail - but a shader that will not compile has to be visible
-    // without going to disk to find out.
-    //
-    // Registered once, here, after the pane exists. The sink may be called from
-    // the render thread, so it marshals to the GUI thread instead of touching
-    // widgets directly.
-    SonicPi::GraphicsLog::setSink(
-        [this](SonicPi::GraphicsLog::Level level, const QString& message) {
-            QMetaObject::invokeMethod(this, "appendGraphicsLog", Qt::QueuedConnection,
-                                      Q_ARG(int, int(level)), Q_ARG(QString, message));
-        });
-
     // The IO menu is grouped into labelled sections (addSection) so the
     // device controls, network controls and capture controls read as
     // distinct blocks. The MIDI/gamepad device submenus are populated
     // dynamically (see updateMIDI*Ports / updateGamepadDevices) with one
     // checkable entry per device, mirroring the IO preferences pane.
     ioMenu = menuBar()->addMenu(tr("IO"));
+
     // Keyboard input mode — a self-contained picker, kept at the top.
     shortcutMenu = ioMenu->addMenu(tr("Shortcut Mode"));
     shortcutMenu->addAction(macShortcutModeAct);
@@ -8308,7 +7934,7 @@ void MainWindow::startSessionRecordingFlow()
     // The engine's OUT tap: the master mix, flowing since boot. Nothing to
     // ask the engine for; the recorder reads it from its live position.
     shm_audio_buffer_reader audio = m_spAPI
-        ? m_spAPI->AudioProcessor_GetAudioBufferReader(SHM_AUDIO_OUT_SLOT)
+        ? m_spAPI->AudioProcessor_GetAudioBufferReader(SCOPE_OUT_SLOT)
         : shm_audio_buffer_reader();
     if (!audio.valid()) {
         std::cout << "[GUI] - Session recording: no audio tap available — recording video-only" << std::endl;
@@ -8512,21 +8138,6 @@ void MainWindow::readSettings()
     piSettings->auto_indent_on_run = gui_settings->value("prefs/auto-indent-on-run", true).toBool();
     piSettings->gui_transparency = gui_settings->value("prefs/gui_transparency", 0).toInt();
     piSettings->show_scopes = gui_settings->value("prefs/scope/show-scopes", true).toBool();
-    // Graphics output is off by default: it opens a window on a screen, so it
-    // should never appear unasked-for on first run.
-    // Graphics keeps its settings in its own file, not in this one. See
-    // GraphicsSettings for why; the short version is that an optional feature
-    // should not leave keys in the product's config.
-    piSettings->show_graphics = SonicPi::GraphicsSettings::showOutput();
-    // Reported because this preference has already been silently wrong once: the
-    // settings module wrote its keys into a group and read them without one, so
-    // the value saved correctly and was never seen again. A one-line record of
-    // what was actually loaded makes the next occurrence of that obvious instead
-    // of a puzzle.
-    SonicPi::GraphicsLog::info(QStringLiteral("settings: graphics show-output = %1 (from %2)")
-                                   .arg(piSettings->show_graphics ? QStringLiteral("true")
-                                                                  : QStringLiteral("false"))
-                                   .arg(SonicPi::GraphicsSettings::filePath()));
     piSettings->show_scope_labels = gui_settings->value("prefs/scope/show-labels", false).toBool();
     piSettings->show_cues = gui_settings->value("prefs/show_cues", true).toBool();
     piSettings->show_metro = gui_settings->value("prefs/show_metro", true).toBool();
@@ -8564,7 +8175,7 @@ void MainWindow::readSettings()
     piSettings->show_completion_help = gui_settings->value("prefs/show-completion-help", true).toBool();
     piSettings->show_context = gui_settings->value("prefs/show-context", true).toBool();
     piSettings->flash_code = gui_settings->value("prefs/flash-code", true).toBool();
-    piSettings->flash_brightness = gui_settings->value("prefs/flash-brightness", 35).toInt();
+    piSettings->flash_brightness = gui_settings->value("prefs/flash-brightness", SonicPi::kFlashBrightness).toInt();
     piSettings->flash_gutter = gui_settings->value("prefs/flash-gutter", false).toBool();
     piSettings->show_loop_scopes = gui_settings->value("prefs/show-loop-scopes", true).toBool();
     piSettings->loop_scope_scroll = gui_settings->value("prefs/loop-scope-scroll", false).toBool();
@@ -8635,7 +8246,6 @@ void MainWindow::writeSettings()
     gui_settings->setValue("prefs/gui_transparency", piSettings->gui_transparency);
     gui_settings->setValue("prefs/scope/show-labels", piSettings->show_scope_labels);
     gui_settings->setValue("prefs/scope/show-scopes", piSettings->show_scopes);
-    SonicPi::GraphicsSettings::setShowOutput(piSettings->show_graphics);
     gui_settings->setValue("prefs/show-titles", piSettings->show_titles);
     gui_settings->setValue("prefs/hide-menubar-in-fullscreen", piSettings->hide_menubar_in_fullscreen);
     gui_settings->setValue("prefs/show_cues", piSettings->show_cues);
@@ -8723,8 +8333,27 @@ void MainWindow::loadFile(const QString& fileName, SonicPiScintilla*& text)
     // No wait cursor: the read is instant, and building the cursor image can
     // crash in Qt's Cocoa colorspace path (CGImageCreate PAC trap, 2026-07-02)
     QString contents = in.readAll();
-    text->setText(contents);
     file.close();
+
+    // a set (by its header or its name) opens as a set, as the web's Load
+    // opens one, rather than landing in the buffer as text
+    if (SonicPi::SetBundle::isSet(contents, fileName))
+    {
+        // the buffer dialogs open beside it next time, but never offer a
+        // buffer the set's own file to be saved over
+        gui_settings->setValue("lastBufferDir", QFileInfo(fileName).absolutePath());
+        loadSetFromFile(fileName);
+        return;
+    }
+    // the dialogs offer this file next time, Save Buffer As saving back to it
+    gui_settings->setValue("lastBufferDir", QDir(fileName).absolutePath());
+    // one undoable change: Undo puts back what the buffer held
+    text->cancelInsertPreview();
+    text->replaceBuffer(contents, 0, 0, 0);
+    // the buffer named after its file, as the web's Load names it
+    for (int i = 0; i < workspace_max; i++)
+        if (workspaces[i] == text)
+            setBufferName(i, QFileInfo(fileName).completeBaseName());
 
     if (contents.toUtf8().size() > kMaxRunnableBufferBytes)
     {
@@ -8735,6 +8364,7 @@ void MainWindow::loadFile(const QString& fileName, SonicPiScintilla*& text)
 
 bool MainWindow::saveFile(const QString& fileName, SonicPiScintilla* text)
 {
+    text->cancelInsertPreview();   // never an un-committed card hover projection
     QFile file(fileName);
     if (!file.open(QFile::WriteOnly))
     {
@@ -9518,6 +9148,30 @@ void MainWindow::toggleOSCServer(int silent)
     }
 }
 
+// Qt moves its dock separators from the main window's own mouse events: the
+// release that ends a drag of the separator above the help pane lands here.
+bool MainWindow::event(QEvent* event)
+{
+    const bool handled = QMainWindow::event(event);
+    // Qt's own separators have no widget to watch: the window says when the
+    // pointer is on one with grips.
+    if (event->type() == QEvent::HoverEnter || event->type() == QEvent::HoverMove
+        || event->type() == QEvent::HoverLeave)
+    {
+        const QPoint at = event->type() == QEvent::HoverLeave
+                              ? QPoint(-1, -1)
+                              : static_cast<QHoverEvent*>(event)->position().toPoint();
+        if (m_helpLink) m_helpLink->setDividerHovered(m_helpBar.contains(at));
+        if (m_sideLink) m_sideLink->setDividerHovered(m_sideBar.contains(at));
+    }
+    if (event->type() == QEvent::MouseButtonRelease && m_helpSeparatorDrag)
+    {
+        m_helpSeparatorDrag = false;
+        helpDragEnded();
+    }
+    return handled;
+}
+
 bool MainWindow::eventFilter(QObject* obj, QEvent* event)
 {
     if (obj == qApp && (event->type() == QEvent::ApplicationActivate))
@@ -9534,17 +9188,20 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
         if (event->type() == QEvent::Show || event->type() == QEvent::Hide)
             toggleHelpIcon();           // the dock moved by Qt's own hand: the state follows it
         else if (event->type() == QEvent::Resize || event->type() == QEvent::Move)
+        {
+            // The pane sized with the button down and no drag of ours
+            // running: Qt's separator is being dragged (event() sees it let go).
+            if (event->type() == QEvent::Resize && !m_helpDividerDrag && !m_applyingHelpPanel
+                && (QApplication::mouseButtons() & Qt::LeftButton)
+                && m_helpPanel.state() == SonicPi::HelpPanelModel::State::Beside)
+                m_helpSeparatorDrag = true;
             positionHelpChevrons();
+        }
     }
-    if (helpAwayDivider && obj == helpAwayDivider)
+    if (obj == prefsWidget && event->type() == QEvent::Enter)
     {
-        if (event->type() == QEvent::Enter || event->type() == QEvent::HoverEnter) { if (helpHideButton) helpHideButton->setHovering(true); }
-        else if (event->type() == QEvent::Leave || event->type() == QEvent::HoverLeave) { if (helpHideButton) helpHideButton->setHovering(false); }
-    }
-    if (sideAwayDivider && obj == sideAwayDivider)
-    {
-        if (event->type() == QEvent::Enter || event->type() == QEvent::HoverEnter) { if (sideGrip) sideGrip->setHovering(true); }
-        else if (event->type() == QEvent::Leave || event->type() == QEvent::HoverLeave) { if (sideGrip) sideGrip->setHovering(false); }
+        if (m_helpLink) m_helpLink->setDividerHovered(false);
+        if (m_sideLink) m_sideLink->setDividerHovered(false);
     }
     if (sideAwayDock && obj == sideAwayDock)
     {

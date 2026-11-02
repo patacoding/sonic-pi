@@ -34,7 +34,6 @@
 #include "dpi.h"
 #include "utils/framepacer.h"
 
-#include "qt_api_client.h"
 #include "utils/tablericons.h"
 
 #include "scope_window.h"
@@ -134,9 +133,8 @@ private:
 
 QList<ScopeWindow*> ScopeWindow::s_instances;
 
-ScopeWindow::ScopeWindow(std::shared_ptr<QtAPIClient> spClient, std::shared_ptr<SonicPiAPI> spAPI, QWidget* parent)
+ScopeWindow::ScopeWindow(std::shared_ptr<SonicPiAPI> spAPI, QWidget* parent)
     : SonicPi::KeptOpaque<QWidget>(parent)
-    , m_spClient(spClient)
     , m_spAPI(spAPI)
 {
     s_instances.append(this);
@@ -201,9 +199,6 @@ ScopeWindow::ScopeWindow(std::shared_ptr<QtAPIClient> spClient, std::shared_ptr<
         scope.pen2 = QPen();
         scope.pen2.setWidth(PenWidth);
     }
-
-    qRegisterMetaType<ProcessedAudioPtr>("SonicPi::ProcessedAudioPtr");
-    connect(m_spClient.get(), &QtAPIClient::ConsumeAudioData, this, &ScopeWindow::OnConsumeAudioData);
 
     m_pauseButton = new ScopePauseButton(this);
     m_pauseButton->setFixedSize(ScaleForDPI(30, 30));
@@ -346,7 +341,7 @@ void ScopeWindow::DrawLevels(const ProcessedAudio& audio, QPainter& painter, Sco
         {
             m_preLimLastEnd = end;
             const uint32_t frames = 1024;
-            m_grScratch.resize(size_t(frames) * SHM_TAP_STREAM_CHANNELS);
+            m_grScratch.resize(size_t(frames) * TAP_STREAM_CHANNELS);
             uint32_t chans = 1;
             const uint32_t got = m_preLimReader.copy_window(end, frames, m_grScratch.data(), &chans);
             float p = 0.0f;
@@ -953,7 +948,6 @@ void ScopeWindow::Booted()
 
 void ScopeWindow::TogglePause()
 {
-    m_pendingPause = false;
     m_paused = !m_paused;
     ApplyProcessorEnable();
     // Unpausing ends the frozen inspection image; start from rest rather
@@ -968,32 +962,10 @@ void ScopeWindow::TogglePause()
 void ScopeWindow::Pause()
 {
     const bool was = m_paused;
-    m_pendingPause = false;
     m_paused = true;
     ApplyProcessorEnable();
     if (!was)
         emit PausedChanged(m_paused);
-}
-
-void ScopeWindow::PauseWhenSilent()
-{
-    if (!m_paused)
-    {
-        m_pendingPause = true;
-    }
-}
-
-void ScopeWindow::Resume()
-{
-    const bool was = m_paused;
-    m_pendingPause = false;
-    m_paused = false;
-    ApplyProcessorEnable();
-    if (was)
-    {
-        ResetToRest();
-        emit PausedChanged(m_paused);
-    }
 }
 
 void ScopeWindow::SetSuspended(bool suspended)
@@ -1249,12 +1221,6 @@ void ScopeWindow::OnConsumeAudioData(SonicPi::ProcessedAudioPtr audio)
         {
             m_settleTimer->stop();
         }
-
-        // Deferred pause once everything has visually run down
-        if (m_pendingPause && audio && silent)
-        {
-            Pause();
-        }
     }
 }
 
@@ -1275,10 +1241,6 @@ void ScopeWindow::SettleTick()
     if (m_silentFrames >= SilentSettleFrames && !LevelsRunningDown())
     {
         m_settleTimer->stop();
-        if (m_pendingPause)
-        {
-            Pause();
-        }
     }
 }
 

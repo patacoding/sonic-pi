@@ -13,6 +13,7 @@ const needEngineModule = () => import("./sonic_pi.js").then((m) => (sp = m));
 import { cardRings } from "./ui/card.js";
 import { createCodeKeyboard } from "./keyboard.js";
 import * as theme from "./theme.js";
+import { FLASH_BRIGHTNESS } from "./flash.js";
 import { LoopScopeState, drawLoopScope, SWEEP_WINDOW, SWEEP_SEARCH } from "./loopscope.js";
 import { Scope } from "./scope.js";
 import { CompletionAPI, synthAt } from "./completion/api.js";
@@ -27,6 +28,7 @@ import { createDeck } from "./ui/deck.js";
 import { pageFromMeta, pageFromSynthdef } from "./synth-meta.js";
 import { createQuickstart } from "./quickstart.js";
 import { createInsight, threadLabel } from "./insight.js";
+import { loopName } from "./loop-name.js";
 import { createFlightRecorder } from "./flight.js";
 import { createAudioTrail, trailText } from "./audio-trail.js";
 import { createLogs } from "./logs.js";
@@ -523,15 +525,15 @@ async function ensureSession() {
     const m = await needEngineModule();
     const worker = w && (await w.alive) ? w.worker : null;
     const bytes = await wasmBytes;
-    // SuperSonic reserves its shared memory's whole ceiling up front (maxInboxSize, 768 MB by default, is
+    // SuperSonic reserves its shared memory's whole ceiling up front (maxAssetsSize, 768 MB by default, is
     // most of it). A phone's browser gives a page far less, and iOS says "Out of memory" at the reservation
-    // — a reload, with the last page's memory not yet let go, the more so. The inbox carries loads in
+    // — a reload, with the last page's memory not yet let go, the more so. The assets area carries loads in
     // flight, so a phone reserves a slice of that and still loads any sample it has room to play.
     const phone = window.matchMedia("(max-width: 760px)").matches || (navigator.maxTouchPoints > 1 && /iPhone|iPad|Android/.test(navigator.userAgent));
     const engine = await m.bootEngine({
       ...(bytes ? { wasmBytes: bytes } : {}),   // fetched above, beside the runtime (no bytes: SuperSonic fetches its own)
       ...(audioInGesture() ? { audioContext } : {}),   // the one the press started (above)
-      ...(phone ? { memory: { maxInboxSize: 96 * 1024 * 1024 } } : {}),
+      ...(phone ? { memory: { maxAssetsSize: 96 * 1024 * 1024 } } : {}),
       // a phone's hidden tab is one the system may freeze or kill at any moment: its sound suspends while hidden, and
       // coming back asks for the tap that resumes it (the resume card), rather than playing on with no page to stop it
       ...(phone ? { pageLifecycle: { hidden: "suspend" } } : {}),
@@ -661,13 +663,28 @@ const caretSynth = () => synthAt(editor.getCode(), editor.view.state.selection.m
 // getScope, in SAB mode) and the editor draws after the loop's header line.
 // The fx record says which loop got which slot; its fx_free, or the job
 // ending, takes the scope down again.
-const loopScopes = new Map();        // fx node → { name, slot, job }
+const loopScopes = new Map();        // fx node → { name, slot, job, buffer, code }
 const loopScopePrefs = { show: store.get("sp-loop-scopes", true), scroll: store.get("sp-loop-scope-scroll", false) };
 const scopeFrame = (slot, frames) => engineRef?.getScope?.(slot, frames) ?? null;
 function paintLoopScopes() {
   editor.setLoopScopes(loopScopePrefs.show
-    ? [...loopScopes.values()].filter((s) => (s.buffer ?? jobBuffer.get(s.job)) === editor.active).map(({ name, slot }) => ({ name, slot }))
+    ? [...loopScopes.values()].filter((s) => (s.buffer ?? jobBuffer.get(s.code ?? s.job)) === editor.active).map(({ name, slot }) => ({ name, slot }))
     : []);
+}
+// A loop taken over (another buffer's Run, or a card's) runs on in its thread, but with the code of the run that took
+// it: what it records names that run (scheduler.rb Process#code_job), and its scope goes with it, to that run's buffer
+// or, for a card's, out of them all. Its job stays the thread's run, whose end takes the scope down.
+function followLoop(r) {
+  const name = loopName(r.name);
+  if (name == null || r.job == null) return;
+  let moved = false;
+  for (const s of loopScopes.values()) {
+    if (s.name !== name || (s.code ?? s.job) === r.job) continue;
+    s.code = r.job;
+    s.buffer = jobBuffer.get(r.job) ?? startingBuffer;   // as the fx record's: the run's head may not have said its buffer yet
+    moved = true;
+  }
+  if (moved) paintLoopScopes();
 }
 
 // Threads held on a sync, marked at the line they wait on (editor.js waitField):
@@ -702,6 +719,8 @@ const hooks = {
   },
   onBuffer: () => { paintLoopScopes(); paintWaits(); if (shownError) paintFix(); },   // the tabs draw themselves (buffer-tabs.js)
   onCaret: (line, position) => { $("caret-pos").textContent = `Line: ${line},  Position: ${position}`; },
+  onSetDropped: (text, fileName) => arrive(text, fileName.replace(/\.(rb|txt|sonicpi)$/i, ""), fileName),   // a set dropped on the code opens as a set
+  onLinkDropped: (link) => openLink(link),   // a Sonic Pi link dropped on the code opens as the link does
   playNote: (n, { synth, fx } = {}) => {
     if (fx) return play(`${realTime}with_fx :${fx} do\n  synth :prophet, note: ${n}, release: 0.6, cutoff: 90\nend`);   // an FX's keys: a note through it
     const s = synth ?? caretSynth();
@@ -744,6 +763,10 @@ const tabs = createBufferTabs({ root: $("buffer-tabs"), workspace, title: (i) =>
 
 // native's auto-indent on run (on by default): the buffer is re-indented before it is read
 const editorPrefs = { autoIndent: store.get("sp-auto-indent-on-run", true) };
+// native's flash settings: the code a sound came from washed as it plays, a dot by its number, and how strongly the
+// wash lies (settingswidget.cpp; flash.js)
+const flashPrefs = { code: store.get("sp-flash-code", true), gutter: store.get("sp-flash-gutter", false), brightness: store.get("sp-flash-brightness", FLASH_BRIGHTNESS) };
+theme.setFlashBrightness(flashPrefs.brightness);
 // native's Accessibility menu: "Speak Run and Stop" (announce.js) and "Reduce Animations"
 const a11yPrefs = { speakTransport: store.get("sp-speak-transport", true) };
 setSpeakTransport(a11yPrefs.speakTransport);
@@ -949,7 +972,7 @@ function logRow(r, out = false) {
   let text = String(r.text).replace(/\s+/g, " ").trim();
   text = text.replace(/^sample "<samples>", "([^"]+)\.\w+"(?:, \{(.*)\})?$/, (_, name, opts) => `sample :${name}${opts ? `, ${opts}` : ""}`);
   text = text.replace(/^(synth :\S+|control \S+|kill \S+), \{(.*)\}$/, "$1, $2");
-  const t = fmtTime(r.t ?? 0), who = r.name ? `[${r.name.replace(/^live_loop_/, "")}]` : "";
+  const t = fmtTime(r.t ?? 0), who = r.name ? `[${loopName(r.name) ?? r.name}]` : "";
   append(logBox, { make: () => {
     const row = el("div", `log-row${out ? " log-row-out" : ""}`);
     row.appendChild(el("span", "log-t", t));
@@ -1178,7 +1201,7 @@ function showJobs(s) {
   if (key === lastJobs) return;
   lastJobs = key;
   // the runs going, as their ids ([1, 3]); the live loops they have going, on hover
-  const loops = s.named.filter((n) => n.startsWith("live_loop_")).map((n) => `:${n.slice(10)}`);
+  const loops = s.named.map(loopName).filter((n) => n != null).map((n) => `:${n}`);
   const el = $("status-jobs");
   el.textContent = s.jobs.length ? `[${s.jobs.join(", ")}]` : "";
   el.title = s.jobs.length ? `Runs going: ${s.jobs.join(", ")}${loops.length ? ` · live loops: ${loops.join(" ")}` : ""}` : "";
@@ -1245,8 +1268,6 @@ const insight = createInsight(shadowPane($("insight-pane")), {   // in its shado
   },
 });
 
-// the records whose line flashes, as native's code flash: a sound, and what acts on one
-const FLASHES = new Set(["synth", "control", "kill", "midi", "output", "cue"]);
 // every deck of cards (ui/deck.js) the session tells of jobs, errors and sounds: the panes' and the site's
 const cardDecks = () => [docs, quickstart, infoApi].filter(Boolean);
 
@@ -1264,29 +1285,30 @@ function onRecord(r, at, stale = false) {
   if (r.kind === "studio" && r.op === "link_bpm") setLinkBpm(r.value, true);      // a program's set_link_bpm!
   if (r.kind === "load_example") return loadExample(r.name);
   if (r.kind === "cue") addCue(r.address, r.val, r.t);   // every cue as the runtime sends it (gui-stream.js): a live loop's each time round, cue's, set's
-  if (r.kind === "synth" && r.synth === "sonic-pi-fx_scope_out" && r.node != null && r.args?.scope_num != null && /^live_loop_/.test(r.name)) {
+  if (r.kind === "synth" && r.synth === "sonic-pi-fx_scope_out" && r.node != null && r.args?.scope_num != null && loopName(r.name) != null) {
     // the fx record can land before run() has said which buffer the job is: the run starting says
-    loopScopes.set(r.node, { name: r.name.slice(10), slot: r.args.scope_num, job: r.job, buffer: jobBuffer.get(r.job) ?? startingBuffer });
+    loopScopes.set(r.node, { name: loopName(r.name), slot: r.args.scope_num, job: r.job, buffer: jobBuffer.get(r.job) ?? startingBuffer });
     paintLoopScopes();
   }
   if (r.kind === "fx_free" && loopScopes.delete(r.node)) paintLoopScopes();
+  followLoop(r);
   if (!r.line || r.job == null) return;
   const deck = cardDecks().find((d) => d.owns(r.job) || d.starting);   // a run's first sound is recorded before play returns its job: the flash, due sched-ahead later, finds it known
-  if (deck) {   // a card's run: its strip draws the sound, and its card flashes the line, as the editor would
-    deck.record(r);
-    if (!FLASHES.has(r.kind) || (r.kind === "synth" && r.synth.startsWith("sonic-pi-fx_")) || (r.kind === "cue" && r.address?.startsWith("/live_loop/")) || motionPrefs.reduce) return;   // a loop's own cue each time round is not a flash
-    const delay = Math.max(0, (r.time - session.clockNow()) * 1000);
-    setTimeout(() => deck.flash(r.job, r.line), delay);
-    return;
-  }
+  if (r.kind === "flash") return flashLine(r, deck);
+  if (deck) deck.record(r);   // a card's run: its strip draws the sound
+}
+
+// A line the runtime lights as its sound plays (scheduler.rb record_flash), as native's code flash: in the editor, or
+// on the card whose run it is, at the moment it sounds, not when it was scheduled.
+// A card washes its code or nothing (it has no gutter); the editor its code, a dot by its number, or both.
+function flashLine(r, deck) {
+  if (motionPrefs.reduce) return;
+  const delay = Math.max(0, (r.time - session.clockNow()) * 1000);
+  if (deck) return void (flashPrefs.code && setTimeout(() => deck.flash(r.job, r.line), delay));
+  if (!flashPrefs.code && !flashPrefs.gutter) return;
   const buffer = jobBuffer.get(r.job) ?? startingBuffer;
   if (buffer == null || buffer !== editor.active) return;
-  if (r.kind === "synth" && r.synth.startsWith("sonic-pi-fx_")) return;
-  if (!FLASHES.has(r.kind)) return;
-  // at the moment it sounds, not when it was scheduled
-  const delay = Math.max(0, (r.time - session.clockNow()) * 1000);
-  if (motionPrefs.reduce) return;
-  setTimeout(() => { if (editor.active === buffer) editor.flashLine(r.line); }, delay);
+  setTimeout(() => { if (editor.active === buffer) editor.flashLine(r.line, { wash: flashPrefs.code, dot: flashPrefs.gutter }); }, delay);
 }
 
 async function loadExample(name) {
@@ -1849,8 +1871,23 @@ $("load-file").addEventListener("change", async () => {
   if (!file) return;
   $("load-file").value = "";
   const base = file.name.replace(/\.(rb|txt|sonicpi)$/i, "");
-  arrive(await file.text(), base, file.name, base);
+  let text;
+  try { text = await file.text(); } catch (e) {
+    toast(`${file.name} could not be read: ${e?.message ?? e}`, true, 8000);
+    logs.add("Host", `${file.name} could not be read: ${describe(e)}`);
+    return;
+  }
+  arrive(text, base, file.name, base);
 });
+// A file dropped beside the code isn't opened by the browser in the app's place: the code takes files dropped on it
+// (editor.js), as native's editor does, and the rest of the page none
+for (const type of ["dragover", "drop"]) {
+  addEventListener(type, (e) => {
+    if (!e.dataTransfer?.types?.includes("Files") || e.composedPath().some((n) => n.isContentEditable)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "none";
+  });
+}
 $("install-overlay").addEventListener("click", (e) => { if (e.target === $("install-overlay")) showDialog("install-overlay", false); });
 
 // ── The on-screen keyboard ────────────────────────────────────────────────
@@ -1921,9 +1958,10 @@ function toast(text, assertive = false, ms = 2000) {
 // ── Code arriving (workspace.js) ────────────────────────────────────────
 // From a link, a file or a card, it never goes over code that is there: a buffer's code takes a free buffer (or a set
 // of its own when every buffer has code), a set goes on top as a set of its own. Where it went is shown, not said: the
-// buffer or set opens under the caret (a toast saying so hid the code it opened, on a phone especially).
+// buffer or set opens under the caret (a toast saying so hid the code it opened, on a phone especially). A set is told
+// as native tells it (set-bundle.js isSet): by its header, or, from a file, by the file's name (`from`).
 function arrive(text, name, from, bufferName = "") {
-  if (isSet(text)) {
+  if (isSet(text, from)) {
     const r = workspace.openSet(text, { fallbackName: name || "Shared Set" });
     if (!r.ok) { toast(`${from} could not be opened: ${r.error}`, true, 8000); logs.add("Host", `${from} could not be opened: ${r.error}`); return false; }
     return true;
@@ -1934,14 +1972,13 @@ function arrive(text, name, from, bufferName = "") {
 
 // Share or save (share-menu.js): the buffer showing or the whole set, as a link, a QR code or a file
 const linkTo = (code) => new URL(`${infoApi?.code.file ?? "code.html"}#code=${code}`, location.href).href;
-createShareMenu({
+const shareMenu = createShareMenu({
   button: $("btn-share"), menu: $("link-menu"), clipboard, ready: loadShareCodec,
   scopes: {
     buffer: {
       icon: "file-code", fileKind: ".txt",
       kind: "This buffer", get title() { return `buffer ${workspace.active}`; },
       get summary() { const n = editor.getCode().replace(/\n$/, "").split("\n").length; return `${n} ${n === 1 ? "line" : "lines"}`; },   // its name is in the panel
-      get preview() { const lines = editor.getCode().replace(/\s+$/, "").split("\n"), at = lines.findIndex((l) => l.trim() && !l.trim().startsWith("#")); return (at < 0 ? lines : lines.slice(at)).join("\n"); },   // from its first line of code
       link: () => { history.replaceState(null, "", `${infoApi?.code.file ?? "code.html"}#code=${encodeCode(editor.getCode())}`); return location.href; },
       qrLink: () => linkTo(encodeDigits(editor.getCode())),
       about: "Save the current buffer as a single plain text file.",
@@ -1969,6 +2006,8 @@ createShareMenu({
     },
   },
 });
+// another buffer or set shown closes it, as native's: what it shows, and what its name names, is the one it opened on
+workspace.subscribe((e) => { if (e.kind === "buffer" || e.kind === "set") shareMenu.close(); });
 
 // the sets' chip, in the tabs' slot, and the list it opens (sets-view.js)
 createSetsView({ slot: tabs.slot, menu: $("sets-menu"), workspace, toast });
@@ -2371,9 +2410,13 @@ function loadFromHash() {
   openDrawer("");
   editorFillsPhone();
   history.replaceState(null, "", location.pathname + location.search);
-  // one that can't be read says so on the error card, as a program's error does, until it's put away: what happened
-  // to it and what to do (friendly.js explainLink), not a line gone before it could be read
-  loadShareCodec().then(() => arrive(decodeCode(m[1]), "", "the link")).catch((e) => {
+  openLink(m[1]);
+}
+// a link's code (or a whole link) opened as the link would open: what it carries arrives (a set as a set, a buffer's
+// code in a free buffer); one that can't be read says so on the error card, as a program's error does, until it's
+// put away: what happened to it and what to do (friendly.js explainLink), not a line gone before it could be read
+function openLink(link) {
+  loadShareCodec().then(() => arrive(decodeCode(link), "", "the link")).catch((e) => {
     showError({ class: "LinkError", title: "Link Error", message: e?.message ?? String(e) });
     logs.add("Host", `the link's code could not be read: ${describe(e)}`);
   });
@@ -2733,6 +2776,9 @@ function buildPrefs() {
   box.appendChild(toggle("Show the metronome", !document.body.classList.contains("no-metro"), (on) => { document.body.classList.toggle("no-metro", !on); store.set("sp-metro-shown", on); }, "Show the metronome controls", "pref-metro"));
   box.appendChild(toggle("Show Loop Scopes", loopScopePrefs.show, (on) => { loopScopePrefs.show = on; store.set("sp-loop-scopes", on); paintLoopScopes(); }, "Show a small scope of its own audio beside each running live loop", "pref-loop-scopes"));
   box.appendChild(toggle("Scroll Loop Scopes", loopScopePrefs.scroll, (on) => { loopScopePrefs.scroll = on; store.set("sp-loop-scope-scroll", on); }, "Scroll the loop scopes sideways, the newest sound on the right. When off, they hold a steady waveform like the main scope", "pref-loop-scroll"));
+  box.appendChild(toggle("Flash code on sound trigger", flashPrefs.code, (on) => { flashPrefs.code = on; store.set("sp-flash-code", on); }, "Briefly wash the code responsible for each sound as it is triggered", "pref-flash-code"));
+  box.appendChild(toggle("Flash gutter on sound trigger", flashPrefs.gutter, (on) => { flashPrefs.gutter = on; store.set("sp-flash-gutter", on); }, "Briefly show a dot in the gutter next to the line responsible for each sound as it is triggered", "pref-flash-gutter"));
+  box.appendChild(slider("Flash brightness", { min: 5, max: 100, value: flashPrefs.brightness, format: (v) => `${v}%`, tip: "How strongly the code flash washes the line", onInput: (v) => { flashPrefs.brightness = v; store.set("sp-flash-brightness", v); theme.setFlashBrightness(v); } }));
 
   // native's Studio > Synths and FX
   h("Synths and FX");
@@ -2749,7 +2795,7 @@ function buildPrefs() {
   // native's View > Accessibility
   h("Accessibility");
   box.appendChild(toggle("Speak Run and Stop", a11yPrefs.speakTransport, (on) => { a11yPrefs.speakTransport = on; store.set("sp-speak-transport", on); setSpeakTransport(on); }, "Have your screen reader say \"Run started\" and \"Stopped\". Turn off to hear the very start of your music without the announcement over it", "pref-speak"));
-  box.appendChild(toggle("Reduce animations", motionPrefs.reduce, (on) => setReduceMotion(on, true), "Keep the interface still: panes and popups appear in place instead of sliding. Always on while your system's reduce motion setting is", "pref-motion"));
+  box.appendChild(toggle("Reduce animations", motionPrefs.reduce, (on) => setReduceMotion(on, true), "Keep the interface still: code doesn't flash as it runs and plays, and panes and popups appear in place instead of sliding. On while your system's reduce motion setting is on, unless you set it here", "pref-motion"));
 
   h("Shortcuts");
   shortcutPrefs(box);
