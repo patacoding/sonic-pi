@@ -925,3 +925,6 @@ export class WorkerSession {
   /** Seconds since the session's first run, for a record's time. */
   at(r) { return r.time - (this.#t0 ?? r.time); }
 }
+
+/* SP-EXT(elementary): Elementary's own code area (a panel with Run and Stop, web/elementary/). Remove this line to uninstall. */
+import("./elementary/el-panel.bundle.js").catch((e) => console.error("elementary panel:", e));
