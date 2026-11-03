@@ -12,12 +12,19 @@ import { basicSetup } from "codemirror";
 import { javascript } from "@codemirror/lang-javascript";
 import { autocompletion, snippet } from "@codemirror/autocomplete";
 
-const CODE_KEY = "sp-elementary-code-v3";
+const CODE_KEY = "sp-elementary-code-v5";   // v5: the default defines a MIDI voice
 const POS_KEY = "sp-elementary-pos";
-const DEFAULT_CODE = `// Elementary 4 is positional: lowpass(cutoff, q, node).
-// End with return, then the node (or array of nodes) you want to hear.
-const cutoff = el.add(600, el.mul(500, el.cycle(0.2)));
-return el.mul(0.25, el.lowpass(cutoff, 1, el.blepsaw(220)))`;
+const DEFAULT_CODE = `// Your timbre. Sonic Pi plays the notes (midi_note_on / midi_note_off in its buffers);
+// this code decides what they sound like. \`channel\` lets one timbre answer channel 1, another channel 2.
+export default {
+  voice(note, velocity, channel, gate) {
+    const freq = el.cycle(440 * Math.pow(2, (note - 69) / 12));
+    const tone = channel === 2
+      ? el.blepsquare(el.mul(freq, 0.5))
+      : el.lowpass(el.add(600, el.mul(1800, velocity)), 1, el.blepsaw(freq));
+    return el.mul(el.mul(0.22, velocity), tone, el.adsr(0.005, 0.15, 0.55, 0.35, gate));
+  },
+};`;
 
 const css = `
 /* The side tab and the window follow Soundgineer's (#synth-btn, #synth-window in web/synth/window.js): a vertical tab on the right
@@ -131,7 +138,7 @@ const mount = () => {
   const foot = win.querySelector(".elem-foot");
   const setFoot = (text, err = false) => { foot.textContent = text; foot.classList.toggle("err", err); };
   const elementary = createElementary();
-  globalThis.sonicPiElementary = elementary;   // the app's midi hook calls handleMidi here
+  globalThis.sonicPiElementary = elementary;   // the app's midi hook (main.js) calls handleMidi here
 
   const run = async () => {
     const started = performance.now();
@@ -200,4 +207,11 @@ const mount = () => {
   openBtn.addEventListener("click", () => setOpen(win.hidden));
 };
 
-if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", mount); else mount();
+// Mount, and if it throws, say so where a probe (and the player) can see it instead of failing silently.
+const safeMount = () => {
+  try { mount(); } catch (e) {
+    (globalThis.__errs ??= []).push("elementary mount: " + (e?.stack ?? e));
+    console.error("elementary panel: mount failed", e);
+  }
+};
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", safeMount); else safeMount();

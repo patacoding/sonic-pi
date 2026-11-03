@@ -15,6 +15,7 @@ const hz = (note) => 440 * Math.pow(2, (note - 69) / 12);
 
 export const createElementary = () => {
   let core = null, node = null, ctx = null, started = false;
+  let voiceFn = null;   // the player's timbre, when their code defines one
   const state = Array.from({ length: VOICES }, () => ({ note: null, vel: 0, ch: 0, on: false }));
 
   const engine = async () => {
@@ -31,9 +32,12 @@ export const createElementary = () => {
    * model -- no mutable refs needed).
    */
   const voiceGraph = () => {
-    const voices = state.map((v, i) => el.mul(
-      el.lowpass(1800, 1, el.blepsaw(el.const({ key: `v${i}f`, value: hz(v.note ?? 60) }))),
-      el.adsr(0.005, 0.12, 0.6, 0.3, el.const({ key: `v${i}g`, value: v.on ? 1 : 0 }))));
+    const voices = state.map((v, i) => {
+      const gate = el.const({ key: `v${i}g`, value: v.on ? 1 : 0 });
+      const node = voiceFn ? voiceFn(v.note ?? 60, v.on ? v.vel : 0, v.ch, gate)
+                           : el.mul(el.lowpass(1800, 1, el.blepsaw(el.const({ key: `v${i}f`, value: hz(v.note ?? 60) }))), el.adsr(0.005, 0.12, 0.6, 0.3, gate));
+      return el.mul(node, 1);
+    });
     const mix = el.mul(0.18, el.add(...voices));
     return [mix, mix];
   };
@@ -47,22 +51,22 @@ export const createElementary = () => {
     node = await core.initialize(ctx, { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2] });
     const target = e.node?.input ?? e.node;
     node.connect(target);
+    // The engine's input is only read while Sonic Pi runs a reader; start one unless the synth already has its own.
     let reader = false;
     if (!globalThis.sonicPiSynth?.readerStarted) {
-      for (let i = 0; i < 8 && !reader; i++) {
+      for (let i2 = 0; i2 < 8 && !reader; i2++) {
         try { await globalThis.sonicPi?.session?.run?.("synth :sound_in_stereo, sustain: 3600, amp: 1", { group: 0 }); reader = true; }
         catch { await new Promise((r) => setTimeout(r, 500)); }
       }
     } else reader = true;
     if (!reader) { try { node.disconnect(target); } catch {} node.connect(ctx.destination); }
-
     await core.render(...voiceGraph());
     started = true;
   };
 
   const update = async () => { await core.render(...voiceGraph()); };
 
-  /** A note from Sonic Pi. `rec` is the runtime's MIDI record: { path, args: [channel, note, velocity, …] }. */
+  /** A note from Sonic Pi: the runtime's MIDI record { path, args: [channel, note, velocity, …] }. */
   const handleMidi = (rec) => {
     if (!started) return null;
     const nums = (rec?.args ?? []).filter((x) => typeof x === "number");
@@ -86,7 +90,6 @@ export const createElementary = () => {
     return null;
   };
 
-  /** Run the player's code. A 档: a body with `el` in scope; B 档: `export default { render() }` (see el-panel.js). */
   const run = async (code) => {
     await start();
     const isModule = /\bexport\s+default\b/.test(code);
@@ -98,7 +101,8 @@ export const createElementary = () => {
       try {
         const mod = await import(url);
         const api = mod.default;
-        if (!api || typeof api.render !== "function") throw new Error("the module's default export needs a render() function");
+        if (!api || (typeof api.render !== "function" && typeof api.voice !== "function")) throw new Error("the module's default export needs a render() function (or a voice(note, velocity, channel, gate) for MIDI)");
+        if (typeof api.voice === "function") { voiceFn = api.voice; await core.render(...voiceGraph()); return { channels: 1, module: true, voice: true }; }
         if (typeof api.getVirtualFileSystem === "function") {
           const vfs = await api.getVirtualFileSystem((b) => ctx.decodeAudioData(b));
           if (vfs && Object.keys(vfs).length) await core.updateVirtualFileSystem(vfs);
