@@ -30,19 +30,25 @@ export const createElementary = () => {
     if (!ctx) throw new Error("no audio context on the engine");
     core = new WebRenderer();
     node = await core.initialize(ctx, { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2] });
-    // The engine's INPUT, the same place synth-worklet.js connects to. sound_in_stereo reads it and the rest of Sonic Pi's chain
-    // (mix, with_fx, scope, Recorder) follows.
-    const target = e.node?.input ?? e.node;
-    node.connect(target);
+    // Straight to the context's destination: audible on its own. Connecting to the engine's INPUT (where synth-worklet.js goes) is
+    // only heard while Sonic Pi itself plays `synth :sound_in_stereo`, which a standalone panel cannot assume -- that was the silence.
+    // Routing through Sonic Pi's chain (with_fx, scope, Recorder) is the next step, and needs that synth running.
+    node.connect(ctx.destination);
     started = true;
   };
 
   /** Run the code as a function of `el` and render what it returns. A mono node is upmixed by the renderer. */
   const run = async (code) => {
     await start();
-    const fn = new Function("el", `"use strict";\n${code}\n`);
-    const out = fn(el);
-    if (out == null) throw new Error("the code returned nothing: end it with the node to hear, e.g. el.cycle(440)");
+    // Accept both: a body with `return`, and a bare expression (the last line a REPL would evaluate). Trying the expression first
+    // keeps `el.cycle(440)` working, and the body form keeps `const c = ...; return ...` working.
+    let out = null, firstError = null;
+    try { out = new Function("el", `"use strict";\nreturn (\n${code}\n);`)(el); } catch (e) { firstError = e; }
+    if (out == null) {
+      try { out = new Function("el", `"use strict";\n${code}\n`)(el); } catch (e) { throw e; }
+    }
+    if (out == null) throw new Error(firstError ? String(firstError.message) :
+      "the code returned nothing: end with `return <node>`, or make the last line the node, e.g. el.cycle(440)");
     if (Array.isArray(out)) await core.render(...out); else await core.render(out);
     return { channels: Array.isArray(out) ? out.length : 1 };
   };

@@ -8,9 +8,9 @@
 
 import { createElementary } from "./el-bridge.js";
 
-const STORAGE = "sp-elementary-code";
+const STORAGE = "sp-elementary-code-v2";   // v2: the first key held code without `return`
 const DEFAULT_CODE = `// Elementary 4 is positional: lowpass(cutoff, q, node).
-// End with `return` of the node (or array of nodes) you want to hear.
+// End with return, then the node (or array of nodes) you want to hear.
 const cutoff = el.add(600, el.mul(500, el.cycle(0.2)));
 return el.mul(0.25, el.lowpass(cutoff, 1, el.blepsaw(220)))`;
 
@@ -53,7 +53,7 @@ const mount = () => {
       <button data-act="stop">Stop</button>
       <button data-act="close" title="Close">×</button></div>
     <textarea class="elem-code" spellcheck="false"></textarea>
-    <div class="elem-foot">Ready. End with `return <node>`.</div>`;
+    <div class="elem-foot">Ready. Sound goes straight out; end with return <node> (or just the node on the last line).</div>`;
   document.body.appendChild(panel);
 
   const code = panel.querySelector(".elem-code");
