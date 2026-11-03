@@ -7,8 +7,44 @@
 //                  level 1  the Shadertoy page: documents, passes, channels, the values the music sends
 export const GFX_ENABLED = false;
 export const EDITOR_TAB = true;
+export const SYNTH_ENABLED = true;      // the Soundgineer engine, wired in by web/synth/host.js
 
 if (GFX_ENABLED) await import("./graphics/gfx-layer.js");
+
+// The music reaches us through the one hook the app already gives our layer (`window.sonicPiGfx.record`), so the
+// `:synth` lines arrive with no further upstream edit. Installed by polling: the first attempt ran once, found the
+// hook not there yet, and silently did nothing -- measured as forwardFlag false while the app was calling it six
+// times for one line. Now it keeps trying for a few seconds and says so either way.
+function installRecordForwarding() {
+  // A guard that keeps checking, because a one-shot install lost the wrapper when the page published its own record
+  // function after us -- measured: a run produced no records at all, which looked exactly like "the music sent
+  // nothing". Cheap and idempotent: if the current record is already ours, nothing happens.
+  const wrap = () => {
+    const g = globalThis.sonicPiGfx;
+    if (!g || typeof g.record !== "function") return;
+    if (g.__synthForward) return;
+    const original = g.record;
+    g.record = function (r, ...rest) {
+      try { globalThis.sonicPiSynth?.handleRecord?.(r); } catch (e) { console.error(`Synth — a record threw: ${e?.message ?? e}`); }
+      return original.call(this, r, ...rest);
+    };
+    g.__synthForward = true;
+    console.info("Synth — the music's records now reach the synth");
+  };
+  wrap();
+  setInterval(wrap, 2000);          // re-wrap if the page replaced it (and say nothing when it is already ours)
+}
+
+// ── our synthesiser: an independent engine of its own, connected into the app's input bus ─────────────────
+if (SYNTH_ENABLED) {
+  try {
+    const { synthHost } = await import("./synth/host.js");   // publishes window.sonicPiSynth
+    installRecordForwarding();
+    console.info(`Synth — layer loaded (${synthHost.ready ? "running" : "waiting for the engine's first Run"})`);
+  } catch (e) {
+    console.error(`Synth — the layer could not be loaded: ${e?.stack ?? e}`);
+  }
+}
 
 if (EDITOR_TAB && !GFX_ENABLED) {
   // ── level 0: the canvas, with its button (preview / fullscreen / hidden) ─────────────────────────────────

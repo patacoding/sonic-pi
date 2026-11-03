@@ -15,6 +15,10 @@ import { Keyboard } from './keyboard'
 import { PresetBrowser } from './presets'
 import { initMidi } from './midi'
 
+// SP-EXT: re-exported so a host can register factory presets through the same module it mounts the UI from.
+export { registerFactoryPresets } from './presets'
+export type { ExternalPreset } from './presets'
+
 export function buildApp(engine: SynthEngine, container: HTMLElement): void {
   engine.primeTables()
 

@@ -506,6 +506,9 @@ const loadWeight = (d) => (d?.type === "sample" ? (d.size ? Math.min(3, Math.max
 // A tap that heads for the code (Launch Sonic Pi, the Code tab) starts the engine while it is a tap: a browser only
 // lets audio start inside a gesture, and by the first Run it has booted, so that Run sounds at once
 function warmEngine() { if (!session) ensureSession().catch(() => {}); }
+// SP-EXT: a synthesiser add-on may bring the engine up on purpose. This runs no code: it is the same path the
+// onboarding tap uses, so enabling an add-on cannot start the user's buffer as a side effect.
+globalThis.__sonicPiBootEngine = () => ensureSession().catch(() => null);
 async function ensureSession() {
   if (session) return session;
   audioInGesture();   // now, in the press, before anything is awaited
@@ -552,7 +555,7 @@ async function ensureSession() {
     setTimeout(() => logs.add("Host", `audio: ${ac?.sampleRate ?? "?"} Hz, ${lowLatency.on ? "low latency" : "interactive"}; base latency ${ms(ac?.baseLatency)}, output latency ${ms(ac?.outputLatency)}`), 1000);
     groupsDeclared.clear();   // the runtime is new: its groups are told again as they are used
     session = sp.createLiveSession(runtime, engine, {
-      output, log, error: showError, status: showJobs, state: () => {}, record: (r, at, stale) => { window.sonicPiGfx?.record(r, logInfo); onRecord(r, at, stale); }, midi: midiSend,
+      output, log, error: showError, status: showJobs, state: () => {}, record: (r, at, stale) => { window.sonicPiGfx?.record(r, logInfo); onRecord(r, at, stale); }, midi: (...a) => { window.sonicPiSynth?.handleMidi?.(...a); return midiSend(...a); },   // SP-EXT: our synth wants the performance signals; midiSend unchanged
       host: (address, number, name) => {
         if (address === "/sonic-pi/audio-in") return audioIn.want(number);   // live_audio: the sound card's input, opened on first use
         logs.add("Runtime", { "/sonic-pi/synthdef": `load synthdef ${name}`, "/sonic-pi/sample": `load sample ${name} into buffer ${number}`, "/sonic-pi/sample_free": `free buffer ${number} (${name})` }[address] ?? `${address} ${number} ${name}`);

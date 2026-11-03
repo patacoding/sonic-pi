@@ -2,10 +2,41 @@
 // export/import.
 
 import { paramDef, valueToNorm } from '../shared/params'
+// SP-EXT: presets are scoped per engine, because a host may run one engine per MIDI channel
+type Scoped = PresetData & { scope?: string }
 import type { SynthEngine, PresetData } from '../audio/engine'
 import { el } from './common'
 
 const STORAGE_KEY = 'soundgineer.presets.v1'
+
+// SP-EXT: a host may supply factory presets of its own, grouped by category, instead of being limited to the list below.
+// The Sonic Pi Web layer registers the voices it mines from the player's own preset corpus and the browser then shows one
+// group per category. Empty by default, so a host that never calls it sees exactly the old menu.
+export interface ExternalPreset extends Partial<PresetData> {
+  name: string
+  category?: string
+}
+const EXTERNAL: ExternalPreset[] = []
+
+/** SP-EXT: register (or replace) host-provided factory presets. Safe to call more than once. Returns the total. */
+export function registerFactoryPresets(list: ExternalPreset[]): number {
+  for (const p of list ?? []) {
+    if (!p || typeof p.name !== 'string' || !p.name) continue
+    const at = EXTERNAL.findIndex((x) => x.name === p.name)
+    if (at >= 0) EXTERNAL[at] = p
+    else EXTERNAL.push(p)
+  }
+  return EXTERNAL.length
+}
+
+/** SP-EXT: the built-in presets and whatever a host registered, in that order. */
+function allFactoryPresets(): ExternalPreset[] {
+  return [...FACTORY, ...EXTERNAL] as ExternalPreset[]
+}
+
+function findFactoryPreset(name: string): ExternalPreset | undefined {
+  return allFactoryPresets().find((p) => p.name === name)
+}
 
 /** Convenience: author factory presets in raw units, store normalized. */
 function P(raw: Record<string, number>): Record<string, number> {
@@ -548,16 +579,29 @@ const FACTORY: Partial<PresetData>[] = [
   }
 ]
 
-function loadUserPresets(): PresetData[] {
+function readAll(): Scoped[] {
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '[]') as PresetData[]
+    const all = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '[]') as Scoped[]
+    // names are the identity: if an earlier experiment left two entries with the same name, keep the last one
+    const byName = new Map<string, Scoped>()
+    for (const p of all) if (p && typeof p.name === "string") byName.set(p.name, p)
+    return [...byName.values()]
   } catch {
     return []
   }
 }
 
-function saveUserPresets(list: PresetData[]): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(list))
+function loadUserPresets(): Scoped[] {
+  return readAll()
+}
+
+// SP-EXT: merge on save. Presets are a library, not a property of a channel, so the name is the identity and saving an
+// existing name replaces it -- but the write must read what is stored first: every engine has its own browser, and a
+// blind write made the last channel to save erase the others' work.
+function saveUserPresets(list: Scoped[]): void {
+  const byName = new Map(readAll().map((p) => [p.name, p]))
+  for (const p of list) byName.set(p.name, p)
+  localStorage.setItem(STORAGE_KEY, JSON.stringify([...byName.values()]))
 }
 
 export class PresetBrowser {
@@ -577,7 +621,8 @@ export class PresetBrowser {
       const list = loadUserPresets().filter(p => p.name !== name)
       list.push(this.engine.toPreset(name))
       saveUserPresets(list)
-      this.refresh(`user:${name}`)
+      ;(this.engine as unknown as { __sgrPreset?: string }).__sgrPreset = `user:${name}`
+      this.refresh(`user:${name}`)      // SP-EXT: options are user:<scope>:<name>; the old value matched nothing and the dropdown fell back to Init
     })
 
     const exportBtn = el('button', 'hdr-btn', 'EXPORT')
@@ -595,7 +640,6 @@ export class PresetBrowser {
     const importBtn = el('button', 'hdr-btn', 'IMPORT')
     const file = el('input') as HTMLInputElement
     file.type = 'file'
-    file.accept = '.json'
     file.style.display = 'none'
     file.addEventListener('change', async () => {
       const f = file.files?.[0]
@@ -606,7 +650,8 @@ export class PresetBrowser {
         const list = loadUserPresets().filter(p => p.name !== preset.name)
         list.push(preset)
         saveUserPresets(list)
-        this.refresh(`user:${preset.name}`)
+        ;(this.engine as unknown as { __sgrPreset?: string }).__sgrPreset = `user:${preset.name}`
+        this.refresh(`user:${preset.name}`)   // SP-EXT: same value format as refresh() writes
       } catch (err) {
         alert(`Could not load preset: ${err}`)
       }
@@ -615,7 +660,9 @@ export class PresetBrowser {
     importBtn.addEventListener('click', () => file.click())
 
     this.root.append(this.select, save, exportBtn, importBtn, file)
-    this.refresh('factory:Init')
+    // open on whatever this engine is playing, so a remount (or a reload, once the host restores it) shows the truth
+    const cur = (this.engine as unknown as { __sgrPreset?: string }).__sgrPreset
+    this.refresh(cur ?? 'factory:Init')
   }
 
   private refresh(selected: string): void {
@@ -628,6 +675,26 @@ export class PresetBrowser {
       fGroup.appendChild(o)
     }
     this.select.appendChild(fGroup)
+
+    // SP-EXT: host-registered voices, one group per category, so a library of any size stays navigable.
+    const byCategory = new Map<string, ExternalPreset[]>()
+    for (const p of EXTERNAL) {
+      const cat = String(p.category ?? 'Factory')
+      if (!byCategory.has(cat)) byCategory.set(cat, [])
+      byCategory.get(cat)!.push(p)
+    }
+    for (const [cat, list] of byCategory) {
+      const g = el('optgroup') as HTMLOptGroupElement
+      g.label = cat.charAt(0).toUpperCase() + cat.slice(1)
+      for (const p of list) {
+        const o = el('option', undefined, p.name) as HTMLOptionElement
+        o.value = `factory:${p.name}`
+        g.appendChild(o)
+      }
+      this.select.appendChild(g)
+    }
+    // SP-EXT: one library for every channel. Scoping presets by channel was wrong: a patch is not a property of a
+    // channel, and it produced duplicates and an entanglement the player never asked for.
     const users = loadUserPresets()
     if (users.length) {
       const uGroup = el('optgroup') as HTMLOptGroupElement
@@ -635,6 +702,7 @@ export class PresetBrowser {
       for (const p of users) {
         const o = el('option', undefined, p.name) as HTMLOptionElement
         o.value = `user:${p.name}`
+        o.textContent = p.name
         uGroup.appendChild(o)
       }
       this.select.appendChild(uGroup)
@@ -647,8 +715,13 @@ export class PresetBrowser {
     const name = rest.join(':')
     const preset =
       kind === 'factory'
-        ? FACTORY.find(p => p.name === name)
-        : loadUserPresets().find(p => p.name === name)
-    if (preset) this.engine.loadPreset(preset)
+        ? findFactoryPreset(name)
+        : readAll().find((p) => p.name === name)
+    if (preset) {
+      this.engine.loadPreset(preset)
+      // SP-EXT: tell the host which preset this engine is on -- it cannot see the dropdown, and a host that persists
+      // the choice (or shows it in its own channel list) needs to be told, not to guess.
+      ;(this.engine as unknown as { __sgrPreset?: string }).__sgrPreset = key
+    }
   }
 }

@@ -41,7 +41,7 @@ import { createPanel } from "./gfx-ui.js";
 import { createShaderPane, resolveDocument } from "./gfx-editor.js";
 import { emptyDocument } from "./gfx-document.js";
 import { testCardDocument, TEST_CARD } from "./gfx-testcard.js";
-import { createSynthHost, isSynthOrder } from "./synth-host.js";
+// SP-CLEANUP: the self-built synthesiser was removed (Soundgineer is the engine now); nothing here uses it
 import { createViewSwitch } from "./gfx-view.js";
 import { createShadertoyTab } from "./gfx-tab.js";
 
@@ -406,13 +406,13 @@ function install() {
   // Our own synthesizer lives in its own namespace (synth-host.js + synth.js + synth-worklet.js) and
   // publishes itself as `window.sonicPiSynth`. This layer only hands it the records it owns and its own
   // section of the panel -- nothing about the synth itself is written here.
-  const synthHost = createSynthHost({ say: (t) => say(t), problem: (t) => problem(t) });
-  window.sonicPiSynth = synthHost;
+// SP-CLEANUP: was part of the removed self-built synthesiser -- const synthHost = createSynthHost({ say: (t) => say(t), problem: (t) => problem(t) });
+// SP-CLEANUP: was part of the removed self-built synthesiser -- window.sonicPiSynth = synthHost;
 
   const sections = () => [
     // a section of ours that is switched off returns null (see OWN_SYNTH in synth-host.js)
-    synthHost.host.panelSection(),
-    synthHost.host.synthdefSection(),
+// SP-CLEANUP: was part of the removed self-built synthesiser -- synthHost.host.panelSection(),
+// SP-CLEANUP: was part of the removed self-built synthesiser -- synthHost.host.synthdefSection(),
     {
       id: "interface",
       title: "Interface",
@@ -867,7 +867,7 @@ function install() {
       //  stays invisible -- which is the bug this whole path exists to fix)
     }
     // `puts :synth, …` is the synthesizer's language, not ours (synth-directive.js)
-    if (synthHost.host.handleRecord(r)) return;
+// SP-CLEANUP: was part of the removed self-built synthesiser -- if (synthHost.host.handleRecord(r)) return;
     const d = parseDirective(r?.text);
     if (!d) return;                                            // the player's own output: theirs
     if (!d.ok) return problem(d.error);
@@ -882,7 +882,7 @@ function install() {
     if (!result.ok) {
       // `puts :gfx, :note, 69`: that name belongs to the synthesizer, and saying so beats "the shader
       // declares no uniform called note"
-      if (isSynthOrder(d.name)) return problem(`${d.name} is an order for the synthesizer: say :synth, :${d.name} (the :gfx sigil is for the shader's own values)`);
+// SP-CLEANUP: was part of the removed self-built synthesiser -- if (isSynthOrder(d.name)) return problem(`${d.name} is an order for the synthesizer: say :synth, :${d.name} (the :gfx sigil is for the shader's own values)`);
       return problem(result.error);
     }
     if (d.verbose) say(`Graphics — ${d.name} = ${d.values.join(" ")} (${d.shape})`);
