@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Elementary's own code area, separate from the Sonic Pi buffers: a small panel with a text area, Run and Stop. A 档 -- the code is a
-// function body with `el` in scope, and it ends with the node (or array of nodes) you want to hear:
+// Elementary's own code area: a draggable window (the drag and its boundary clamp follow web/synth/window.js, so both windows behave the
+// same) with a CodeMirror editor that highlights JavaScript, Run and Stop, and the position remembered between sessions.
 //
-//     el.mul(el.blepsaw({ freq: 220 }), el.adsr(0.01, 0.1, 0.6, 0.3, el.train(2)))
-//
-// The sound leaves through the engine's input, so Sonic Pi's with_fx, scope and Recorder see it.
+// A 档 contract: the code is a function body with `el` in scope, ending in `return <node>` (or a bare node on the last line).
 
 import { createElementary } from "./el-bridge.js";
+import { EditorView, keymap } from "@codemirror/view";
+import { EditorState } from "@codemirror/state";
+import { basicSetup } from "codemirror";
+import { javascript } from "@codemirror/lang-javascript";
 
-const STORAGE = "sp-elementary-code-v2";   // v2: the first key held code without `return`
+const CODE_KEY = "sp-elementary-code-v3";
+const POS_KEY = "sp-elementary-pos";
 const DEFAULT_CODE = `// Elementary 4 is positional: lowpass(cutoff, q, node).
 // End with return, then the node (or array of nodes) you want to hear.
 const cutoff = el.add(600, el.mul(500, el.cycle(0.2)));
@@ -18,18 +21,22 @@ const css = `
 .elem-btn{position:fixed;right:14px;bottom:14px;z-index:60;width:40px;height:40px;border-radius:20px;border:1px solid #555;
   background:#1b1b1b;color:#eee;font:600 13px/1 ui-monospace,monospace;cursor:pointer}
 .elem-btn:hover{background:#2a2a2a}
-.elem-panel{position:fixed;right:14px;bottom:64px;z-index:61;width:min(560px,calc(100vw - 28px));height:min(420px,60vh);display:flex;
-  flex-direction:column;background:#141414;color:#e8e8e8;border:1px solid #444;border-radius:10px;box-shadow:0 10px 40px #000a;
+.elem-win{position:fixed;z-index:61;width:min(620px,calc(100vw - 28px));display:flex;flex-direction:column;
+  background:#141414;color:#e8e8e8;border:1px solid #444;border-radius:10px;box-shadow:0 10px 40px #000a;overflow:hidden;
   font:13px/1.45 ui-sans-serif,system-ui,sans-serif}
-.elem-panel[hidden]{display:none}
-.elem-head{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid #333}
-.elem-head b{font-weight:600;margin-right:auto}
-.elem-head button{border:1px solid #555;background:#222;color:#eee;border-radius:6px;padding:4px 10px;cursor:pointer}
-.elem-head button.primary{background:#2f6b3b;border-color:#3c8a4c}
-.elem-head button:disabled{opacity:.5;cursor:default}
-.elem-code{flex:1;margin:0;padding:10px;border:0;outline:none;resize:none;background:#101010;color:#e8e8e8;
-  font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;tab-size:2}
-.elem-foot{padding:6px 10px;border-top:1px solid #333;color:#9a9a9a;font-size:12px;white-space:pre-wrap}
+.elem-win[hidden]{display:none}
+.elem-bar{display:flex;align-items:center;gap:8px;padding:7px 10px;border-bottom:1px solid #333;cursor:grab;
+  background:linear-gradient(#1d1d1d,#161616);user-select:none}
+.elem-bar:active{cursor:grabbing}
+.elem-bar b{font-weight:600;margin-right:auto}
+.elem-bar button{border:1px solid #555;background:#222;color:#eee;border-radius:6px;padding:3px 10px;cursor:pointer;font:inherit}
+.elem-bar button.primary{background:#2f6b3b;border-color:#3c8a4c}
+.elem-bar button:disabled{opacity:.5;cursor:default}
+.elem-editor{height:min(34vh,260px);overflow:auto}
+.elem-editor .cm-editor{height:100%;background:#101010;color:#e8e8e8}
+.elem-editor .cm-scroller{font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+.elem-editor .cm-gutters{background:#0d0d0d;color:#666;border-right:1px solid #222}
+.elem-foot{padding:6px 10px;border-top:1px solid #333;color:#9a9a9a;font-size:12px;white-space:pre-wrap;min-height:2.2em}
 .elem-foot.err{color:#ff9a9a}
 `;
 
@@ -40,58 +47,88 @@ const mount = () => {
 
   const openBtn = document.createElement("button");
   openBtn.className = "elem-btn";
-  openBtn.title = "Elementary: write JavaScript that plays through Sonic Pi";
+  openBtn.title = "Elementary: JavaScript synthesis, through Sonic Pi";
   openBtn.textContent = "él";
   document.body.appendChild(openBtn);
 
-  const panel = document.createElement("div");
-  panel.className = "elem-panel";
-  panel.hidden = true;
-  panel.innerHTML = `
-    <div class="elem-head"><b>Elementary</b>
-      <button data-act="run" class="primary">Run</button>
+  const win = document.createElement("div");
+  win.className = "elem-win";
+  win.hidden = true;
+  win.innerHTML = `<div class="elem-bar"><b>Elementary</b>
+      <button data-act="run" class="primary" title="Run (Ctrl/Cmd+Enter)">Run</button>
       <button data-act="stop">Stop</button>
       <button data-act="close" title="Close">×</button></div>
-    <textarea class="elem-code" spellcheck="false"></textarea>
-    <div class="elem-foot">Ready. Sound goes straight out; end with return <node> (or just the node on the last line).</div>`;
-  document.body.appendChild(panel);
+    <div class="elem-editor"></div>
+    <div class="elem-foot">Ready. End with return, then the node you want to hear.</div>`;
+  document.body.appendChild(win);
 
-  const code = panel.querySelector(".elem-code");
-  const foot = panel.querySelector(".elem-foot");
-  code.value = localStorage.getItem(STORAGE) ?? DEFAULT_CODE;
-  code.addEventListener("input", () => localStorage.setItem(STORAGE, code.value));
-
+  const foot = win.querySelector(".elem-foot");
   const setFoot = (text, err = false) => { foot.textContent = text; foot.classList.toggle("err", err); };
   const elementary = createElementary();
 
   const run = async () => {
     const started = performance.now();
+    setFoot("Running…");
     try {
-      setFoot("Running…");
-      const { channels } = await elementary.run(code.value);
+      const { channels } = await elementary.run(view.state.doc.toString());
       setFoot(`Running: ${channels} channel${channels === 1 ? "" : "s"} out to Sonic Pi's input (${Math.round(performance.now() - started)} ms). Edit and Run again: the sound changes without stopping.`);
-    } catch (e) {
-      setFoot(String(e?.message ?? e), true);
-    }
+    } catch (e) { setFoot(String(e?.message ?? e), true); }
   };
   const stop = async () => {
     try { await elementary.stop(); setFoot("Stopped (silence rendered). Run again to hear it."); }
     catch (e) { setFoot(String(e?.message ?? e), true); }
   };
 
-  panel.addEventListener("click", (ev) => {
+  const view = new EditorView({
+    parent: win.querySelector(".elem-editor"),
+    state: EditorState.create({
+      doc: localStorage.getItem(CODE_KEY) ?? DEFAULT_CODE,
+      extensions: [
+        basicSetup,
+        javascript(),
+        EditorView.updateListener.of((u) => { if (u.docChanged) localStorage.setItem(CODE_KEY, u.state.doc.toString()); }),
+        keymap.of([{ key: "Mod-Enter", preventDefault: true, run: () => { run(); return true; } }]),
+      ],
+    }),
+  });
+
+  // position: restored, and kept inside reach -- the same clamp web/synth/window.js uses for its own window
+  let pos = null;
+  try { pos = JSON.parse(localStorage.getItem(POS_KEY) ?? "null"); } catch { pos = null; }
+  const clampPos = (p) => {
+    const w = win.offsetWidth || 600, keepX = Math.min(140, w), keepY = 32;
+    return { left: Math.round(Math.max(keepX - w, Math.min(p.left, innerWidth - keepX))),
+             top: Math.round(Math.max(0, Math.min(p.top, innerHeight - keepY))) };
+  };
+  const place = (p) => { pos = clampPos(p); win.style.left = pos.left + "px"; win.style.top = pos.top + "px";
+    localStorage.setItem(POS_KEY, JSON.stringify(pos)); };
+  place(pos ?? { left: Math.max(12, innerWidth - 660), top: Math.max(12, innerHeight - 460) });
+
+  win.querySelector(".elem-bar").addEventListener("pointerdown", (e) => {
+    if (e.target.closest("button")) return;
+    const bar = e.currentTarget, r = win.getBoundingClientRect();
+    const dx = e.clientX - r.left, dy = e.clientY - r.top;
+    const move = (ev) => place({ left: ev.clientX - dx, top: ev.clientY - dy });
+    const up = (ev) => {
+      bar.removeEventListener("pointermove", move);
+      bar.removeEventListener("pointerup", up);
+      bar.removeEventListener("pointercancel", up);
+      try { bar.releasePointerCapture(ev.pointerId); } catch { /* nothing captured */ }
+    };
+    try { bar.setPointerCapture(e.pointerId); } catch { /* a synthetic pointer may refuse; the drag still works */ }
+    bar.addEventListener("pointermove", move);
+    bar.addEventListener("pointerup", up);
+    bar.addEventListener("pointercancel", up);
+    e.preventDefault();
+  });
+
+  win.addEventListener("click", (ev) => {
     const act = ev.target?.dataset?.act;
     if (act === "run") run();
     else if (act === "stop") stop();
-    else if (act === "close") panel.hidden = true;
+    else if (act === "close") win.hidden = true;
   });
-  openBtn.addEventListener("click", () => { panel.hidden = !panel.hidden; if (!panel.hidden) code.focus(); });
-  code.addEventListener("keydown", (ev) => {
-    // Ctrl/Cmd+Enter runs, as in the playground; Tab indents instead of leaving the field.
-    if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); run(); }
-    else if (ev.key === "Tab") { ev.preventDefault(); const s = code.selectionStart, e2 = code.selectionEnd;
-      code.value = code.value.slice(0, s) + "  " + code.value.slice(e2); code.selectionStart = code.selectionEnd = s + 2; }
-  });
+  openBtn.addEventListener("click", () => { win.hidden = !win.hidden; if (!win.hidden) view.focus(); });
 };
 
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", mount); else mount();
