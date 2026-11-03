@@ -10,7 +10,7 @@ import { EditorView, keymap } from "@codemirror/view";
 import { EditorState } from "@codemirror/state";
 import { basicSetup } from "codemirror";
 import { javascript } from "@codemirror/lang-javascript";
-import { autocompletion } from "@codemirror/autocomplete";
+import { autocompletion, snippet } from "@codemirror/autocomplete";
 
 const CODE_KEY = "sp-elementary-code-v3";
 const POS_KEY = "sp-elementary-pos";
@@ -79,6 +79,20 @@ const EL_SIGNATURES = {
   sm: "sm(x, gate)", snapshot: "snapshot(x, gate)",
 };
 
+// A signature like "lowpass(cutoff, q, x)   positional" becomes the snippet el.lowpass(${cutoff}, ${q}, ${x}) -- the name, the
+// parentheses and one placeholder per argument, so Tab walks them. Object shapes get a literal skeleton with a single placeholder,
+// because their keys are what matters and a placeholder per key would fight the user.
+const snippetFor = (name) => {
+  const sig = EL_SIGNATURES[name];
+  const m = sig && /^[a-zA-Z0-9_]+\s*\(([^)]*)\)/.exec(sig);
+  if (!m) return `el.${name}(`;
+  const args = m[1].trim();
+  if (!args) return `el.${name}()`;
+  if (args.includes("{")) return `el.${name}(${args.replace(/[a-zA-Z_]+/g, "")})`;
+  const names = args.split(",").map((a) => a.trim()).filter(Boolean);
+  return `el.${name}(${names.map((a) => "${" + a + "}").join(", ")})`;
+};
+
 const elCompletions = (ctx) => {
   const word = ctx.matchBefore(/[\w.$]*$/) || { from: ctx.pos, text: "" };
   if (!ctx.explicit && word.text.length < 2 && ctx.pos > 0 && ctx.matchBefore(/\w/) == null) return null;
@@ -87,7 +101,7 @@ const elCompletions = (ctx) => {
     type: "function",
     detail: EL_SIGNATURES[k] ?? el[k].length + " arg(s)",
     info: EL_SIGNATURES[k] ?? undefined,
-    apply: "el." + k,
+    apply: snippet(snippetFor(k)),
   }));
   return { from: word.from, options };
 };
