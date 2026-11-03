@@ -131,6 +131,7 @@ const mount = () => {
   const foot = win.querySelector(".elem-foot");
   const setFoot = (text, err = false) => { foot.textContent = text; foot.classList.toggle("err", err); };
   const elementary = createElementary();
+  globalThis.sonicPiElementary = elementary;   // the app's midi hook calls handleMidi here
 
   const run = async () => {
     const started = performance.now();
