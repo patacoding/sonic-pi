@@ -49,21 +49,51 @@ export const createElementary = () => {
     started = true;
   };
 
-  /** Run the code as a function of `el` and render what it returns. A mono node is upmixed by the renderer. */
+  /**
+   * Run the code. Two shapes are accepted:
+   *   A 档 -- a body with `el` in scope, ending in `return <node>` (or a bare node on the last line)
+   *   B 档 -- the playground's form: an ES module whose default export is { getVirtualFileSystem?(decodeAudioData), render() }
+   * The module form is loaded from a Blob with `el` injected as a binding, so the code needs no imports of its own; its
+   * getVirtualFileSystem is handed to the core once, as the playground does.
+   */
   const run = async (code) => {
     await start();
-    // Accept both: a body with `return`, and a bare expression (the last line a REPL would evaluate). Trying the expression first
-    // keeps `el.cycle(440)` working, and the body form keeps `const c = ...; return ...` working.
-    let out = null, firstError = null;
-    try { out = new Function("el", `"use strict";\nreturn (\n${code}\n);`)(el); } catch (e) { firstError = e; }
-    if (out == null) {
-      try { out = new Function("el", `"use strict";\n${code}\n`)(el); } catch (e) { throw e; }
+    const isModule = /\bexport\s+default\b/.test(code);
+    let out = null, channels = 1;
+    if (isModule) {
+      // The blob module gets `el` from here rather than importing the vendored package: the vendored dist imports a CJS dependency
+      // (eventemitter3), which a plain ES module cannot load -- the bundled panel can, so it is the one that hands `el` over.
+      globalThis.__elemEl = el;
+      const src = `const el = globalThis.__elemEl;\n${code}\n`;
+      const url = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
+      try {
+        const mod = await import(url);
+        const api = mod.default;
+        if (!api || typeof api.render !== "function") throw new Error("the module's default export needs a render() function");
+        if (typeof api.getVirtualFileSystem === "function") {
+          const vfs = await api.getVirtualFileSystem(decodeAudioData);
+          if (vfs && Object.keys(vfs).length) await core.updateVirtualFileSystem(vfs);
+        }
+        out = await api.render();
+      } finally { URL.revokeObjectURL(url); }
+    } else {
+      // A 档: expression first (a bare node), then a body with `return`.
+      let firstError = null;
+      try { out = new Function("el", `"use strict";\nreturn (\n${code}\n);`)(el); } catch (e) { firstError = e; }
+      if (out == null) {
+        try { out = new Function("el", `"use strict";\n${code}\n`)(el); } catch (e) { throw e; }
+      }
+      if (out == null) throw new Error(firstError ? String(firstError.message) :
+        "the code returned nothing: end with `return <node>`, or make the last line the node, e.g. el.cycle(440)");
     }
-    if (out == null) throw new Error(firstError ? String(firstError.message) :
-      "the code returned nothing: end with `return <node>`, or make the last line the node, e.g. el.cycle(440)");
+    if (out == null) throw new Error("render() returned nothing");
+    channels = Array.isArray(out) ? out.length : 1;
     if (Array.isArray(out)) await core.render(...out); else await core.render(out);
-    return { channels: Array.isArray(out) ? out.length : 1 };
+    return { channels, module: isModule };
   };
+
+  /** The same decodeAudioData signature the playground passes to getVirtualFileSystem. */
+  const decodeAudioData = async (arrayBuffer) => await ctx.decodeAudioData(arrayBuffer);
 
   /** Stop: render silence, and keep the renderer so the next Run does not re-initialise it. */
   const stop = async () => {

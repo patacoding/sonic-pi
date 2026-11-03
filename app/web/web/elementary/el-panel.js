@@ -4,11 +4,13 @@
 //
 // A 档 contract: the code is a function body with `el` in scope, ending in `return <node>` (or a bare node on the last line).
 
-import { createElementary } from "./el-bridge.js";
+import { createElementary, API } from "./el-bridge.js";
+const { el } = API;
 import { EditorView, keymap } from "@codemirror/view";
 import { EditorState } from "@codemirror/state";
 import { basicSetup } from "codemirror";
 import { javascript } from "@codemirror/lang-javascript";
+import { autocompletion } from "@codemirror/autocomplete";
 
 const CODE_KEY = "sp-elementary-code-v3";
 const POS_KEY = "sp-elementary-pos";
@@ -37,13 +39,58 @@ const css = `
   padding:3px 10px;cursor:pointer;font:inherit}
 .elem-bar button.primary{border-color:#3c8a4c;color:#8f8}
 .elem-bar button:disabled{opacity:.5;cursor:default}
-.elem-editor{height:min(34vh,260px);overflow:auto;border:1px solid var(--WindowBorder);border-radius:6px}
+.elem-editor{height:min(62vh,520px);min-height:180px;resize:vertical;overflow:auto;border:1px solid var(--WindowBorder);border-radius:6px}
 .elem-editor .cm-editor{height:100%;background:color-mix(in srgb,var(--WindowBackground) 88%,#000);color:var(--WindowForeground)}
 .elem-editor .cm-scroller{font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
 .elem-editor .cm-gutters{background:transparent;color:color-mix(in srgb,var(--WindowForeground) 45%,transparent);border-right:1px solid var(--WindowBorder)}
 .elem-foot{padding:2px;color:color-mix(in srgb,var(--WindowForeground) 62%,transparent);font-size:12px;white-space:pre-wrap;min-height:2.2em}
 .elem-foot.err{color:#ff9a9a}
 `;
+
+// Autocomplete over `el`: every function the library exposes, with the signature for the ones that have a surprising shape -- in
+// Elementary 4 some nodes take positional arguments (lowpass(cutoff, q, node)) and some take an object with a required key
+// (metro({key, period})) -- which is exactly what a bare list of names cannot tell you.
+const EL_SIGNATURES = {
+  cycle: "cycle(hz)                        a sine at hz",
+  saw: "saw(freq)                         (v4: positional)",
+  blepsaw: "blepsaw(freq)                   band-limited, positional",
+  blepsquare: "blepsquare(freq)",
+  bleptriangle: "bleptriangle(freq)",
+  square: "square(freq)", triangle: "triangle(freq)",
+  lowpass: "lowpass(cutoff, q, x)            positional: three arguments",
+  highpass: "highpass(cutoff, q, x)", bandpass: "bandpass(cutoff, q, x)", notch: "notch(cutoff, q, x)",
+  svf: "svf({key, mode, cutoff, q}, x)    object with a required key",
+  biquad: "biquad({key, type, freq, q}, x)",
+  delay: "delay({key, size, decay}, x)      object with a required key",
+  adsr: "adsr(a, d, s, r, gateNode)        positional, gate last",
+  env: "env(a, d, s, r, gateNode)",
+  train: "train(freq)                       a pulse train (a gate)",
+  metro: "metro({key, period})              object with a required key",
+  seq: "seq({key, seq, hold}, clock)       object; seq is the array",
+  seq2: "seq2({key, seq, hold}, clock)",
+  sample: "sample({key, path}, trigger)      path is a name in the virtual file system",
+  sampleseq: "sampleseq({key, seq}, clock)",
+  table: "table({key, path}, x)", mul: "mul(a, b, ...)", add: "add(a, b, ...)",
+  sub: "sub(a, b)", div: "div(a, b)", pow: "pow(a, b)", mod: "mod(a, b)",
+  const: "const({key, value})               a constant node; key is required",
+  counter: "counter(x)", accum: "accum(x)            integrate a signal",
+  latch: "latch(x, gate)", smooth: "smooth(tau, x)", z: "z(x)                  one-sample delay",
+  time: "time()                         seconds since the engine started",
+  sm: "sm(x, gate)", snapshot: "snapshot(x, gate)",
+};
+
+const elCompletions = (ctx) => {
+  const word = ctx.matchBefore(/[\w.$]*$/) || { from: ctx.pos, text: "" };
+  if (!ctx.explicit && word.text.length < 2 && ctx.pos > 0 && ctx.matchBefore(/\w/) == null) return null;
+  const options = Object.keys(el).filter((k) => typeof el[k] === "function").map((k) => ({
+    label: "el." + k,
+    type: "function",
+    detail: EL_SIGNATURES[k] ?? el[k].length + " arg(s)",
+    info: EL_SIGNATURES[k] ?? undefined,
+    apply: "el." + k,
+  }));
+  return { from: word.from, options };
+};
 
 const mount = () => {
   const style = document.createElement("style");
@@ -93,6 +140,7 @@ const mount = () => {
         javascript(),
         EditorView.updateListener.of((u) => { if (u.docChanged) localStorage.setItem(CODE_KEY, u.state.doc.toString()); }),
         keymap.of([{ key: "Mod-Enter", preventDefault: true, run: () => { run(); return true; } }]),
+        autocompletion({ override: [elCompletions] }),
       ],
     }),
   });
