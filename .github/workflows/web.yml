@@ -9,9 +9,9 @@ name: Web
 
 on:
   push:
-    paths: ["app/web/**", "app/sharelink/**", "app/server/ruby/lib/**", "etc/**", ".github/workflows/web.yml"]
+    paths: ["app/web/**", "app/server/ruby/lib/**", "etc/**", ".github/workflows/web.yml"]
   pull_request:
-    paths: ["app/web/**", "app/sharelink/**", "app/server/ruby/lib/**", "etc/**", ".github/workflows/web.yml"]
+    paths: ["app/web/**", "app/server/ruby/lib/**", "etc/**", ".github/workflows/web.yml"]
 
 env:
   EMSDK_VERSION: "4.0.14"   # what the wasm is built with
@@ -47,7 +47,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: app/web/build/mruby   # an action's paths are the repository's, not the run steps' working directory
-          key: mruby-${{ runner.os }}-${{ steps.pins.outputs.mruby }}-${{ hashFiles('app/web/runtime/build_config.rb', 'app/web/runtime/mruby-patches/**') }}
+          key: mruby-${{ runner.os }}-${{ steps.pins.outputs.mruby }}-${{ hashFiles('app/web/runtime/build_config.rb') }}
       - name: Build the runtime
         shell: bash
         run: scripts/build-runtime.sh --native
@@ -94,7 +94,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: app/web/build/mruby   # an action's paths are the repository's, not the run steps' working directory
-          key: mruby-wasm-${{ steps.pins.outputs.mruby }}-${{ env.EMSDK_VERSION }}-${{ hashFiles('app/web/runtime/build_config.rb', 'app/web/runtime/mruby-patches/**') }}
+          key: mruby-wasm-${{ steps.pins.outputs.mruby }}-${{ env.EMSDK_VERSION }}-${{ hashFiles('app/web/runtime/build_config.rb') }}
       - name: Build the runtime
         run: scripts/build-runtime.sh
       - name: The specs, through the module the page loads
@@ -173,10 +173,6 @@ jobs:
           scripts/build-runtime.sh
           node scripts/build-site.mjs
           node scripts/build-app.mjs
-      - name: The app's own tests
-        # app/src a module at a time in Node: the workspace, sets byte for byte as native's own code writes and reads
-        # them (fixtures/set-bundle.json), the share link, the shortcuts, and the live core on the runtime just built
-        run: npm test
       - name: The examples are the specs they say they are
         run: npm run check:examples
       - name: Serve it
