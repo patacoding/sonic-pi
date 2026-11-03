@@ -12,7 +12,7 @@ import { basicSetup } from "codemirror";
 import { javascript } from "@codemirror/lang-javascript";
 import { autocompletion, snippet } from "@codemirror/autocomplete";
 
-const CODE_KEY = "sp-elementary-code-v5";   // v5: the default defines a MIDI voice
+const CODE_KEY = "sp-elementary-code-v6";   // v6: the preset is louder (the bridge no longer scales it down)   // v5: the default defines a MIDI voice
 const POS_KEY = "sp-elementary-pos";
 const DEFAULT_CODE = `// Your timbre. Sonic Pi plays the notes (midi_note_on / midi_note_off in its buffers);
 // this code decides what they sound like. \`channel\` lets one timbre answer channel 1, another channel 2.
@@ -22,7 +22,7 @@ export default {
     const tone = channel === 2
       ? el.blepsquare(el.mul(freq, 0.5))
       : el.lowpass(el.add(600, el.mul(1800, velocity)), 1, el.blepsaw(freq));
-    return el.mul(el.mul(0.22, velocity), tone, el.adsr(0.005, 0.15, 0.55, 0.35, gate));
+    return el.mul(el.mul(0.55, velocity), tone, el.adsr(0.005, 0.15, 0.55, 0.35, gate));
   },
 };`;
 

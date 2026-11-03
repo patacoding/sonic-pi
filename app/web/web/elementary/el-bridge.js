@@ -38,7 +38,9 @@ export const createElementary = () => {
                            : el.mul(el.lowpass(1800, 1, el.blepsaw(el.const({ key: `v${i}f`, value: hz(v.note ?? 60) }))), el.adsr(0.005, 0.12, 0.6, 0.3, gate));
       return el.mul(node, 1);
     });
-    const mix = el.mul(0.18, el.add(...voices));
+    // No gain here: the player's code decides its own level (a second factor on top of it made the sound almost inaudible --
+    // 0.18 x the code's 0.22 is 0.04). Eight voices still sum, so a soft clip is worth having if a chord ever gets loud.
+    const mix = el.add(...voices);
     return [mix, mix];
   };
 
