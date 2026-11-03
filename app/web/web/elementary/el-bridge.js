@@ -30,10 +30,22 @@ export const createElementary = () => {
     if (!ctx) throw new Error("no audio context on the engine");
     core = new WebRenderer();
     node = await core.initialize(ctx, { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2] });
-    // Straight to the context's destination: audible on its own. Connecting to the engine's INPUT (where synth-worklet.js goes) is
-    // only heard while Sonic Pi itself plays `synth :sound_in_stereo`, which a standalone panel cannot assume -- that was the silence.
-    // Routing through Sonic Pi's chain (with_fx, scope, Recorder) is the next step, and needs that synth running.
-    node.connect(ctx.destination);
+    // The engine's INPUT, where synth-worklet.js goes and where Soundgineer goes: through Sonic Pi's mix, with_fx, scope and
+    // Recorder. That input is only read while Sonic Pi itself runs `synth :sound_in_stereo`, so one is started here -- the same call
+    // Soundgineer's startReader makes, and skipped when Soundgineer already has a reader of its own (two would read the input twice).
+    const target = e.node?.input ?? e.node;
+    node.connect(target);
+    let reader = false;
+    if (!globalThis.sonicPiSynth?.readerStarted) {
+      for (let i = 0; i < 8 && !reader; i++) {
+        try {
+          await globalThis.sonicPi?.session?.run?.("synth :sound_in_stereo, sustain: 3600, amp: 1", { group: 0 });
+          reader = true;
+        } catch { await new Promise((r) => setTimeout(r, 500)); }
+      }
+    } else reader = true;
+    // If no reader could be started the input would be silent, so fall back to the destination: audible, but outside Sonic Pi's chain.
+    if (!reader) { try { node.disconnect(target); } catch {} node.connect(ctx.destination); }
     started = true;
   };
 
