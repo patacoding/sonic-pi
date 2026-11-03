@@ -18,25 +18,30 @@ const cutoff = el.add(600, el.mul(500, el.cycle(0.2)));
 return el.mul(0.25, el.lowpass(cutoff, 1, el.blepsaw(220)))`;
 
 const css = `
-.elem-btn{position:fixed;right:14px;bottom:14px;z-index:60;width:40px;height:40px;border-radius:20px;border:1px solid #555;
-  background:#1b1b1b;color:#eee;font:600 13px/1 ui-monospace,monospace;cursor:pointer}
-.elem-btn:hover{background:#2a2a2a}
-.elem-win{position:fixed;z-index:61;width:min(620px,calc(100vw - 28px));display:flex;flex-direction:column;
-  background:#141414;color:#e8e8e8;border:1px solid #444;border-radius:10px;box-shadow:0 10px 40px #000a;overflow:hidden;
-  font:13px/1.45 ui-sans-serif,system-ui,sans-serif}
+/* The side tab and the window follow Soundgineer's (#synth-btn, #synth-window in web/synth/window.js): a vertical tab on the right
+   edge, the same theme variables, just below the Synth tab. Two tabs, one shape. */
+.elem-btn{position:fixed;right:0;top:calc(50% + 12.6em);z-index:101;writing-mode:vertical-rl;height:5.4em;overflow:hidden;
+  padding:10px 6px;cursor:pointer;font:12px/1.1 system-ui,sans-serif;letter-spacing:.04em;text-align:center;
+  color:var(--WindowForeground);border:1px solid var(--WindowBorder);border-right:0;border-radius:8px 0 0 8px;
+  background:color-mix(in srgb,var(--WindowBackground) 92%,transparent)}
+.elem-btn:hover{background:color-mix(in srgb,var(--WindowBackground) 78%,transparent)}
+.elem-btn[aria-pressed="true"]{border-color:#5a8;color:#5a8}
+.elem-win{position:fixed;z-index:97;width:min(620px,calc(100vw - 28px));display:flex;flex-direction:column;gap:6px;padding:8px;
+  background:var(--WindowBackground);color:var(--WindowForeground);border:1px solid var(--WindowBorder);border-radius:8px;
+  box-shadow:0 10px 40px #000a;font:13px/1.45 system-ui,sans-serif}
 .elem-win[hidden]{display:none}
-.elem-bar{display:flex;align-items:center;gap:8px;padding:7px 10px;border-bottom:1px solid #333;cursor:grab;
-  background:linear-gradient(#1d1d1d,#161616);user-select:none}
+.elem-bar{display:flex;align-items:center;gap:8px;padding:2px 2px 6px;cursor:grab;user-select:none}
 .elem-bar:active{cursor:grabbing}
 .elem-bar b{font-weight:600;margin-right:auto}
-.elem-bar button{border:1px solid #555;background:#222;color:#eee;border-radius:6px;padding:3px 10px;cursor:pointer;font:inherit}
-.elem-bar button.primary{background:#2f6b3b;border-color:#3c8a4c}
+.elem-bar button{border:1px solid var(--WindowBorder);background:transparent;color:var(--WindowForeground);border-radius:6px;
+  padding:3px 10px;cursor:pointer;font:inherit}
+.elem-bar button.primary{border-color:#3c8a4c;color:#8f8}
 .elem-bar button:disabled{opacity:.5;cursor:default}
-.elem-editor{height:min(34vh,260px);overflow:auto}
-.elem-editor .cm-editor{height:100%;background:#101010;color:#e8e8e8}
+.elem-editor{height:min(34vh,260px);overflow:auto;border:1px solid var(--WindowBorder);border-radius:6px}
+.elem-editor .cm-editor{height:100%;background:color-mix(in srgb,var(--WindowBackground) 88%,#000);color:var(--WindowForeground)}
 .elem-editor .cm-scroller{font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
-.elem-editor .cm-gutters{background:#0d0d0d;color:#666;border-right:1px solid #222}
-.elem-foot{padding:6px 10px;border-top:1px solid #333;color:#9a9a9a;font-size:12px;white-space:pre-wrap;min-height:2.2em}
+.elem-editor .cm-gutters{background:transparent;color:color-mix(in srgb,var(--WindowForeground) 45%,transparent);border-right:1px solid var(--WindowBorder)}
+.elem-foot{padding:2px;color:color-mix(in srgb,var(--WindowForeground) 62%,transparent);font-size:12px;white-space:pre-wrap;min-height:2.2em}
 .elem-foot.err{color:#ff9a9a}
 `;
 
@@ -128,7 +133,8 @@ const mount = () => {
     else if (act === "stop") stop();
     else if (act === "close") win.hidden = true;
   });
-  openBtn.addEventListener("click", () => { win.hidden = !win.hidden; if (!win.hidden) view.focus(); });
+  const setOpen = (open) => { win.hidden = !open; openBtn.setAttribute("aria-pressed", String(open)); if (open) view.focus(); };
+  openBtn.addEventListener("click", () => setOpen(win.hidden));
 };
 
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", mount); else mount();
