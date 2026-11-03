@@ -18,7 +18,7 @@ const SERVICE_DEFAULT = "http://127.0.0.1:8461";
 const DOCS_KEY = "sp-synthdef-docs";
 const ACTIVE_KEY = "sp-synthdef-active";
 const URL_KEY = "sp-synthdef-url";
-import { runWhenReady } from "./synth-host.js";
+import { runWhenReady } from "./graphics/synth-host.js";
 
 const STYLE_ID = "gfx-synthdef-style";
 /** Bump when the pane changes shape: it is printed in the pane and in the Log, so a cached page is obvious. */
