@@ -1,4 +1,4 @@
-// ../../../../soundgineer/src/shared/params.ts
+// node_modules/soundgineer/src/shared/params.ts
 var FILTER_TYPES = ["LP 12", "LP 24", "HP 12", "HP 24", "BP 12", "BP 24", "Notch", "Comb", "Formant"];
 var SUB_SHAPES = ["Sine", "Triangle", "Saw", "Square"];
 var NOISE_TYPES = ["White", "Pink", "Sample"];
@@ -167,7 +167,7 @@ function formatValue(d, n) {
   return Math.abs(v) < 10 ? v.toFixed(2) : v.toFixed(0);
 }
 
-// ../../../../soundgineer/src/shared/messages.ts
+// node_modules/soundgineer/src/shared/messages.ts
 var MOD_SOURCES = [
   ...Array.from({ length: 6 }, (_, i) => ({ id: `env${i + 1}`, name: `Env ${i + 1}`, perVoice: true, bipolar: false })),
   ...Array.from({ length: 8 }, (_, i) => ({ id: `lfo${i + 1}`, name: `LFO ${i + 1}`, perVoice: true, bipolar: false })),
@@ -201,7 +201,7 @@ function evalLfoShape(points, phase) {
   return points[points.length - 1].y;
 }
 
-// ../../../../soundgineer/src/ui/common.ts
+// node_modules/soundgineer/src/ui/common.ts
 function el(tag, className, text) {
   const e = document.createElement(tag);
   if (className) e.className = className;
@@ -245,7 +245,7 @@ function closePopup() {
   }
 }
 
-// ../../../../soundgineer/src/ui/knob.ts
+// node_modules/soundgineer/src/ui/knob.ts
 var knobRegistry = /* @__PURE__ */ new Map();
 var Knob = class {
   constructor(engine, paramIndex2, size = 46, label) {
@@ -491,7 +491,7 @@ function animatedKnobs() {
   return [...knobRegistry.values()].filter((k) => k.animated);
 }
 
-// ../../../../soundgineer/src/ui/controls.ts
+// node_modules/soundgineer/src/ui/controls.ts
 function paramSelect(engine, id) {
   const index = paramIndex(id);
   const def = PARAMS[index];
@@ -529,7 +529,7 @@ function knobRow(engine, ids, size = 46) {
   return row;
 }
 
-// ../../../../soundgineer/src/ui/enveditor.ts
+// node_modules/soundgineer/src/ui/enveditor.ts
 function shape(t, c) {
   return Math.pow(t, Math.pow(2, c * 3));
 }
@@ -541,6 +541,12 @@ var EnvDisplay = class {
     this.canvas = el("canvas");
     this.root.appendChild(this.canvas);
     this.cx = this.canvas.getContext("2d");
+    this.canvas.style.touchAction = "none";
+    this.canvas.style.cursor = "crosshair";
+    this.canvas.addEventListener("pointerdown", this.onDown);
+    this.canvas.addEventListener("pointermove", this.onMove);
+    this.canvas.addEventListener("pointerup", this.onUp);
+    this.canvas.addEventListener("pointercancel", this.onUp);
     new ResizeObserver(() => this.resize()).observe(this.root);
     for (let e = 1; e <= 6; e++) {
       for (const f of ["delay", "attack", "hold", "decay", "sustain", "release", "atk_curve", "dec_curve", "rel_curve"]) {
@@ -555,6 +561,61 @@ var EnvDisplay = class {
   cx;
   w = 0;
   h = 0;
+  // ── SP-EXT: direct editing ─────────────────────────────────────────────────────────────────────────────
+  handles = [];
+  drag = null;
+  setValue(field, value) {
+    const i = paramIndex(`env${this.env}.${field}`);
+    const v = Math.min(1, Math.max(0, valueToNorm(PARAMS[i], value)));
+    this.engine.setParam(i, v);
+    this.draw();
+  }
+  onDown = (e) => {
+    const r = this.canvas.getBoundingClientRect();
+    const px = e.clientX - r.left;
+    const py = e.clientY - r.top;
+    let best = null;
+    let bestD = 14;
+    for (const h of this.handles) {
+      const d = Math.hypot(h.x - px, h.y - py);
+      if (d < bestD) {
+        bestD = d;
+        best = h;
+      }
+    }
+    if (!best) return;
+    this.drag = { field: best.field, kind: best.kind, grabX: px };
+    this.canvas.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  };
+  onMove = (e) => {
+    if (!this.drag) return;
+    const r = this.canvas.getBoundingClientRect();
+    const px = e.clientX - r.left;
+    const py = e.clientY - r.top;
+    if (this.drag.kind === "level") {
+      this.setValue("sustain", Math.min(1, Math.max(0, 1 - (py - 5) / (this.h - 10 || 1))));
+    } else if (this.drag.kind === "curve") {
+      const c = Math.min(1, Math.max(-1, 1 - 2 * ((py - 5) / (this.h - 10 || 1))));
+      const field = this.drag.field;
+      if (field === "attack") this.setValue("atk_curve", c);
+      else if (field === "decay") this.setValue("dec_curve", c);
+      else this.setValue("rel_curve", c);
+    } else {
+      const cur = this.v(this.drag.field);
+      const perPx = (this.v("delay") + this.v("attack") + this.v("hold") + this.v("decay") + this.v("release")) / (this.w - 8 || 1);
+      this.setValue(this.drag.field, Math.max(5e-4, cur + (px - this.drag.grabX) * perPx));
+      this.drag.grabX = px;
+    }
+    e.preventDefault();
+  };
+  onUp = (e) => {
+    this.drag = null;
+    try {
+      this.canvas.releasePointerCapture(e.pointerId);
+    } catch {
+    }
+  };
   setEnv(env) {
     this.env = env;
     this.draw();
@@ -610,6 +671,24 @@ var EnvDisplay = class {
     c.closePath();
     c.fillStyle = "#ff9a3c15";
     c.fill();
+    const susX = X(del + atk + hold + dec + susTime / 2);
+    this.handles = [
+      { field: "delay", kind: "time", x: X(del), y: Y(0) },
+      { field: "attack", kind: "time", x: X(del + atk), y: Y(1) },
+      { field: "hold", kind: "time", x: X(del + atk + hold), y: Y(1) },
+      { field: "decay", kind: "time", x: X(del + atk + hold + dec), y: Y(sus) },
+      { field: "release", kind: "time", x: X(total), y: Y(0) },
+      { field: "sustain", kind: "level", x: susX, y: Y(sus) },
+      { field: "attack", kind: "curve", x: X(del + atk / 2), y: Y(shape(0.5, ac)) },
+      { field: "decay", kind: "curve", x: X(del + atk + hold + dec / 2), y: Y(sus + (1 - sus) * (1 - shape(0.5, -dc))) },
+      { field: "release", kind: "curve", x: X(del + atk + hold + dec + susTime + rel / 2), y: Y(sus * (1 - shape(0.5, -rc))) }
+    ];
+    c.fillStyle = "#ff9a3c";
+    for (const hd of this.handles) {
+      c.beginPath();
+      c.arc(hd.x, hd.y, 3.5, 0, Math.PI * 2);
+      c.fill();
+    }
     const live = this.engine.sourceValues[this.env - 1] ?? 0;
     if (live > 1e-3) {
       c.beginPath();
@@ -622,7 +701,7 @@ var EnvDisplay = class {
   }
 };
 
-// ../../../../soundgineer/src/ui/lfoeditor.ts
+// node_modules/soundgineer/src/ui/lfoeditor.ts
 var HIT = 10;
 var LfoEditor = class {
   constructor(engine, lfo) {
@@ -823,7 +902,7 @@ var LfoEditor = class {
   }
 };
 
-// ../../../../soundgineer/src/ui/matrix.ts
+// node_modules/soundgineer/src/ui/matrix.ts
 var MODDABLE = PARAMS.map((d, i) => ({ d, i })).filter(({ d }) => d.moddable);
 function destLabel(i) {
   const d = PARAMS[i];
@@ -909,7 +988,7 @@ var ModMatrix = class {
   }
 };
 
-// ../../../../soundgineer/src/ui/fxrack.ts
+// node_modules/soundgineer/src/ui/fxrack.ts
 var FX_LABELS = {
   chorus: "CHORUS",
   phaser: "PHASER",
@@ -982,7 +1061,7 @@ var FxRack = class {
   }
 };
 
-// ../../../../soundgineer/src/shared/fft.ts
+// node_modules/soundgineer/src/shared/fft.ts
 function fft(re, im) {
   const n = re.length;
   if ((n & n - 1) !== 0) throw new Error("fft size must be a power of two");
@@ -1024,7 +1103,7 @@ function fft(re, im) {
   }
 }
 
-// ../../../../soundgineer/src/ui/scope.ts
+// node_modules/soundgineer/src/ui/scope.ts
 var Scope = class {
   constructor(engine) {
     this.engine = engine;
@@ -1137,7 +1216,7 @@ var Scope = class {
   }
 };
 
-// ../../../../soundgineer/src/ui/wt3d.ts
+// node_modules/soundgineer/src/ui/wt3d.ts
 var POINTS = 128;
 var VERT = `#version 300 es
 precision highp float;
@@ -1322,7 +1401,7 @@ var WavetableView = class {
   }
 };
 
-// ../../../../soundgineer/src/ui/keyboard.ts
+// node_modules/soundgineer/src/ui/keyboard.ts
 var KEYMAP = {
   KeyA: 0,
   KeyW: 1,
@@ -1448,24 +1527,8 @@ var Keyboard = class {
   }
 };
 
-// ../../../../soundgineer/src/ui/presets.ts
+// node_modules/soundgineer/src/ui/presets.ts
 var STORAGE_KEY = "soundgineer.presets.v1";
-var EXTERNAL = [];
-function registerFactoryPresets(list) {
-  for (const p2 of list ?? []) {
-    if (!p2 || typeof p2.name !== "string" || !p2.name) continue;
-    const at = EXTERNAL.findIndex((x) => x.name === p2.name);
-    if (at >= 0) EXTERNAL[at] = p2;
-    else EXTERNAL.push(p2);
-  }
-  return EXTERNAL.length;
-}
-function allFactoryPresets() {
-  return [...FACTORY, ...EXTERNAL];
-}
-function findFactoryPreset(name) {
-  return allFactoryPresets().find((p2) => p2.name === name);
-}
 function P(raw) {
   const out = {};
   for (const [id, v] of Object.entries(raw)) out[id] = valueToNorm(paramDef(id), v);
@@ -2633,21 +2696,22 @@ var FACTORY = [
 ];
 function readAll() {
   try {
-    const all = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
-    const byName = /* @__PURE__ */ new Map();
-    for (const p2 of all) if (p2 && typeof p2.name === "string") byName.set(p2.name, p2);
-    return [...byName.values()];
+    return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
   } catch {
     return [];
   }
 }
-function loadUserPresets() {
-  return readAll();
+function scopeOf(engine) {
+  const s = engine?.__sgrScope;
+  return typeof s === "string" && s ? s : "default";
 }
-function saveUserPresets(list) {
-  const byName = new Map(readAll().map((p2) => [p2.name, p2]));
-  for (const p2 of list) byName.set(p2.name, p2);
-  localStorage.setItem(STORAGE_KEY, JSON.stringify([...byName.values()]));
+function loadUserPresets(scope) {
+  const all = readAll();
+  return scope == null ? all : all.filter((p2) => (p2.scope ?? "default") === scope);
+}
+function saveUserPresets(list, scope) {
+  const keep = readAll().filter((p2) => !((p2.scope ?? "default") === scope && list.some((n) => n.name === p2.name)));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify([...keep, ...list]));
 }
 var PresetBrowser = class {
   constructor(engine) {
@@ -2660,10 +2724,10 @@ var PresetBrowser = class {
     save.addEventListener("click", () => {
       const name = prompt("Preset name?", "My Patch");
       if (!name) return;
-      const list = loadUserPresets().filter((p2) => p2.name !== name);
-      list.push(this.engine.toPreset(name));
-      saveUserPresets(list);
-      this.engine.__sgrPreset = `user:${name}`;
+      const scope = scopeOf(this.engine);
+      const list = loadUserPresets(scope).filter((p2) => p2.name !== name);
+      list.push({ ...this.engine.toPreset(name), scope });
+      saveUserPresets(list, scope);
       this.refresh(`user:${name}`);
     });
     const exportBtn = el("button", "hdr-btn", "EXPORT");
@@ -2680,6 +2744,7 @@ var PresetBrowser = class {
     const importBtn = el("button", "hdr-btn", "IMPORT");
     const file = el("input");
     file.type = "file";
+    file.accept = ".json";
     file.style.display = "none";
     file.addEventListener("change", async () => {
       const f = file.files?.[0];
@@ -2687,10 +2752,10 @@ var PresetBrowser = class {
       try {
         const preset = JSON.parse(await f.text());
         this.engine.loadPreset(preset);
-        const list = loadUserPresets().filter((p2) => p2.name !== preset.name);
-        list.push(preset);
-        saveUserPresets(list);
-        this.engine.__sgrPreset = `user:${preset.name}`;
+        const scope = scopeOf(this.engine);
+        const list = loadUserPresets(scope).filter((p2) => p2.name !== preset.name);
+        list.push({ ...preset, scope });
+        saveUserPresets(list, scope);
         this.refresh(`user:${preset.name}`);
       } catch (err) {
         alert(`Could not load preset: ${err}`);
@@ -2699,8 +2764,7 @@ var PresetBrowser = class {
     });
     importBtn.addEventListener("click", () => file.click());
     this.root.append(this.select, save, exportBtn, importBtn, file);
-    const cur = this.engine.__sgrPreset;
-    this.refresh(cur ?? "factory:Init");
+    this.refresh("factory:Init");
   }
   engine;
   root;
@@ -2715,30 +2779,13 @@ var PresetBrowser = class {
       fGroup.appendChild(o);
     }
     this.select.appendChild(fGroup);
-    const byCategory = /* @__PURE__ */ new Map();
-    for (const p2 of EXTERNAL) {
-      const cat = String(p2.category ?? "Factory");
-      if (!byCategory.has(cat)) byCategory.set(cat, []);
-      byCategory.get(cat).push(p2);
-    }
-    for (const [cat, list] of byCategory) {
-      const g = el("optgroup");
-      g.label = cat.charAt(0).toUpperCase() + cat.slice(1);
-      for (const p2 of list) {
-        const o = el("option", void 0, p2.name);
-        o.value = `factory:${p2.name}`;
-        g.appendChild(o);
-      }
-      this.select.appendChild(g);
-    }
-    const users = loadUserPresets();
+    const users = loadUserPresets(scopeOf(this.engine));
     if (users.length) {
       const uGroup = el("optgroup");
       uGroup.label = "User";
       for (const p2 of users) {
         const o = el("option", void 0, p2.name);
         o.value = `user:${p2.name}`;
-        o.textContent = p2.name;
         uGroup.appendChild(o);
       }
       this.select.appendChild(uGroup);
@@ -2748,15 +2795,12 @@ var PresetBrowser = class {
   load(key) {
     const [kind, ...rest] = key.split(":");
     const name = rest.join(":");
-    const preset = kind === "factory" ? findFactoryPreset(name) : readAll().find((p2) => p2.name === name);
-    if (preset) {
-      this.engine.loadPreset(preset);
-      this.engine.__sgrPreset = key;
-    }
+    const preset = kind === "factory" ? FACTORY.find((p2) => p2.name === name) : loadUserPresets(scopeOf(this.engine)).find((p2) => p2.name === name);
+    if (preset) this.engine.loadPreset(preset);
   }
 };
 
-// ../../../../soundgineer/src/ui/midi.ts
+// node_modules/soundgineer/src/ui/midi.ts
 var MACRO_CCS = [20, 21, 22, 23];
 async function initMidi(engine, onStatus) {
   if (!("requestMIDIAccess" in navigator)) {
@@ -2813,7 +2857,7 @@ function handle(engine, data) {
   }
 }
 
-// ../../../../soundgineer/src/ui/app.ts
+// node_modules/soundgineer/src/ui/app.ts
 function buildApp(engine, container) {
   engine.primeTables();
   const header = el("header");
@@ -3063,6 +3107,5 @@ function buildApp(engine, container) {
   requestAnimationFrame(tick);
 }
 export {
-  buildApp,
-  registerFactoryPresets
+  buildApp
 };
