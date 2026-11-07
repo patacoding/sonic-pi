@@ -169,14 +169,18 @@ for (const dir of [ROOT, path.join(ROOT, "build/web")]) {
   if (!runtimeFile) continue;
   const text = fs.readFileSync(runtimeFile, "utf8");
   if (text.includes("__spSilenceShim")) continue;
+  // Wrap what the module EXPORTS, not merely prepend a function: the first version left __spSilenceShim uncalled, so the app kept
+  // receiving the raw module and Stop threw "_sp_silence is not a function". The default export is the module or a promise of it.
+  if (!/export default Module;\s*$/.test(text)) continue;   // only the emscripten glue with that exact export can be wrapped
   const shim = [
     "const __spSilenceShim = (m) => {",
     '  if (!m || typeof m._sp_silence === "function" || !m._sp_stop_all) return m;',
     "  m._sp_silence = () => { m._sp_stop_all(); };",
     "  return m;",
     "};",
+    'const __spRaw = Module; export default (__spRaw && typeof __spRaw.then === "function") ? __spRaw.then(__spSilenceShim) : __spSilenceShim(__spRaw);',
   ].join("\n");
-  fs.writeFileSync(runtimeFile, shim + "\n" + text);
+  fs.writeFileSync(runtimeFile, shim + "\n" + text.replace(/export default Module;\s*$/, ""));
   console.log(`  runtime shim -> ${path.relative(ROOT, dir) || "."}/runtime/sp_runtime.js`);
 }
 for (const extra of [path.join(ROOT, "build/web/pattern")]) {
