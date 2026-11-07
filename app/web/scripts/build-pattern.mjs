@@ -178,7 +178,9 @@ for (const dir of [ROOT, path.join(ROOT, "build/web")]) {
     "  m._sp_silence = () => { m._sp_stop_all(); };",
     "  return m;",
     "};",
-    'const __spRaw = Module; export default (__spRaw && typeof __spRaw.then === "function") ? __spRaw.then(__spSilenceShim) : __spSilenceShim(__spRaw);',
+    // `export default Module` is the emscripten FACTORY, so the shim has to wrap what CALLING it returns -- wrapping the factory
+    // itself added _sp_silence to the function and left every caller with the raw module (that is why Stop still threw).
+    'export default (arg) => { const r = Module(arg); return (r && typeof r.then === "function") ? r.then(__spSilenceShim) : __spSilenceShim(r); };',
   ].join("\n");
   fs.writeFileSync(runtimeFile, shim + "\n" + text.replace(/export default Module;\s*$/, ""));
   console.log(`  runtime shim -> ${path.relative(ROOT, dir) || "."}/runtime/sp_runtime.js`);
