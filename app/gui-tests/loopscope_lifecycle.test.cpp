@@ -20,6 +20,7 @@
 
 #include <memory>
 
+#include <shared_memory.h>
 #include <shm_tap_stream.hpp>
 
 #include "model/sonicpitheme.h"
@@ -27,6 +28,7 @@
 #include "widgets/sonicpilexer.h"
 #include "widgets/sonicpiscintilla.h"
 #include "utils/framepacer.h"
+#include "pacer_by_hand.h"
 
 namespace {
 
@@ -70,14 +72,17 @@ struct Editor
     }
 };
 
-// A scope-stream slot, as the engine's shared memory holds one.
+// A scope-stream slot as the engine's shared memory holds one: the header,
+// then a ring of the native layout's frames. Zeroed, as the arena hands it
+// over.
+constexpr uint32_t kRing = clockwork::kDefaultLayout.profile.tap_ring_frames;
 struct Slot
 {
-    std::unique_ptr<shm_tap_stream> mem = std::make_unique<shm_tap_stream>();
-    Slot() { mem->state.store(0); }
-    void live() { shm_tap_stream_writer(mem.get()).activate(2); }
-    void release() { mem->state.store(0); }
-    shm_tap_stream_reader reader() const { return shm_tap_stream_reader(mem.get()); }
+    std::unique_ptr<uint8_t[]> bytes{ new uint8_t[tap_slot_bytes(kRing)]() };
+    shm_tap_stream* mem() const { return reinterpret_cast<shm_tap_stream*>(bytes.get()); }
+    void live() { shm_tap_stream_writer(mem(), kRing).activate(2); }
+    void release() { mem()->state.store(0); }
+    shm_tap_stream_reader reader() const { return shm_tap_stream_reader(mem(), kRing); }
 };
 
 const QString kCode = QStringLiteral("live_loop :t do\n  play 60\n  sleep 1\nend\n");
@@ -364,7 +369,7 @@ void writeLoudWave(Slot& s, int frames = 16384)
     for (int i = 0; i < frames; i++)
         l[(size_t)i] = r[(size_t)i] = ((i / 256) % 2) ? 0.9f : -0.9f;
     const float* chans[2] = { l.data(), r.data() };
-    shm_tap_stream_writer(s.mem.get()).write(chans, (uint32_t)frames, 0);
+    shm_tap_stream_writer(s.mem(), kRing).write(chans, (uint32_t)frames, 0);
 }
 
 QImage rendered(QWidget* w)
@@ -382,17 +387,18 @@ QImage rendered(QWidget* w)
 // Pinned so the paint can be reworked for speed without the corners changing.
 TEST_CASE("loop scope: draws only inside its rounded panel", "[loopscope]")
 {
+    HandDriven hand;   // the scope polls on the pacer's tick: ticked here, not waited for
     Editor e(kCode);
     Slot s;
     s.live();
     e.ed->setLiveLoopScope("t", 0, 10, s.reader());
-    QTest::qWait(60);
+    hand.tick();
     QWidget* w = e.scope("t");
     REQUIRE(w);
     const QImage quiet = rendered(w);   // silence: panel on the editor's colour, nothing drawn in it
 
     writeLoudWave(s);
-    QTest::qWait(60);   // a tick: the scope polls, sees new audio and repaints
+    hand.tick();   // the scope polls, sees new audio and repaints
     const QImage loud = rendered(w);
     REQUIRE(loud.size() == quiet.size());
     const int W = loud.width(), H = loud.height();

@@ -37,7 +37,10 @@ export const SUPERSONIC_CDN = "https://cdn.jsdelivr.net/npm/";
 // SuperSonic checkout beside this repository and the submodule is a pinned copy,
 // so a local run should serve what is being worked on. SUPERSONIC_DIST wins over both.
 const SUPERSONIC_DISTS = ["../../../supersonic/dist", "../external/supersonic/dist"];
-const usableDist = (dist) => fs.existsSync(path.join(dist, "supersonic.js")) && fs.existsSync(path.join(dist, "wasm/scsynth-nrt.wasm"));
+// Upstream's current source build names the realtime engine wasm/clockwork-scsynth.wasm; the npm packages this fork mirrors from
+// (dev-environment-wsl.md 2.12) still ship wasm/scsynth-nrt.wasm and the two clockwork *_bg wasm. Either layout is a usable dist.
+const usableDist = (dist) => fs.existsSync(path.join(dist, "supersonic.js")) &&
+  (fs.existsSync(path.join(dist, "wasm/clockwork-scsynth.wasm")) || fs.existsSync(path.join(dist, "wasm/scsynth-nrt.wasm")));
 
 export function supersonicDist(ROOT) {
   if (process.env.SUPERSONIC_DIST) {

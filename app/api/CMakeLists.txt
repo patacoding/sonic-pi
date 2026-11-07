@@ -59,7 +59,6 @@ set(API_SRC
 set(OSC_SRC
     ${API_ROOT}/src/osc/osc_handler.cpp
     ${API_ROOT}/src/osc/osc_sender.cpp
-    ${API_ROOT}/src/osc/tcp_osc_sender.cpp
     ${API_ROOT}/src/osc/osc_server.cpp
     ${API_ROOT}/src/osc/tcp_osc_server.cpp
     ${API_ROOT}/src/osc/udp_osc_server.cpp
@@ -160,6 +159,9 @@ target_compile_definitions(${PROJECT_NAME} PUBLIC
     _CRT_SECURE_NO_WARNINGS
     _WINSOCK_DEPRECATED_NO_WARNINGS
     WIN32_LEAN_AND_MEAN
+    # No min/max macros from windows.h: the engine's headers use std::min and
+    # std::max, and build with this themselves.
+    NOMINMAX
 )
 
 # Organize source groups (optional)

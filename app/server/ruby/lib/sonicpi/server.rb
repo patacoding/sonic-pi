@@ -30,6 +30,9 @@ module SonicPi
   class Server
     include Util
 
+    # How long a command waits for its /done (or /fail) before it gives up.
+    DONE_TIMEOUT = 5
+
     attr_accessor :current_node_id,  :debug, :mouse_y, :mouse_x, :control_delta, :scsynth_info
 
     attr_reader :version
@@ -119,10 +122,7 @@ module SonicPi
       @CURRENT_SYNC_ID = Counter.new(0)
       @BUFFER_ALLOCATOR = Allocator.new(num_buffers_for_current_os)
 
-      # BOOT_LOAD_TIMEOUT, not the default: this is the first /d_loadDir of the session, sent to
-      # an engine that may still be opening its audio device. Measured twice failing a 5 second
-      # window here, each time taking the whole server down with it (see the note on the constant).
-      load_synthdefs(Paths.synthdef_path, timeout: BOOT_LOAD_TIMEOUT)
+      load_synthdefs(Paths.synthdef_path)
       fetch_scsynth_info!
 
       message "info        - Initialising comms... #{msg_queue}" if @debug_mode
@@ -241,19 +241,16 @@ module SonicPi
       end
     end
 
-    # `timeout:` is passed straight through to the /done wait. At boot - and after a cold swap, when
-    # the engine is as new as it is at boot - callers pass BOOT_LOAD_TIMEOUT: see the note there for
-    # the measurement that made this necessary.
-    def load_synthdefs(path, timeout: DONE_SYNC_TIMEOUT)
+    def load_synthdefs(path)
       info "Loading synthdefs from path: #{path}" if @debug_mode
-      with_done_sync([@osc_path_d_loaddir], timeout: timeout) do
+      with_done_sync [@osc_path_d_loaddir] do
         osc @osc_path_d_loaddir, path.to_s
       end
     end
 
-    def load_synthdef(path, timeout: DONE_SYNC_TIMEOUT)
+    def load_synthdef(path)
       info "Loading synthdef from path: #{path}" if @debug_mode
-      with_done_sync([@osc_path_d_load], timeout: timeout) do
+      with_done_sync [@osc_path_d_load] do
         osc @osc_path_d_load, path.to_s
       end
     end
@@ -597,9 +594,15 @@ module SonicPi
         (args[0] == @osc_path_b_allocread ) && (args[2] == buffer_id)
       end
       buffer_info(buffer_id) do
-        with_done_sync [@osc_path_b_allocread, buffer_id], detect_fail do
-          osc @osc_path_b_allocread, buffer_id, path, start, n_frames
+        begin
+          res = with_done_sync [@osc_path_b_allocread, buffer_id], detect_fail do
+            osc @osc_path_b_allocread, buffer_id, path, start, n_frames
+          end
+          why = res.message if res.is_a?(Exception)
+        rescue PromiseTimeoutError
+          why = "It did not finish loading within #{DONE_TIMEOUT} seconds."
         end
+        why ? RuntimeError.new("Could not load sample:\n  #{unify_tilde_dir(path).inspect}\n#{why}") : res
       end
     end
 
@@ -667,8 +670,14 @@ module SonicPi
       end
 
       if blk
+        # Whatever ends the block is the buffer's answer: a thread that died
+        # here would leave every reader of the buffer waiting for good.
         Thread.new do
-          res = blk.call
+          res = begin
+            blk.call
+          rescue StandardError => e
+            e
+          end
           if res.is_a? Exception
             prom.deliver! res
             @osc_events.rm_handler @osc_path_b_info, handle_key
@@ -682,25 +691,7 @@ module SonicPi
       LazyBuffer.new(self, id, prom)
     end
 
-    # How long to wait for a /done reply, and how long the BOOT-time loads may take.
-    #
-    # Why two numbers: a cold engine can miss a 5 second window entirely. A /done reply has to come
-    # back from an engine that is opening its audio device for the first time, while a virus scanner
-    # walks a freshly installed tree - and on Windows that killed the whole server at boot, measured
-    # twice (2026-10-01, both times loading the built-in synthdefs):
-    #
-    #     Promise timed out after 5 seconds.
-    #       ... server.rb:224 in 'load_synthdefs'
-    #       ... server.rb:110 in 'Server#initialize'
-    #       ... studio.rb:146 in 'init_scsynth'
-    #
-    # Promise#get RAISES on timeout (promise.rb), so the exception travelled out of the boot path and
-    # the daemon shut the session down. Waiting longer is cheap; dying at boot is not. These are only
-    # defaults - a caller that cannot afford to wait passes its own timeout.
-    DONE_SYNC_TIMEOUT = 5
-    BOOT_LOAD_TIMEOUT = 60
-
-    def with_done_sync(matchers, detect_fail = nil, timeout: DONE_SYNC_TIMEOUT, &block)
+    def with_done_sync(matchers, detect_fail = nil, &block)
       prom = Promise.new
       handle = @osc_events.gensym("/sonicpi/server")
       fail_handle = detect_fail ? @osc_events.gensym("/sonicpi/server/fail") : nil
@@ -739,7 +730,13 @@ module SonicPi
         end
       end
       res = block.yield
-      pres = prom.get(timeout)
+      begin
+        pres = prom.get(DONE_TIMEOUT)
+      rescue PromiseTimeoutError
+        @osc_events.rm_handler(@osc_path_done, handle)
+        @osc_events.rm_handler("/fail", fail_handle) if fail_handle
+        raise
+      end
       return pres if pres.is_a? Exception
       res
     end
